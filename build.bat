@@ -44,7 +44,7 @@ echo.
 echo === Compilation de %NAME% ===
 echo.
 
-pyinstaller ^
+python -m PyInstaller ^
     --onefile ^
     --windowed ^
     --name "%NAME%" ^
