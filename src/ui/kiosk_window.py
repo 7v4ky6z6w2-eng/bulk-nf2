@@ -32,13 +32,13 @@ from PySide6.QtGui import (
     QKeySequence,
     QPainter,
     QPixmap,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
     QLineEdit,
     QMainWindow,
-    QShortcut,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
