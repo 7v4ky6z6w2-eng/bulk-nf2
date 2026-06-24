@@ -21,13 +21,18 @@ class Article:
     prix_vente_ht: float
 
 
-# Recherche par code-barres OU référence article (REF_ART = SKU WooCommerce).
+# Recherche d'un article à partir du code scanné :
+#   1) on cherche d'abord par référence article (REF_ART = SKU WooCommerce) ;
+#   2) sinon, on cherche le code dans la table des codes-barres équivalents
+#      EQUIV_CBARRES (là où le logiciel Netfact enregistre les codes scannés),
+#      puis on remonte à l'article par REF_ART.
 # On ignore les articles « en sommeil » (désactivés).
 _LOOKUP_SQL = """
-SELECT FIRST 1 DESIGNATION, PRIXVENTEHT, REF_ART
-FROM ARTICLE
-WHERE (CODE_BARRES = ? OR CODE_BARRE = ? OR REF_ART = ?)
-  AND (EN_SOMMEIL = 0 OR EN_SOMMEIL IS NULL)
+SELECT FIRST 1 A.DESIGNATION, A.PRIXVENTEHT, A.REF_ART
+FROM ARTICLE A
+WHERE (A.EN_SOMMEIL = 0 OR A.EN_SOMMEIL IS NULL)
+  AND ( A.REF_ART = ?
+     OR A.REF_ART IN (SELECT E.REF_ART FROM EQUIV_CBARRES E WHERE E.CODE_BARRES = ?) )
 """
 
 
@@ -79,7 +84,7 @@ class Database:
         def _run() -> Optional[Article]:
             con = self._ensure()
             cur = con.cursor()
-            cur.execute(_LOOKUP_SQL, (code, code, code))
+            cur.execute(_LOOKUP_SQL, (code, code))
             row = cur.fetchone()
             cur.close()
             if row is None:

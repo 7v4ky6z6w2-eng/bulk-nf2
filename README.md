@@ -9,7 +9,7 @@ Kiosque d'affichage de prix par code-barres pour les magasins utilisant le logic
 L'application est conçue pour fonctionner sur un écran tactile ou un simple moniteur en libre-service. Elle :
 
 - se connecte en réseau local à la base de données **Firebird 2.5** de Netfact2 ;
-- recherche l'article par **code-barres** (champ `CODE_BARRES` ou `CODE_BARRE`) ou par **référence article** (`REF_ART`) ;
+- recherche l'article par **référence article** (`REF_ART`) ; si rien ne correspond, recherche le code scanné dans la table des **codes-barres équivalents** (`EQUIV_CBARRES`, là où Netfact enregistre les codes-barres) puis remonte à l'article ;
 - affiche en plein écran le **nom** et le **prix** de l'article en quelques dixièmes de seconde ;
 - télécharge et met en cache la **photo produit** depuis WooCommerce (optionnel) ;
 - revient automatiquement à l'écran d'accueil après quelques secondes d'inactivité ;
