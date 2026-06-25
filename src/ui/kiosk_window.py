@@ -309,18 +309,22 @@ class _LookupWorker(QObject):
     # emits (scan_id, article_or_None, db_error_or_None)
     finished = Signal(str, object, object)
 
-    def __init__(self, db: Database, code: str, scan_id: str):
+    def __init__(self, cfg, code: str, scan_id: str):
         super().__init__()
-        self._db = db
+        self._cfg = cfg   # FirebirdConfig — create a fresh connection per thread
         self._code = code
         self._scan_id = scan_id
 
     def run(self) -> None:
+        from database import Database
+        db = Database(self._cfg)
         try:
-            article = self._db.lookup_article(self._code)
+            article = db.lookup_article(self._code)
             self.finished.emit(self._scan_id, article, None)
         except Exception as exc:
             self.finished.emit(self._scan_id, None, exc)
+        finally:
+            db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -780,19 +784,20 @@ class KioskWindow(QMainWindow):
         if not code:
             return
 
-        # Nouveau scan : annule tout ce qui est en cours et revient à l'écran
-        # de repos immédiatement — l'utilisateur voit la réponse instantanée.
         self._idle_timer.stop()
-        scan_id = str(uuid.uuid4())
-        self._current_scan_id = scan_id
-        self._show_idle()
 
         # Abandon de l'éventuel lookup précédent
         if self._lookup_thread is not None and self._lookup_thread.isRunning():
             self._lookup_thread.quit()
 
+        scan_id = str(uuid.uuid4())
+        self._current_scan_id = scan_id
+        # Go back to idle screen WITHOUT calling _show_idle() — that would reset scan_id to None
+        self._stack.setCurrentIndex(0)
+        self._focus_barcode()
+
         thread = QThread(self)
-        worker = _LookupWorker(self._db, code, scan_id)
+        worker = _LookupWorker(self._cfg.firebird, code, scan_id)
         worker.moveToThread(thread)
         worker.finished.connect(self._on_lookup_done)
         thread.started.connect(worker.run)
