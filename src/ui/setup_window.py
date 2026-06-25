@@ -160,7 +160,7 @@ class SetupDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Champs manquants",
-                "Veuillez renseigner le serveur, le chemin de la base, "
+                "Veuillez renseigner le chemin de la base, "
                 "l'utilisateur et le mot de passe.",
             )
             return

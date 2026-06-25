@@ -87,7 +87,7 @@ class AppConfig:
     def is_complete(self) -> bool:
         """Vrai si les informations minimales de connexion à la base sont présentes."""
         fb = self.firebird
-        return bool(fb.host and fb.database and fb.user and fb.password)
+        return bool(fb.database and fb.user and fb.password)
 
 
 # --- Lecture / écriture ----------------------------------------------------
