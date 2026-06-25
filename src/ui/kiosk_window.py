@@ -149,32 +149,31 @@ _LOGO_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="53 16 100 116">
 </svg>"""
 
 
-def _make_logo_pixmap(size: int = 44) -> QPixmap:
-    """Lime rounded-square with the Prime Office icon in ink color."""
-    pm = QPixmap(size, size)
+def _make_logo_pixmap(size: int = 80) -> QPixmap:
+    """Lime rounded-square with the Prime Office icon — rendered at 4× for sharpness."""
+    render = size * 4  # paint at 4× then scale down → crisp on any display
+    pm = QPixmap(render, render)
     pm.fill(Qt.transparent)
     painter = QPainter(pm)
     painter.setRenderHint(QPainter.Antialiasing)
-    # lime rounded background (same proportions as the website logo-mark)
-    radius = size * 0.26
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    radius = render * 0.26
     bg_path = QPainterPath()
-    bg_path.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
+    bg_path.addRoundedRect(QRectF(0, 0, render, render), radius, radius)
     painter.fillPath(bg_path, QColor(_C_LIME))
-    # SVG icon
     if _HAS_SVG:
         renderer = QSvgRenderer(_QByteArray(_LOGO_SVG))
-        pad = size * 0.12
-        renderer.render(painter, QRectF(pad, pad, size - 2 * pad, size - 2 * pad))
+        pad = render * 0.12
+        renderer.render(painter, QRectF(pad, pad, render - 2 * pad, render - 2 * pad))
     else:
-        # Fallback: "PO" text
         painter.setPen(QColor("#160B2E"))
         f = QFont(_FONT_HEADING)
-        f.setPixelSize(int(size * 0.38))
+        f.setPixelSize(int(render * 0.38))
         f.setWeight(QFont.Bold)
         painter.setFont(f)
         painter.drawText(pm.rect(), Qt.AlignCenter, "PO")
     painter.end()
-    return pm
+    return pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
 # ---------------------------------------------------------------------------
@@ -248,9 +247,9 @@ QLabel#error {{
     font-weight: 600;
 }}
 QLabel#notFound {{
-    color: {_C_LIME};
+    color: #FF2222;
     font-size: {_SZ_ERROR}px;
-    font-weight: 600;
+    font-weight: 700;
 }}
 QFrame#divider {{
     background-color: {_C_LINE};
@@ -303,7 +302,29 @@ def _load_placeholder() -> QPixmap:
 
 
 # ---------------------------------------------------------------------------
-# Worker de chargement d'image
+# Worker — DB lookup (async so UI never freezes between scans)
+# ---------------------------------------------------------------------------
+
+class _LookupWorker(QObject):
+    # emits (scan_id, article_or_None, db_error_or_None)
+    finished = Signal(str, object, object)
+
+    def __init__(self, db: Database, code: str, scan_id: str):
+        super().__init__()
+        self._db = db
+        self._code = code
+        self._scan_id = scan_id
+
+    def run(self) -> None:
+        try:
+            article = self._db.lookup_article(self._code)
+            self.finished.emit(self._scan_id, article, None)
+        except Exception as exc:
+            self.finished.emit(self._scan_id, None, exc)
+
+
+# ---------------------------------------------------------------------------
+# Worker — image loading
 # ---------------------------------------------------------------------------
 
 class _ImageWorker(QObject):
@@ -327,40 +348,39 @@ class _ImageWorker(QObject):
 class _BrandBar(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setFixedHeight(68)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(40, 0, 40, 0)
-        layout.setSpacing(14)
+        self.setFixedHeight(130)
 
-        # Logo mark
+        # Outer HBox centres the logo column
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 12, 0, 12)
+
+        outer.addStretch()
+
+        col = QWidget()
+        vl = QVBoxLayout(col)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(6)
+        vl.setAlignment(Qt.AlignHCenter)
+
+        # Logo mark — big and sharp
         logo_lbl = QLabel()
-        logo_lbl.setFixedSize(44, 44)
-        logo_lbl.setPixmap(_make_logo_pixmap(44))
-        layout.addWidget(logo_lbl)
+        logo_lbl.setAlignment(Qt.AlignCenter)
+        logo_lbl.setFixedSize(80, 80)
+        logo_lbl.setPixmap(_make_logo_pixmap(80))
+        vl.addWidget(logo_lbl, alignment=Qt.AlignHCenter)
 
-        # Name + tagline stacked
-        name_col = QWidget()
-        name_vl = QVBoxLayout(name_col)
-        name_vl.setContentsMargins(0, 0, 0, 0)
-        name_vl.setSpacing(1)
-
+        # "PRIME OFFICE" under the logo
         lbl = QLabel("PRIME OFFICE")
         lbl.setObjectName("brand")
         f = QFont(_FONT_HEADING)
-        f.setPixelSize(_SZ_BRAND)
+        f.setPixelSize(22)
         f.setWeight(QFont.Bold)
         lbl.setFont(f)
-        name_vl.addWidget(lbl)
+        lbl.setAlignment(Qt.AlignCenter)
+        vl.addWidget(lbl, alignment=Qt.AlignHCenter)
 
-        tagline = QLabel("Oran · Algérie")
-        tagline.setObjectName("scanHint")
-        f2 = QFont(_FONT_BODY)
-        f2.setPixelSize(12)
-        tagline.setFont(f2)
-        name_vl.addWidget(tagline)
-
-        layout.addWidget(name_col)
-        layout.addStretch()
+        outer.addWidget(col)
+        outer.addStretch()
 
     def paintEvent(self, event):  # type: ignore[override]
         painter = QPainter(self)
@@ -658,10 +678,11 @@ class KioskWindow(QMainWindow):
         self._db = db
         self._woo = woo
 
-        # Identifiant du scan en cours (pour ignorer les images en retard)
+        # Identifiant du scan en cours (pour ignorer les résultats en retard)
         self._current_scan_id: Optional[str] = None
 
-        # Thread de chargement d'image
+        # Threads secondaires
+        self._lookup_thread: Optional[QThread] = None
         self._img_thread: Optional[QThread] = None
 
         # --- Fenêtre sans décoration
@@ -759,16 +780,33 @@ class KioskWindow(QMainWindow):
         if not code:
             return
 
-        # Annule la minuterie en cours (nouveau scan repart de zéro)
+        # Nouveau scan : annule tout ce qui est en cours et revient à l'écran
+        # de repos immédiatement — l'utilisateur voit la réponse instantanée.
         self._idle_timer.stop()
-
-        # Identifiant unique pour ce scan (protège contre les images en retard)
         scan_id = str(uuid.uuid4())
         self._current_scan_id = scan_id
+        self._show_idle()
 
-        try:
-            article = self._db.lookup_article(code)
-        except DatabaseError:
+        # Abandon de l'éventuel lookup précédent
+        if self._lookup_thread is not None and self._lookup_thread.isRunning():
+            self._lookup_thread.quit()
+
+        thread = QThread(self)
+        worker = _LookupWorker(self._db, code, scan_id)
+        worker.moveToThread(thread)
+        worker.finished.connect(self._on_lookup_done)
+        thread.started.connect(worker.run)
+        thread.finished.connect(thread.deleteLater)
+        self._lookup_thread = thread
+        self._lookup_worker = worker  # type: ignore[attr-defined]
+        thread.start()
+
+    def _on_lookup_done(self, scan_id: str, article: object, error: object) -> None:
+        """Appelé dans le thread principal quand la requête DB répond."""
+        if scan_id != self._current_scan_id:
+            return  # scan annulé par un nouveau code
+
+        if error is not None:
             self._result_screen.show_db_error()
             self._show_result()
             return
@@ -778,16 +816,15 @@ class KioskWindow(QMainWindow):
             self._show_result()
             return
 
-        # Article trouvé : affichage immédiat nom + prix
+        from database import Article as _Article
+        art: _Article = article  # type: ignore[assignment]
         self._result_screen.show_article(
-            article.designation,
-            i18n.format_price(article.prix_vente_ht),
-            article.ref_art,
+            art.designation,
+            i18n.format_price(art.prix_vente_ht),
+            art.ref_art,
         )
         self._show_result()
-
-        # Chargement asynchrone de l'image
-        self._start_image_fetch(article.ref_art, scan_id)
+        self._start_image_fetch(art.ref_art, scan_id)
 
     # --- Chargement asynchrone de l'image ----------------------------------
 
