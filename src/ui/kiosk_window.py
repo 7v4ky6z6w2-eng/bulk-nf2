@@ -39,7 +39,14 @@ from PySide6.QtGui import (
     QPixmap,
     QRadialGradient,
     QShortcut,
+    QTransform,
 )
+try:
+    from PySide6.QtSvg import QSvgRenderer
+    from PySide6.QtCore import QByteArray as _QByteArray
+    _HAS_SVG = True
+except ImportError:
+    _HAS_SVG = False
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -94,6 +101,81 @@ _SZ_PRICE    = 80
 _SZ_CURRENCY = 36
 _SZ_ERROR    = 30
 _SZ_REF      = 16
+
+# ---------------------------------------------------------------------------
+# Prime Office logo SVG (icon paths, ink color — rendered on lime background)
+# ---------------------------------------------------------------------------
+
+_LOGO_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="53 16 100 116">
+  <g transform="scale(1,-1) translate(0,-148)">
+    <path fill="#160B2E" d="M 54.695,16.887 C 54.391,17.047 54.031,17.431 53.863,17.743
+      C 53.567,18.295 53.567,20.375 53.567,73.999 C 53.551,125.031 53.583,129.719
+      53.831,130.247 C 53.983,130.559 54.327,130.975 54.607,131.175
+      C 55.103,131.535 55.287,131.551 59.695,131.607 C 65.303,131.671 65.815,131.623
+      66.607,130.879 L 67.223,130.327 L 67.255,74.279
+      C 67.287,23.871 67.271,18.175 67.039,17.727 C 66.911,17.447 66.559,17.087
+      66.295,16.903 C 65.831,16.607 65.487,16.567 60.519,16.567
+      C 55.687,16.567 55.175,16.607 54.695,16.887 Z"/>
+    <path fill="#160B2E" fill-rule="evenodd" d="M 107.735,16.903
+      C 100.663,17.679 94.751,19.767 89.239,23.439 C 79.983,29.599 73.991,39.335
+      72.519,50.575 C 72.191,53.087 72.191,57.711 72.519,60.223
+      C 74.007,71.559 80.119,81.399 89.551,87.639 C 95.615,91.639 102.631,93.895
+      109.935,94.159 C 122.215,94.623 134.287,89.127 141.831,79.655
+      C 144.231,76.647 146.735,72.207 147.959,68.799 C 150.591,61.431 151.023,53.223
+      149.151,45.935 C 148.071,41.679 146.271,37.623 143.871,34.055
+      C 142.263,31.631 141.503,30.711 139.479,28.607 C 133.655,22.543 125.607,18.455
+      116.999,17.167 C 114.847,16.839 109.631,16.703 107.735,16.903 Z
+      M 108.591,30.807 C 106.671,31.055 103.975,31.751 102.151,32.479
+      C 98.623,33.903 96.063,35.607 93.359,38.335 C 90.015,41.719 87.847,45.807
+      86.807,50.751 C 86.295,53.175 86.295,57.311 86.807,59.911
+      C 88.591,68.911 94.783,76.063 103.231,78.879 C 106.255,79.887 107.367,80.055
+      111.255,80.055 C 114.303,80.055 114.935,80.023 116.439,79.671
+      C 127.079,77.287 134.695,68.863 135.991,58.039 C 136.687,52.111 134.943,45.687
+      131.303,40.823 C 127.559,35.807 122.167,32.399 116.007,31.151
+      C 114.007,30.759 110.367,30.575 108.591,30.807 Z"/>
+    <path fill="#160B2E" d="M 146.383,81.759 C 143.567,85.135 139.303,89.191
+      136.567,91.063 L 135.727,91.623 L 135.527,94.023
+      C 135.231,97.767 134.247,101.527 132.895,104.223
+      C 130.807,108.415 126.783,112.183 122.087,114.391
+      C 119.207,115.743 115.711,116.719 112.615,117.055
+      C 111.591,117.167 104.007,117.215 91.639,117.215 H 72.271 V 123.927 V 130.631
+      H 92.751 C 112.103,130.631 113.359,130.615 115.399,130.311
+      C 121.751,129.367 128.191,126.983 132.943,123.791
+      C 141.599,117.983 146.799,109.783 148.671,99.007
+      C 149.463,94.375 149.415,88.199 148.551,83.383
+      C 148.143,80.999 147.959,80.303 147.759,80.303
+      C 147.663,80.303 147.047,80.967 146.383,81.759 Z"/>
+  </g>
+</svg>"""
+
+
+def _make_logo_pixmap(size: int = 44) -> QPixmap:
+    """Lime rounded-square with the Prime Office icon in ink color."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    # lime rounded background (same proportions as the website logo-mark)
+    radius = size * 0.26
+    bg_path = QPainterPath()
+    bg_path.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
+    painter.fillPath(bg_path, QColor(_C_LIME))
+    # SVG icon
+    if _HAS_SVG:
+        renderer = QSvgRenderer(_QByteArray(_LOGO_SVG))
+        pad = size * 0.12
+        renderer.render(painter, QRectF(pad, pad, size - 2 * pad, size - 2 * pad))
+    else:
+        # Fallback: "PO" text
+        painter.setPen(QColor("#160B2E"))
+        f = QFont(_FONT_HEADING)
+        f.setPixelSize(int(size * 0.38))
+        f.setWeight(QFont.Bold)
+        painter.setFont(f)
+        painter.drawText(pm.rect(), Qt.AlignCenter, "PO")
+    painter.end()
+    return pm
+
 
 # ---------------------------------------------------------------------------
 # Font helpers — tries Unbounded/Rubik (Google Fonts), falls back gracefully
@@ -245,9 +327,22 @@ class _ImageWorker(QObject):
 class _BrandBar(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setFixedHeight(64)
+        self.setFixedHeight(68)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(40, 0, 40, 0)
+        layout.setSpacing(14)
+
+        # Logo mark
+        logo_lbl = QLabel()
+        logo_lbl.setFixedSize(44, 44)
+        logo_lbl.setPixmap(_make_logo_pixmap(44))
+        layout.addWidget(logo_lbl)
+
+        # Name + tagline stacked
+        name_col = QWidget()
+        name_vl = QVBoxLayout(name_col)
+        name_vl.setContentsMargins(0, 0, 0, 0)
+        name_vl.setSpacing(1)
 
         lbl = QLabel("PRIME OFFICE")
         lbl.setObjectName("brand")
@@ -255,15 +350,17 @@ class _BrandBar(QWidget):
         f.setPixelSize(_SZ_BRAND)
         f.setWeight(QFont.Bold)
         lbl.setFont(f)
-        layout.addWidget(lbl)
-        layout.addStretch()
+        name_vl.addWidget(lbl)
 
         tagline = QLabel("Oran · Algérie")
         tagline.setObjectName("scanHint")
         f2 = QFont(_FONT_BODY)
-        f2.setPixelSize(14)
+        f2.setPixelSize(12)
         tagline.setFont(f2)
-        layout.addWidget(tagline)
+        name_vl.addWidget(tagline)
+
+        layout.addWidget(name_col)
+        layout.addStretch()
 
     def paintEvent(self, event):  # type: ignore[override]
         painter = QPainter(self)
