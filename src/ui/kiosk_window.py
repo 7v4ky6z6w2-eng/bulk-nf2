@@ -28,6 +28,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
     QFontDatabase,
@@ -50,6 +51,7 @@ except ImportError:
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -74,36 +76,37 @@ _ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 _PLACEHOLDER_PATH = os.path.join(_ASSETS_DIR, "placeholder.png")
 
 # ---------------------------------------------------------------------------
-# Prime Office design tokens (dark theme)
+# Prime Office design tokens — dark theme matches primedeloffice.dz
 # ---------------------------------------------------------------------------
 
-_C_BG        = "#170D38"   # deep purple background
-_C_SURFACE   = "#241551"   # card/surface
-_C_SURFACE2  = "#2D1B60"   # surface variant
+_C_BG        = "#0E0820"   # very deep dark base
+_C_BG_MID    = "#170D38"   # mid bg
+_C_SURFACE   = "#1D1148"   # card surface
+_C_SURFACE2  = "#281760"   # surface variant
 _C_TEXT      = "#F1EDFB"   # primary text
-_C_MUTED     = "#ABA1CB"   # secondary text
+_C_MUTED     = "#9B91BF"   # secondary / muted text
 _C_LIME      = "#C6F432"   # brand accent — price, highlights
 _C_LIME_DARK = "#9CCB14"
 _C_VIOLET    = "#5B2EE5"   # secondary accent
-_C_LINE      = "#3F2F6C"   # borders
+_C_PURPLE    = "#7A4FFF"   # bright purple glow
+_C_LINE      = "#2A1A5C"   # borders / dividers
 _C_DANGER    = "#D63C5E"   # errors
 
-# Dimensions image produit
-_IMAGE_MAX_W = 380
-_IMAGE_MAX_H = 380
+# Image dimensions
+_IMAGE_MAX_W = 240
+_IMAGE_MAX_H = 240
 
-# Tailles de police (px)
-_SZ_BRAND    = 18
-_SZ_PROMPT_FR = 34
-_SZ_PROMPT_AR = 42
-_SZ_DESG     = 38
-_SZ_PRICE    = 80
-_SZ_CURRENCY = 36
-_SZ_ERROR    = 30
-_SZ_REF      = 16
+# Font sizes (px)
+_SZ_BRAND     = 16
+_SZ_PROMPT_FR = 38
+_SZ_PROMPT_AR = 46
+_SZ_DESG      = 36
+_SZ_PRICE     = 104
+_SZ_ERROR     = 32
+_SZ_REF       = 14
 
 # ---------------------------------------------------------------------------
-# Prime Office logo SVG (icon paths, ink color — rendered on lime background)
+# Prime Office logo SVG (paths from the website — ink color on lime bg)
 # ---------------------------------------------------------------------------
 
 _LOGO_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="53 16 100 116">
@@ -149,35 +152,43 @@ _LOGO_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="53 16 100 116">
 </svg>"""
 
 
-def _make_logo_pixmap(size: int = 80) -> QPixmap:
-    """Lime rounded-square with the Prime Office icon — rendered at 4× for sharpness."""
-    render = size * 4  # paint at 4× then scale down → crisp on any display
-    pm = QPixmap(render, render)
+def _make_logo_pixmap(size: int = 44) -> QPixmap:
+    """Lime rounded-square with Prime Office icon — rendered at 6× for crispness."""
+    rs = size * 6  # oversample 6×, scale down → crisp on any display
+    pm = QPixmap(rs, rs)
     pm.fill(Qt.transparent)
     painter = QPainter(pm)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setRenderHint(QPainter.SmoothPixmapTransform)
-    radius = render * 0.26
+
+    radius = rs * 0.22
     bg_path = QPainterPath()
-    bg_path.addRoundedRect(QRectF(0, 0, render, render), radius, radius)
-    painter.fillPath(bg_path, QColor(_C_LIME))
+    bg_path.addRoundedRect(QRectF(0, 0, rs, rs), radius, radius)
+
+    # Lime gradient background (top → lime-dark)
+    bg_grad = QLinearGradient(0, 0, 0, rs)
+    bg_grad.setColorAt(0.0, QColor(_C_LIME))
+    bg_grad.setColorAt(1.0, QColor(_C_LIME_DARK))
+    painter.fillPath(bg_path, QBrush(bg_grad))
+
     if _HAS_SVG:
         renderer = QSvgRenderer(_QByteArray(_LOGO_SVG))
-        pad = render * 0.12
-        renderer.render(painter, QRectF(pad, pad, render - 2 * pad, render - 2 * pad))
+        pad = rs * 0.11
+        renderer.render(painter, QRectF(pad, pad, rs - 2 * pad, rs - 2 * pad))
     else:
         painter.setPen(QColor("#160B2E"))
         f = QFont(_FONT_HEADING)
-        f.setPixelSize(int(render * 0.38))
+        f.setPixelSize(int(rs * 0.36))
         f.setWeight(QFont.Bold)
         painter.setFont(f)
-        painter.drawText(pm.rect(), Qt.AlignCenter, "PO")
+        painter.drawText(QRectF(0, 0, rs, rs), Qt.AlignCenter, "PO")
+
     painter.end()
     return pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
 # ---------------------------------------------------------------------------
-# Font helpers — tries Unbounded/Rubik (Google Fonts), falls back gracefully
+# Font families — tries Unbounded/Rubik (Google Fonts), falls back gracefully
 # ---------------------------------------------------------------------------
 
 def _font(family: str, px: int, weight: QFont.Weight = QFont.Normal) -> QFont:
@@ -204,10 +215,23 @@ QWidget {{
     color: {_C_TEXT};
 }}
 QLabel#brand {{
-    color: {_C_LIME};
+    color: {_C_TEXT};
     font-size: {_SZ_BRAND}px;
     font-weight: 700;
     letter-spacing: 3px;
+}}
+QLabel#brandSub {{
+    color: {_C_LIME};
+    font-size: 10px;
+    letter-spacing: 3px;
+}}
+QLabel#appTag {{
+    color: {_C_MUTED};
+    font-size: 10px;
+    letter-spacing: 2px;
+    border: 1px solid {_C_LINE};
+    border-radius: 12px;
+    padding: 5px 14px;
 }}
 QLabel#promptFr {{
     color: {_C_TEXT};
@@ -220,9 +244,9 @@ QLabel#promptAr {{
 }}
 QLabel#scanHint {{
     color: {_C_MUTED};
-    font-size: 16px;
+    font-size: 13px;
     font-weight: 400;
-    letter-spacing: 1px;
+    letter-spacing: 3px;
 }}
 QLabel#designation {{
     color: {_C_TEXT};
@@ -237,6 +261,7 @@ QLabel#price {{
 QLabel#ref {{
     color: {_C_MUTED};
     font-size: {_SZ_REF}px;
+    letter-spacing: 1px;
 }}
 QLabel#image {{
     background-color: transparent;
@@ -247,7 +272,7 @@ QLabel#error {{
     font-weight: 600;
 }}
 QLabel#notFound {{
-    color: #FF2222;
+    color: #FF3355;
     font-size: {_SZ_ERROR}px;
     font-weight: 700;
 }}
@@ -258,7 +283,7 @@ QFrame#divider {{
 }}
 QFrame#card {{
     background-color: {_C_SURFACE};
-    border-radius: 20px;
+    border-radius: 24px;
     border: 1px solid {_C_LINE};
 }}
 """
@@ -272,20 +297,17 @@ def _make_placeholder_pixmap(w: int = _IMAGE_MAX_W, h: int = _IMAGE_MAX_H) -> QP
     pm.fill(Qt.transparent)
     painter = QPainter(pm)
     painter.setRenderHint(QPainter.Antialiasing)
-    # rounded rect fill
     path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, w, h), 16, 16)
+    path.addRoundedRect(QRectF(0, 0, w, h), 14, 14)
     painter.fillPath(path, QColor(_C_SURFACE2))
-    # dashed border
     pen = QPen(QColor(_C_LINE))
     pen.setWidth(2)
     pen.setStyle(Qt.DashLine)
     painter.setPen(pen)
     painter.drawPath(path)
-    # label
     painter.setPen(QColor(_C_MUTED))
     f = QFont(_FONT_BODY)
-    f.setPixelSize(18)
+    f.setPixelSize(15)
     painter.setFont(f)
     painter.drawText(pm.rect(), Qt.AlignCenter, "Image\nnon disponible")
     painter.end()
@@ -302,7 +324,7 @@ def _load_placeholder() -> QPixmap:
 
 
 # ---------------------------------------------------------------------------
-# Worker — DB lookup (async so UI never freezes between scans)
+# Worker — DB lookup (async, fresh connection per thread — fdb is not thread-safe)
 # ---------------------------------------------------------------------------
 
 class _LookupWorker(QObject):
@@ -346,55 +368,77 @@ class _ImageWorker(QObject):
 
 
 # ---------------------------------------------------------------------------
-# Brand header bar (common to both screens)
+# Brand header bar — horizontal: [logo] [PRIME OFFICE / city]  →  [app tag]
 # ---------------------------------------------------------------------------
 
 class _BrandBar(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setFixedHeight(130)
+        self.setFixedHeight(72)
 
-        # Outer HBox centres the logo column
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(0, 12, 0, 12)
+        hl = QHBoxLayout(self)
+        hl.setContentsMargins(28, 0, 28, 2)
+        hl.setSpacing(12)
+        hl.setAlignment(Qt.AlignVCenter)
 
-        outer.addStretch()
-
-        col = QWidget()
-        vl = QVBoxLayout(col)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(6)
-        vl.setAlignment(Qt.AlignHCenter)
-
-        # Logo mark — big and sharp
+        # Logo mark (44×44, lime rounded square)
         logo_lbl = QLabel()
         logo_lbl.setAlignment(Qt.AlignCenter)
-        logo_lbl.setFixedSize(80, 80)
-        logo_lbl.setPixmap(_make_logo_pixmap(80))
-        vl.addWidget(logo_lbl, alignment=Qt.AlignHCenter)
+        logo_lbl.setFixedSize(44, 44)
+        logo_lbl.setPixmap(_make_logo_pixmap(44))
+        hl.addWidget(logo_lbl)
 
-        # "PRIME OFFICE" under the logo
-        lbl = QLabel("PRIME OFFICE")
-        lbl.setObjectName("brand")
-        f = QFont(_FONT_HEADING)
-        f.setPixelSize(22)
-        f.setWeight(QFont.Bold)
-        lbl.setFont(f)
-        lbl.setAlignment(Qt.AlignCenter)
-        vl.addWidget(lbl, alignment=Qt.AlignHCenter)
+        # Text column: name + city
+        text_col = QWidget()
+        tl = QVBoxLayout(text_col)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(2)
 
-        outer.addWidget(col)
-        outer.addStretch()
+        name_lbl = QLabel("PRIME OFFICE")
+        name_lbl.setObjectName("brand")
+        f_name = QFont(_FONT_HEADING)
+        f_name.setPixelSize(_SZ_BRAND)
+        f_name.setWeight(QFont.Bold)
+        name_lbl.setFont(f_name)
+
+        city_lbl = QLabel("ORAN  ·  ALGÉRIE")
+        city_lbl.setObjectName("brandSub")
+        f_city = QFont(_FONT_BODY)
+        f_city.setPixelSize(10)
+        f_city.setWeight(QFont.Medium)
+        city_lbl.setFont(f_city)
+
+        tl.addWidget(name_lbl)
+        tl.addWidget(city_lbl)
+        hl.addWidget(text_col)
+
+        hl.addStretch()
+
+        # Right pill: app purpose label
+        app_lbl = QLabel("VÉRIFICATEUR DE PRIX")
+        app_lbl.setObjectName("appTag")
+        f_app = QFont(_FONT_BODY)
+        f_app.setPixelSize(10)
+        f_app.setWeight(QFont.Medium)
+        app_lbl.setFont(f_app)
+        hl.addWidget(app_lbl)
 
     def paintEvent(self, event):  # type: ignore[override]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor(_C_SURFACE))
-        # bottom border
-        pen = QPen(QColor(_C_LINE))
-        pen.setWidth(1)
+
+        # Subtle gradient: slightly lighter at top
+        grad = QLinearGradient(0, 0, 0, self.height())
+        grad.setColorAt(0.0, QColor("#1C1148"))
+        grad.setColorAt(1.0, QColor("#150F3A"))
+        painter.fillRect(self.rect(), grad)
+
+        # Lime 2px bottom border (brand accent line)
+        pen = QPen(QColor(_C_LIME))
+        pen.setWidth(2)
         painter.setPen(pen)
         painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+
         painter.end()
         super().paintEvent(event)
 
@@ -412,22 +456,22 @@ class _IdleScreen(QWidget):
 
         outer.addWidget(_BrandBar())
 
-        # center content
         center = QWidget()
         layout = QVBoxLayout(center)
         layout.setAlignment(Qt.AlignCenter)
-        layout.setSpacing(24)
-        layout.setContentsMargins(60, 60, 60, 60)
+        layout.setSpacing(0)
+        layout.setContentsMargins(80, 0, 80, 0)
 
-        # scan icon (lime circle with barcode lines)
+        layout.addStretch(2)
+
+        # Scan icon
         icon_lbl = QLabel()
         icon_lbl.setAlignment(Qt.AlignCenter)
-        icon_lbl.setFixedSize(100, 100)
-        icon_pm = self._make_scan_icon(100)
-        icon_lbl.setPixmap(icon_pm)
+        icon_lbl.setFixedSize(120, 120)
+        icon_lbl.setPixmap(self._make_scan_icon(120))
         layout.addWidget(icon_lbl, alignment=Qt.AlignCenter)
 
-        layout.addSpacing(10)
+        layout.addSpacing(48)
 
         # French prompt
         lbl_fr = QLabel(i18n.SCAN_PROMPT_FR)
@@ -440,6 +484,8 @@ class _IdleScreen(QWidget):
         lbl_fr.setFont(f_fr)
         layout.addWidget(lbl_fr)
 
+        layout.addSpacing(14)
+
         # Arabic prompt
         lbl_ar = QLabel(i18n.SCAN_PROMPT_AR)
         lbl_ar.setObjectName("promptAr")
@@ -451,58 +497,111 @@ class _IdleScreen(QWidget):
         lbl_ar.setFont(f_ar)
         layout.addWidget(lbl_ar)
 
-        layout.addSpacing(16)
+        layout.addSpacing(40)
 
         # Hint
-        hint = QLabel("↵  Appuyez sur Entrée après le code")
+        hint = QLabel("— SCANNEZ UN ARTICLE —")
         hint.setObjectName("scanHint")
         hint.setAlignment(Qt.AlignCenter)
         f_hint = QFont(_FONT_BODY)
-        f_hint.setPixelSize(16)
+        f_hint.setPixelSize(13)
         hint.setFont(f_hint)
         layout.addWidget(hint)
+
+        layout.addStretch(3)
 
         outer.addWidget(center, stretch=1)
 
     @staticmethod
     def _make_scan_icon(size: int) -> QPixmap:
-        pm = QPixmap(size, size)
+        rs = size * 3  # render at 3× for crispness
+        pm = QPixmap(rs, rs)
         pm.fill(Qt.transparent)
         p = QPainter(pm)
         p.setRenderHint(QPainter.Antialiasing)
-        # lime circle
-        grad = QRadialGradient(size / 2, size / 2, size / 2)
-        grad.setColorAt(0, QColor(_C_LIME + "40"))
-        grad.setColorAt(1, QColor(_C_LIME + "10"))
-        path = QPainterPath()
-        path.addEllipse(QRectF(0, 0, size, size))
-        p.fillPath(path, grad)
-        # barcode lines
-        pen = QPen(QColor(_C_LIME))
-        pen.setCapStyle(Qt.RoundCap)
-        cx, cy = size // 2, size // 2
-        bar_h = size * 0.38
-        widths = [2, 4, 2, 6, 2, 4, 2]
-        gaps   = [4, 3, 5, 3, 4, 3, 0]
+
+        # Outer ambient glow
+        g_outer = QRadialGradient(rs / 2, rs / 2, rs * 0.49)
+        g_outer.setColorAt(0.55, QColor(198, 244, 50, 28))
+        g_outer.setColorAt(1.00, QColor(198, 244, 50, 0))
+        path_outer = QPainterPath()
+        path_outer.addEllipse(QRectF(0, 0, rs, rs))
+        p.fillPath(path_outer, g_outer)
+
+        # Inner circle fill
+        m = rs * 0.10
+        g_inner = QRadialGradient(rs / 2, rs / 2, rs * 0.38)
+        g_inner.setColorAt(0.0, QColor(198, 244, 50, 40))
+        g_inner.setColorAt(1.0, QColor(198, 244, 50, 8))
+        path_inner = QPainterPath()
+        path_inner.addEllipse(QRectF(m, m, rs - 2 * m, rs - 2 * m))
+        p.fillPath(path_inner, g_inner)
+
+        # Lime ring
+        pen = QPen(QColor(198, 244, 50, 90))
+        pen.setWidth(int(rs * 0.012))
+        p.setPen(pen)
+        ring_m = rs * 0.11
+        p.drawEllipse(QRectF(ring_m, ring_m, rs - 2 * ring_m, rs - 2 * ring_m))
+
+        # Barcode lines (lime)
+        lime = QColor(_C_LIME)
+        cx = rs // 2
+        cy = rs // 2
+        bar_h = rs * 0.36
+        widths = [int(rs * 0.012), int(rs * 0.024), int(rs * 0.012),
+                  int(rs * 0.040), int(rs * 0.012), int(rs * 0.024),
+                  int(rs * 0.012), int(rs * 0.018), int(rs * 0.012)]
+        gaps   = [int(rs * 0.020), int(rs * 0.016), int(rs * 0.028),
+                  int(rs * 0.016), int(rs * 0.020), int(rs * 0.016),
+                  int(rs * 0.016), int(rs * 0.016), 0]
         total_w = sum(widths) + sum(gaps)
         x = cx - total_w // 2
         for w, g in zip(widths, gaps):
-            pen.setWidth(w)
-            p.setPen(pen)
+            bar_pen = QPen(lime)
+            bar_pen.setWidth(max(w, 1))
+            bar_pen.setCapStyle(Qt.FlatCap)
+            p.setPen(bar_pen)
             p.drawLine(int(x + w / 2), int(cy - bar_h / 2),
                        int(x + w / 2), int(cy + bar_h / 2))
             x += w + g
+
         p.end()
-        return pm
+        return pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     def paintEvent(self, event):  # type: ignore[override]
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Deep base
         painter.fillRect(self.rect(), QColor(_C_BG))
-        # subtle radial glow top-right
-        grad = QRadialGradient(self.width(), 0, self.width() * 0.8)
-        grad.setColorAt(0, QColor(_C_VIOLET + "40"))
-        grad.setColorAt(1, QColor(_C_BG + "00"))
-        painter.fillRect(self.rect(), grad)
+
+        # Hero gradient: rich purple top → dark base
+        hero = QLinearGradient(w * 0.5, 0, w * 0.5, h * 0.75)
+        hero.setColorAt(0.0, QColor("#231255"))
+        hero.setColorAt(0.6, QColor(_C_BG_MID))
+        hero.setColorAt(1.0, QColor(_C_BG))
+        painter.fillRect(self.rect(), hero)
+
+        # Violet glow — top-right
+        g1 = QRadialGradient(w * 0.90, 0, w * 0.70)
+        g1.setColorAt(0.0, QColor(91, 46, 229, 100))
+        g1.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), g1)
+
+        # Purple glow — top-left
+        g2 = QRadialGradient(0, 0, w * 0.55)
+        g2.setColorAt(0.0, QColor(65, 34, 154, 65))
+        g2.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), g2)
+
+        # Subtle lime glow — bottom center
+        g3 = QRadialGradient(w * 0.5, h, w * 0.45)
+        g3.setColorAt(0.0, QColor(198, 244, 50, 20))
+        g3.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), g3)
+
         painter.end()
         super().paintEvent(event)
 
@@ -520,19 +619,18 @@ class _ResultScreen(QWidget):
 
         outer.addWidget(_BrandBar())
 
-        # scrollable center
         center = QWidget()
         layout = QVBoxLayout(center)
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(0)
-        layout.setContentsMargins(60, 40, 60, 40)
+        layout.setContentsMargins(80, 28, 80, 28)
 
         # --- card
         self._card = QFrame()
         self._card.setObjectName("card")
         card_layout = QVBoxLayout(self._card)
-        card_layout.setSpacing(16)
-        card_layout.setContentsMargins(32, 32, 32, 32)
+        card_layout.setSpacing(0)
+        card_layout.setContentsMargins(40, 32, 40, 32)
 
         # image
         self._image_label = QLabel()
@@ -541,11 +639,15 @@ class _ResultScreen(QWidget):
         self._image_label.setFixedSize(_IMAGE_MAX_W, _IMAGE_MAX_H)
         card_layout.addWidget(self._image_label, alignment=Qt.AlignCenter)
 
+        card_layout.addSpacing(20)
+
         # divider
         div = QFrame()
         div.setObjectName("divider")
         div.setFrameShape(QFrame.HLine)
         card_layout.addWidget(div)
+
+        card_layout.addSpacing(22)
 
         # designation
         self._designation_label = QLabel()
@@ -558,12 +660,9 @@ class _ResultScreen(QWidget):
         self._designation_label.setFont(f_desg)
         card_layout.addWidget(self._designation_label)
 
-        # price row
-        price_row = QWidget()
-        price_hl = QHBoxLayout(price_row)
-        price_hl.setAlignment(Qt.AlignCenter)
-        price_hl.setSpacing(4)
+        card_layout.addSpacing(18)
 
+        # price (hero element — large lime)
         self._price_label = QLabel()
         self._price_label.setObjectName("price")
         self._price_label.setAlignment(Qt.AlignCenter)
@@ -571,8 +670,9 @@ class _ResultScreen(QWidget):
         f_price.setPixelSize(_SZ_PRICE)
         f_price.setWeight(QFont.Bold)
         self._price_label.setFont(f_price)
-        price_hl.addWidget(self._price_label)
-        card_layout.addWidget(price_row)
+        card_layout.addWidget(self._price_label)
+
+        card_layout.addSpacing(10)
 
         # ref
         self._ref_label = QLabel()
@@ -583,7 +683,7 @@ class _ResultScreen(QWidget):
         self._ref_label.setFont(f_ref)
         card_layout.addWidget(self._ref_label)
 
-        # errors
+        # error labels (not-found / db-error)
         self._error_fr = QLabel()
         self._error_fr.setObjectName("error")
         self._error_fr.setAlignment(Qt.AlignCenter)
@@ -609,13 +709,39 @@ class _ResultScreen(QWidget):
 
         self._placeholder = _load_placeholder()
 
+        # Drop shadow on card
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(70)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 18)
+        self._card.setGraphicsEffect(shadow)
+
     def paintEvent(self, event):  # type: ignore[override]
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
         painter.fillRect(self.rect(), QColor(_C_BG))
-        grad = QRadialGradient(0, self.height(), self.width() * 0.9)
-        grad.setColorAt(0, QColor(_C_VIOLET + "33"))
-        grad.setColorAt(1, QColor(_C_BG + "00"))
-        painter.fillRect(self.rect(), grad)
+
+        # Hero gradient
+        hero = QLinearGradient(w * 0.5, 0, w * 0.5, h)
+        hero.setColorAt(0.0, QColor("#201155"))
+        hero.setColorAt(0.45, QColor(_C_BG_MID))
+        hero.setColorAt(1.0, QColor(_C_BG))
+        painter.fillRect(self.rect(), hero)
+
+        # Violet glow — top-right
+        g1 = QRadialGradient(w, 0, w * 0.75)
+        g1.setColorAt(0.0, QColor(91, 46, 229, 85))
+        g1.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), g1)
+
+        # Lime glow — bottom-left (very subtle)
+        g2 = QRadialGradient(0, h, w * 0.5)
+        g2.setColorAt(0.0, QColor(198, 244, 50, 22))
+        g2.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), g2)
+
         painter.end()
         super().paintEvent(event)
 
@@ -669,7 +795,7 @@ class _ResultScreen(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Fenêtre principale kiosque
+# Main kiosk window
 # ---------------------------------------------------------------------------
 
 class KioskWindow(QMainWindow):
@@ -682,61 +808,45 @@ class KioskWindow(QMainWindow):
         self._db = db
         self._woo = woo
 
-        # Identifiant du scan en cours (pour ignorer les résultats en retard)
         self._current_scan_id: Optional[str] = None
-
-        # Threads secondaires
         self._lookup_thread: Optional[QThread] = None
         self._img_thread: Optional[QThread] = None
 
-        # --- Fenêtre sans décoration
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setObjectName("centralWidget")
         self.setStyleSheet(_STYLESHEET)
 
-        # --- Widget central
         central = QWidget()
         central.setObjectName("centralWidget")
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # --- QStackedWidget : page 0 = repos, page 1 = résultat
         self._stack = QStackedWidget()
         self._idle_screen = _IdleScreen()
         self._result_screen = _ResultScreen()
-        self._stack.addWidget(self._idle_screen)   # index 0
-        self._stack.addWidget(self._result_screen)  # index 1
+        self._stack.addWidget(self._idle_screen)    # index 0
+        self._stack.addWidget(self._result_screen)   # index 1
         outer.addWidget(self._stack)
 
-        # --- Champ de saisie invisible pour la capture code-barres
+        # Invisible barcode capture field
         self._barcode_input = QLineEdit(central)
         self._barcode_input.setFixedSize(1, 1)
         self._barcode_input.move(-10, -10)
-        # Totalement transparent pour ne pas perturber l'affichage
         self._barcode_input.setStyleSheet(
             "background: transparent; border: none; color: transparent;"
         )
         self._barcode_input.returnPressed.connect(self._on_barcode)
         self._barcode_input.installEventFilter(self)
 
-        # --- Minuterie de retour à l'écran de repos
         self._idle_timer = QTimer(self)
         self._idle_timer.setSingleShot(True)
         self._idle_timer.timeout.connect(self._show_idle)
 
-        # --- Raccourcis clavier
-        QShortcut(QKeySequence(cfg.ui.exit_hotkey), self).activated.connect(
-            self.close
-        )
-        QShortcut(QKeySequence("Ctrl+Alt+S"), self).activated.connect(
-            self._open_setup
-        )
+        QShortcut(QKeySequence(cfg.ui.exit_hotkey), self).activated.connect(self.close)
+        QShortcut(QKeySequence("Ctrl+Alt+S"), self).activated.connect(self._open_setup)
 
-        # Démarrage sur l'écran de repos
         self._show_idle()
-
-    # --- Affichage plein écran (si activé dans la config) ------------------
 
     def showEvent(self, event):  # type: ignore[override]
         super().showEvent(event)
@@ -744,25 +854,20 @@ class KioskWindow(QMainWindow):
             self.showFullScreen()
         self._focus_barcode()
 
-    # --- Capture du focus --------------------------------------------------
-
     def _focus_barcode(self) -> None:
-        """Donne le focus au champ de saisie (le scanner tape toujours dedans)."""
         self._barcode_input.setFocus(Qt.OtherFocusReason)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        """Re-capture le focus si le champ le perd."""
         from PySide6.QtCore import QEvent
         if obj is self._barcode_input and event.type() == QEvent.FocusOut:
             QTimer.singleShot(50, self._focus_barcode)
         return super().eventFilter(obj, event)
 
     def mousePressEvent(self, event):  # type: ignore[override]
-        """Clic sur la fenêtre → remettre le focus sur le champ de saisie."""
         self._focus_barcode()
         super().mousePressEvent(event)
 
-    # --- Transitions d'écran -----------------------------------------------
+    # --- Screen transitions ------------------------------------------------
 
     def _show_idle(self) -> None:
         self._idle_timer.stop()
@@ -772,11 +877,10 @@ class KioskWindow(QMainWindow):
 
     def _show_result(self) -> None:
         self._stack.setCurrentIndex(1)
-        # Déclenche le retour automatique à l'écran de repos
         self._idle_timer.start(self._cfg.ui.idle_reset_seconds * 1000)
         self._focus_barcode()
 
-    # --- Traitement d'un scan ----------------------------------------------
+    # --- Barcode handling --------------------------------------------------
 
     def _on_barcode(self) -> None:
         code = self._barcode_input.text().strip()
@@ -786,13 +890,12 @@ class KioskWindow(QMainWindow):
 
         self._idle_timer.stop()
 
-        # Abandon de l'éventuel lookup précédent
         if self._lookup_thread is not None and self._lookup_thread.isRunning():
             self._lookup_thread.quit()
 
         scan_id = str(uuid.uuid4())
         self._current_scan_id = scan_id
-        # Go back to idle screen WITHOUT calling _show_idle() — that would reset scan_id to None
+        # Switch to idle screen WITHOUT calling _show_idle() — that would reset scan_id to None
         self._stack.setCurrentIndex(0)
         self._focus_barcode()
 
@@ -807,9 +910,8 @@ class KioskWindow(QMainWindow):
         thread.start()
 
     def _on_lookup_done(self, scan_id: str, article: object, error: object) -> None:
-        """Appelé dans le thread principal quand la requête DB répond."""
         if scan_id != self._current_scan_id:
-            return  # scan annulé par un nouveau code
+            return
 
         if error is not None:
             self._result_screen.show_db_error()
@@ -831,14 +933,11 @@ class KioskWindow(QMainWindow):
         self._show_result()
         self._start_image_fetch(art.ref_art, scan_id)
 
-    # --- Chargement asynchrone de l'image ----------------------------------
+    # --- Async image loading -----------------------------------------------
 
     def _start_image_fetch(self, ref_art: str, scan_id: str) -> None:
-        """Lance le téléchargement de l'image dans un thread secondaire."""
-        # Abandon de l'éventuel thread précédent (il se terminera naturellement)
         if self._img_thread is not None and self._img_thread.isRunning():
             self._img_thread.quit()
-            # Ne pas attendre (on ne bloque jamais l'UI)
 
         thread = QThread(self)
         worker = _ImageWorker(self._woo, ref_art, scan_id)
@@ -846,19 +945,16 @@ class KioskWindow(QMainWindow):
         worker.finished.connect(self._on_image_ready)
         thread.started.connect(worker.run)
         thread.finished.connect(thread.deleteLater)
-        # Conserver une référence pour éviter la collecte garbage prématurée
         self._img_thread = thread
         self._img_worker = worker  # type: ignore[attr-defined]
         thread.start()
 
     def _on_image_ready(self, scan_id: str, path: Optional[str]) -> None:
-        """Appelé dans le thread principal via signal/slot Qt."""
-        # Ignorer si l'écran a déjà changé (nouveau scan ou retour au repos)
         if scan_id != self._current_scan_id:
             return
         self._result_screen.set_image(path)
 
-    # --- Réouverture de l'assistant de configuration ----------------------
+    # --- Settings dialog ---------------------------------------------------
 
     def _open_setup(self) -> None:
         from ui.setup_window import SetupDialog
@@ -866,5 +962,4 @@ class KioskWindow(QMainWindow):
         cfg = load()
         dlg = SetupDialog(cfg, parent=self)
         if dlg.exec():
-            # Recharger la config après sauvegarde
             self._cfg = load()
