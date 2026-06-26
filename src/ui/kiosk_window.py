@@ -260,76 +260,65 @@ QFrame#divider {{
 """
 
 # ---------------------------------------------------------------------------
-# Animated barcode icon (breathing glow — repaints at 50 fps)
+# Animated logo mark — gentle rock + breathing lime aura (50 fps)
 # ---------------------------------------------------------------------------
 
 class _PulsingIcon(QWidget):
-    """Barcode icon with a breathing lime glow animation."""
+    """Prime Office logo mark that slowly rocks ±7° with a breathing lime glow."""
 
-    def __init__(self, size: int = 160, parent: Optional[QWidget] = None):
+    _LOGO_SIZE = 190   # rendered logo square (px)
+    _PAD       = 70    # extra space around it for the glow
+
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setFixedSize(size, size)
+        side = self._LOGO_SIZE + self._PAD
+        self.setFixedSize(side, side)
+        # Pre-render crisp logo once — reused every frame
+        self._logo = _make_logo_pixmap(self._LOGO_SIZE)
         self._phase = 0.0
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(20)  # 50 fps
+        t = QTimer(self)
+        t.timeout.connect(self._tick)
+        t.start(20)  # 50 fps
 
     def _tick(self) -> None:
-        self._phase += 0.028
+        self._phase += 0.022   # full cycle ≈ 4.7 s
         self.update()
 
     def paintEvent(self, event):  # type: ignore[override]
-        pulse = 0.5 + 0.5 * math.sin(self._phase)   # 0.0 → 1.0, smooth
+        pulse = 0.5 + 0.5 * math.sin(self._phase)          # 0 → 1, smooth
+        rock  = math.sin(self._phase * 0.38) * 7.0          # ±7° gentle sway
+
         w = h = self.width()
-        cx = cy = w / 2
+        cx = cy = w / 2.0
+        ls = self._LOGO_SIZE
 
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
 
-        # ── outer ambient glow (breathes) ──────────────────────────────────
+        # ── outer ambient halo (large, soft, breathes) ─────────────────────
         g_out = QRadialGradient(cx, cy, w * 0.50)
-        g_out.setColorAt(0.40, QColor(198, 244, 50, int(18 + pulse * 28)))
+        g_out.setColorAt(0.25, QColor(198, 244, 50, int(10 + pulse * 20)))
         g_out.setColorAt(1.00, QColor(198, 244, 50, 0))
-        path_out = QPainterPath()
-        path_out.addEllipse(QRectF(0, 0, w, h))
-        p.fillPath(path_out, g_out)
+        outer = QPainterPath()
+        outer.addEllipse(QRectF(0, 0, w, h))
+        p.fillPath(outer, g_out)
 
-        # ── inner circle fill (breathes) ───────────────────────────────────
-        m = w * 0.10
-        g_in = QRadialGradient(cx, cy, (w / 2) - m)
-        g_in.setColorAt(0.0, QColor(198, 244, 50, int(30 + pulse * 60)))
-        g_in.setColorAt(1.0, QColor(198, 244, 50, 6))
-        path_in = QPainterPath()
-        path_in.addEllipse(QRectF(m, m, w - 2 * m, h - 2 * m))
-        p.fillPath(path_in, g_in)
+        # ── inner glow (tighter, brighter, breathes more) ──────────────────
+        r_in = ls * 0.64
+        g_in = QRadialGradient(cx, cy, r_in)
+        g_in.setColorAt(0.0, QColor(198, 244, 50, int(60 + pulse * 100)))
+        g_in.setColorAt(1.0, QColor(198, 244, 50, 0))
+        inner = QPainterPath()
+        inner.addEllipse(QRectF(cx - r_in, cy - r_in, r_in * 2, r_in * 2))
+        p.fillPath(inner, g_in)
 
-        # ── lime ring (breathes opacity) ───────────────────────────────────
-        pen = QPen(QColor(198, 244, 50, int(70 + pulse * 130)))
-        pen.setWidth(max(2, int(w * 0.014)))
-        p.setPen(pen)
-        rm = w * 0.11
-        p.drawEllipse(QRectF(rm, rm, w - 2 * rm, h - 2 * rm))
-
-        # ── barcode bars (static lime) ─────────────────────────────────────
-        lime = QColor(_C_LIME)
-        bar_h = h * 0.36
-        bwidths = [int(w * 0.014), int(w * 0.026), int(w * 0.014),
-                   int(w * 0.044), int(w * 0.014), int(w * 0.026),
-                   int(w * 0.014), int(w * 0.020), int(w * 0.014)]
-        bgaps   = [int(w * 0.020), int(w * 0.016), int(w * 0.030),
-                   int(w * 0.016), int(w * 0.020), int(w * 0.016),
-                   int(w * 0.016), int(w * 0.016), 0]
-        total_w = sum(bwidths) + sum(bgaps)
-        x = int(cx) - total_w // 2
-        for bw, bg in zip(bwidths, bgaps):
-            bar_pen = QPen(lime)
-            bar_pen.setWidth(max(bw, 1))
-            bar_pen.setCapStyle(Qt.FlatCap)
-            p.setPen(bar_pen)
-            p.drawLine(int(x + bw / 2), int(cy - bar_h / 2),
-                       int(x + bw / 2), int(cy + bar_h / 2))
-            x += bw + bg
+        # ── logo mark, rotated around its own centre ────────────────────────
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(rock)
+        p.drawPixmap(int(-ls / 2), int(-ls / 2), self._logo)
+        p.restore()
 
         p.end()
 
@@ -420,7 +409,7 @@ class _IdleScreen(QWidget):
 
         vl.addStretch(2)
 
-        self._icon = _PulsingIcon(160)
+        self._icon = _PulsingIcon()
         vl.addWidget(self._icon, alignment=Qt.AlignCenter)
 
         vl.addSpacing(52)
