@@ -1,0 +1,29 @@
+# Secrets / runtime config (never commit real connection details)
+stores.json
+config.ini
+config.json
+
+# Runtime data
+central.db
+central.db-wal
+central.db-shm
+*.log
+sync_state.json
+cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# OS
+.DS_Store
+Thumbs.db

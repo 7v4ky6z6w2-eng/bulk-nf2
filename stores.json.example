@@ -1,0 +1,43 @@
+{
+  "_comment": "Copiez ce fichier en stores.json et remplissez les valeurs. Les IP 100.x.y.z sont les adresses Tailscale de chaque poste. La base du hub (magasin 1) reste en localhost.",
+
+  "telegram": {
+    "bot_token": "",
+    "chat_id": ""
+  },
+  "ntfy_topic": "",
+
+  "stores": [
+    {
+      "id": 1,
+      "name": "Difa El Biar",
+      "is_hub": true,
+      "host": "localhost",
+      "port": 3050,
+      "database": "C:\\Netfact\\Data\\DIFA2.FDB",
+      "user": "SYSDBA",
+      "password": "masterkey",
+      "charset": "WIN1256"
+    },
+    {
+      "id": 2,
+      "name": "Difa Blida",
+      "host": "100.100.2.2",
+      "port": 3050,
+      "database": "C:\\Netfact\\Data\\DIFA2.FDB",
+      "user": "SYSDBA",
+      "password": "masterkey",
+      "charset": "WIN1256"
+    },
+    {
+      "id": 3,
+      "name": "Difa Bab Ezzouar",
+      "host": "100.100.3.3",
+      "port": 3050,
+      "database": "C:\\Netfact\\Data\\DIFA2.FDB",
+      "user": "SYSDBA",
+      "password": "masterkey",
+      "charset": "WIN1256"
+    }
+  ]
+}
