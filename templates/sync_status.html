@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Synchronisation — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-4">Journal de synchronisation (50 dernières sessions)</h4>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>#</th><th>Magasin</th><th>Démarré</th><th>Terminé</th><th class="text-end">Lignes</th><th>Statut</th><th>Erreur</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in logs %}
+      <tr class="{% if r.status=='error' %}table-danger{% elif r.status=='ok' %}table-success{% endif %}">
+        <td class="text-muted small">{{ r.id }}</td>
+        <td>{{ store_names.get(r.store_id, r.store_name or r.store_id) }}</td>
+        <td class="small">{{ r.started }}</td>
+        <td class="small">{{ r.finished or '…' }}</td>
+        <td class="text-end">{{ r.rows_pushed or 0 }}</td>
+        <td>
+          {% if r.status == 'ok' %}<span class="badge bg-success">ok</span>
+          {% elif r.status == 'error' %}<span class="badge bg-danger">erreur</span>
+          {% else %}<span class="badge bg-warning text-dark">{{ r.status }}</span>{% endif %}
+        </td>
+        <td class="small text-danger">{{ r.error_msg or '' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="text-muted text-center">Aucune session enregistrée</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>setTimeout(()=>location.reload(), 30000)</script>
+{% endblock %}

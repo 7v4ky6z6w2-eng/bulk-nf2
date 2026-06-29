@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Stock — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-4">Stock (500 premiers articles)</h4>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Magasin</th><th>Référence</th><th>Désignation</th><th>Dépôt</th><th class="text-end">Qté</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><span class="badge bg-secondary">{{ store_names.get(r.store_id, r.store_id) }}</span></td>
+        <td class="font-monospace small">{{ r.ref_art }}</td>
+        <td>{{ r.designation }}</td>
+        <td>{{ r.code_depot }}</td>
+        <td class="text-end {% if r.qte_stock|float < 0 %}text-danger{% endif %}">{{ r.qte_stock }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="text-muted text-center">Aucune donnée</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

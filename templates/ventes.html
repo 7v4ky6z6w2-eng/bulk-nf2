@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Ventes — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-4">Ventes — 7 derniers jours (300 lignes max)</h4>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Magasin</th><th>Date</th><th>N° Pièce</th><th>Client</th><th class="text-end">Montant TTC</th><th>Règlement</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><span class="badge bg-secondary">{{ store_names.get(r.store_id, r.store_id) }}</span></td>
+        <td>{{ r.datepiece }}</td>
+        <td class="font-monospace small">{{ r.nopiece }}</td>
+        <td>{{ r.raison_sociale or r.code_tiers or '—' }}</td>
+        <td class="text-end">{{ "%.2f"|format(r.montantttc|float) }}</td>
+        <td>{{ r.code_mode_regl or '—' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="text-muted text-center">Aucune donnée</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

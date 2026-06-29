@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Trésorerie — PrimeNF Hub{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">Trésorerie du {{ day }}</h4>
+  <span class="badge bg-primary fs-6">Total : {{ "%.2f"|format(grand_total) }} DA</span>
+</div>
+<div class="row g-3">
+  {% for s in stores %}
+  <div class="col-md-4">
+    <div class="card treso-card h-100">
+      <div class="card-header d-flex justify-content-between">
+        <strong>{{ s.name }}</strong>
+        <small class="text-muted">{{ s.synced_at }}</small>
+      </div>
+      <div class="card-body">
+        <p class="fs-5 fw-bold mb-3">{{ "%.2f"|format(s.total) }} DA</p>
+        <table class="table table-sm table-borderless mb-0">
+          <tbody>
+            {% for m in s.modes %}
+            <tr>
+              <td>{{ m.mode }}</td>
+              <td class="text-end">{{ "%.2f"|format(m.total) }}</td>
+              <td class="text-end text-muted small">{{ m.nb }} op.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="col-12">
+    <p class="text-muted">Aucune donnée de trésorerie pour aujourd'hui.</p>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

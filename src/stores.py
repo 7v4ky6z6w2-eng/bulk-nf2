@@ -83,7 +83,14 @@ class NotifyConfig:
 class StoreRegistry:
     stores: list = field(default_factory=list)            # list[Store]
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    hub_port: int = 5000
+    hub_api_key: str = ""
     path: str = STORES_PATH
+
+    def hub_url(self) -> str:
+        """URL du serveur hub vue depuis CE poste (le host du magasin hub dans
+        stores.json est localhost sur le hub, IP Tailscale sur les autres)."""
+        return "http://%s:%d" % (self.hub().host or "localhost", self.hub_port)
 
     # --- chargement -------------------------------------------------------
     @classmethod
@@ -120,7 +127,10 @@ class StoreRegistry:
             telegram_chat_id=tg.get("chat_id", ""),
             ntfy_topic=raw.get("ntfy_topic", ""),
         )
-        return cls(stores=stores, notify=notify, path=path)
+        return cls(stores=stores, notify=notify,
+                   hub_port=int(raw.get("hub_port", 5000)),
+                   hub_api_key=raw.get("hub_api_key", ""),
+                   path=path)
 
     # --- accès ------------------------------------------------------------
     def get(self, store_id: int) -> Store:

@@ -7,6 +7,9 @@
   },
   "ntfy_topic": "",
 
+  "hub_port": 5000,
+  "hub_api_key": "remplacez-par-une-cle-aleatoire-longue",
+
   "stores": [
     {
       "id": 1,
