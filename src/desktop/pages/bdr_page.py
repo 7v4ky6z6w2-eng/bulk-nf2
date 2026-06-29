@@ -108,12 +108,11 @@ class BdrPage(QWidget):
             self._log_msg("Fichier : %s" % path)
 
     def _load_preview(self) -> None:
-        """Charge l'Excel via le module BDR vendorisé et affiche un résumé."""
+        """Charge l'Excel via le module BDR vendorisé (read_excel) et affiche un résumé."""
         try:
             import import_bon_reception as bdr  # type: ignore
             cfg = self._build_config()
-            loader = bdr.ExcelLoader(self._excel_path, cfg)
-            self._lines = loader.load()
+            self._lines = bdr.read_excel(self._excel_path, cfg)
             self._config = cfg
             self._log_msg("Chargé : %d articles" % len(self._lines))
             self._import_btn.setEnabled(bool(self._lines))

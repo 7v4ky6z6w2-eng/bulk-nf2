@@ -115,7 +115,7 @@ def report_op(op_id: int, action: str):
     notifier = current_app.config.get("notifier")
     if notifier:
         try:
-            notifier.notify_pending()
+            notifier.notify_pending(con=_db())
         except Exception:  # noqa: BLE001
             pass
     return jsonify(ok=True)

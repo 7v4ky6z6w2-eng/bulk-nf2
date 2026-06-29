@@ -70,8 +70,7 @@ def run_cycle(store_id: int, registry: StoreRegistry, state: StateManager) -> No
 
     # ── 2. Ouvrir Firebird local ──────────────────────────────────────────────
     try:
-        reader = FirebirdReader(local_kw)
-        reader.connect()
+        reader = FirebirdReader(local_kw)   # __init__ connects immediately
     except Exception as exc:  # noqa: BLE001
         log.warning("Connexion Firebird locale échouée : %s — push ignoré.", exc)
         return

@@ -50,6 +50,21 @@ def create_app(db_path: str, api_key: str = "",
 
     app.config["db_connection"] = get_con
 
+    # Thread de fond : vérifie les notifications manquées toutes les 2 min
+    if notifier and notifier.enabled:
+        def _notify_loop():
+            import time
+            while True:
+                try:
+                    con = connect(db_path)
+                    notifier.notify_pending(con=con)
+                    con.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(120)
+        t = threading.Thread(target=_notify_loop, daemon=True, name="notifier")
+        t.start()
+
     app.register_blueprint(api_bp)
     app.register_blueprint(dash_bp)
     return app
