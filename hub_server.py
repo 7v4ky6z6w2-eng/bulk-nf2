@@ -33,11 +33,14 @@ log = logging.getLogger("hub")
 
 def create_app(db_path: str, api_key: str = "",
                notifier: Notifier | None = None,
-               store_names: dict | None = None) -> Flask:
+               store_names: dict | None = None,
+               registry=None) -> Flask:
     app = Flask(__name__, template_folder="templates")
     app.config["API_KEY"] = api_key
+    app.config["ACCESS_CODE"] = getattr(registry, "access_code", "") if registry else ""
     app.config["store_names"] = store_names or {}
     app.config["notifier"] = notifier
+    app.config["registry"] = registry
 
     # Une connexion SQLite par thread (thread_local via closure)
     import threading
@@ -108,6 +111,7 @@ def main() -> None:
         api_key=registry.hub_api_key,
         notifier=notifier,
         store_names=registry.names(),
+        registry=registry,
     )
 
     log.info("Hub démarré sur %s:%d", args.host, args.port)

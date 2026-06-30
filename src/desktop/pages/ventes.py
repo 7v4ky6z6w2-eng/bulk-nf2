@@ -1,8 +1,6 @@
-"""Page Ventes : pièces des 7 derniers jours."""
+"""Page Ventes : pièces des 7 derniers jours (données via le hub)."""
 
 from __future__ import annotations
-
-import sqlite3
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -12,9 +10,9 @@ from PySide6.QtWidgets import (
 
 
 class VentesPage(QWidget):
-    def __init__(self, db_con: sqlite3.Connection, store_names: dict, parent=None):
+    def __init__(self, data, store_names: dict, parent=None):
         super().__init__(parent)
-        self._con = db_con
+        self._data = data
         self._names = store_names
 
         btn = QPushButton("Actualiser")
@@ -23,7 +21,6 @@ class VentesPage(QWidget):
         self._table = QTableWidget(0, 6)
         self._table.setHorizontalHeaderLabels(
             ["Magasin", "Date", "N° Pièce", "Client", "TTC", "Règlement"])
-        self._table.horizontalHeader().setStretchLastSection(False)
         self._table.setColumnWidth(3, 200)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setSortingEnabled(True)
@@ -43,24 +40,19 @@ class VentesPage(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        rows = self._con.execute(
-            "SELECT p.store_id, p.datepiece, p.nopiece, "
-            "       COALESCE(t.raison_sociale, p.code_tiers, '—'), "
-            "       p.montantttc, p.code_mode_regl "
-            "FROM piece p LEFT JOIN tiers t "
-            "  ON p.store_id=t.store_id AND p.code_tiers=t.code_tiers "
-            "WHERE p.datepiece >= date('now','-7 days') "
-            "ORDER BY p.datepiece DESC LIMIT 300").fetchall()
-
+        try:
+            rows = self._data.ventes_rows()
+        except Exception:  # noqa: BLE001
+            return
         self._table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            sid = r[0]
-            name = self._names.get(sid, "M%d" % sid)
+            sid = r.get("store_id")
+            name = self._names.get(sid, "M%s" % sid)
             self._table.setItem(i, 0, QTableWidgetItem(name))
-            self._table.setItem(i, 1, QTableWidgetItem(str(r[1] or "")))
-            self._table.setItem(i, 2, QTableWidgetItem(str(r[2] or "")))
-            self._table.setItem(i, 3, QTableWidgetItem(str(r[3] or "")))
-            ttc = QTableWidgetItem("%.2f" % float(r[4] or 0))
+            self._table.setItem(i, 1, QTableWidgetItem(str(r.get("datepiece") or "")))
+            self._table.setItem(i, 2, QTableWidgetItem(str(r.get("nopiece") or "")))
+            self._table.setItem(i, 3, QTableWidgetItem(str(r.get("client") or "—")))
+            ttc = QTableWidgetItem("%.2f" % float(r.get("montantttc") or 0))
             ttc.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._table.setItem(i, 4, ttc)
-            self._table.setItem(i, 5, QTableWidgetItem(str(r[5] or "")))
+            self._table.setItem(i, 5, QTableWidgetItem(str(r.get("code_mode_regl") or "")))

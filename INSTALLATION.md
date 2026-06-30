@@ -83,7 +83,8 @@ Remplissez :
 - **`host`** de chaque magasin = son adresse Tailscale `100.x.y.z` (le magasin 1 reste `localhost`).
 - **`database`** = chemin de la base sur **ce** poste (ex. `C:\\Netfact\\Data\\DIFA2.FDB`).
 - **`password`** = mot de passe SYSDBA (souvent `masterkey`).
-- **`hub_api_key`** = une longue chaîne aléatoire que vous inventez (sécurise les échanges).
+- **`hub_api_key`** = une longue chaîne aléatoire que vous inventez (utilisée par les agents).
+- **`access_code`** = un **code court et mémorisable** (ex. `DIFA-2026`) que vous taperez pour connecter un appareil quelconque (PC perso, etc.) sans copier `stores.json`. Changez-le quand vous voulez révoquer l'accès d'un appareil.
 - **`telegram.bot_token`** et **`telegram.chat_id`** (voir étape 2.7), ou **`ntfy_topic`**.
 
 > `stores.json` n'est **jamais** envoyé sur git (il contient vos mots de passe). C'est `stores.json.example` qui sert de modèle.
@@ -192,6 +193,57 @@ L'app a 7 pages : Vue d'ensemble · Stock · Ventes · Trésorerie · **Import B
 2. Entrez le **nouveau prix HT** (TTC sera identique).
 3. Cochez **les magasins** concernés (1, 2, 3 ou tous) → **Appliquer**.
    - en ligne → appliqué tout de suite ; hors-ligne → mis en file + notification au rallumage.
+
+---
+
+## Étape 6 (optionnelle) — Ajouter un PC d'édition (ex. votre PC perso, sans base)
+
+L'application bureau est un **client du hub** : elle n'ouvre **aucune base** et
+n'a **pas besoin de Firebird installé**. Toutes les lectures (tableaux de bord,
+recherche d'articles) et toutes les écritures (import BDR, édition de prix)
+passent par le hub (magasin 1). Vous pouvez donc l'installer sur **n'importe quel
+PC** — votre PC personnel par exemple — pour travailler tranquillement.
+
+Deux possibilités selon l'appareil :
+
+**A. Appareil quelconque, avec un simple code d'accès (recommandé)**
+Aucun `stores.json` à copier (donc **aucun mot de passe** ne quitte le hub) :
+
+1. Installez **Tailscale** (même compte) → l'appareil rejoint le réseau.
+2. Copiez juste **`PrimeNFHub.exe`** sur le PC.
+3. Lancez-le : un écran de connexion demande
+   - **l'adresse du hub** (ex. `http://100.x.y.z:5000`, l'IP Tailscale du magasin 1),
+   - **le code d'accès** (`access_code` de `stores.json`, ex. `DIFA-2026`).
+4. L'app récupère la liste des magasins depuis le hub et s'ouvre. Le code est
+   **mémorisé** pour les lancements suivants (re-connexion automatique).
+
+> Pour changer d'appareil ou se déconnecter : `PrimeNFHub.exe --logout`
+> (ou changez l'`access_code` sur le hub pour révoquer tous les appareils).
+
+**B. Poste géré (admin), avec stores.json**
+Si vous préférez ne rien taper : copiez `PrimeNFHub.exe` **+** `stores.json`
+côte à côte et double-cliquez — l'app se configure toute seule.
+
+> Variante développeur (PC avec Python) :
+> ```bat
+> pip install -r requirements_desktop.txt
+> python prime_hub.py
+> ```
+> Le paquet `fdb` y figure mais **aucune installation de Firebird n'est requise** :
+> l'app ne se connecte jamais à une base en local.
+
+**Comment ça marche pour vous :**
+- Vous voyez l'état des 3 magasins, le stock, les ventes, la trésorerie — en
+  direct depuis le hub.
+- Un **magasin en ligne** (le magasin 1 l'est toujours) → vos modifications de
+  prix / imports BDR sont **appliquées immédiatement** par le hub.
+- Un **magasin hors ligne** (2 ou 3 fermés le soir) → l'opération est **mise en
+  file** sur le hub ; le magasin l'applique **tout seul** à son prochain
+  démarrage, et vous recevez une **notification téléphone**.
+
+> Si le magasin 1 (hub) est éteint ou injoignable, l'app s'ouvre mais reste vide
+> (elle a besoin du hub pour toutes les données). Le magasin 1 étant « toujours
+> allumé », ce n'est normalement jamais le cas.
 
 ---
 

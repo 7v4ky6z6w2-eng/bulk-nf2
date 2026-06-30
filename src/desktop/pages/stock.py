@@ -1,8 +1,6 @@
-"""Page Stock : vue agrégée du stock par magasin."""
+"""Page Stock : vue agrégée du stock par magasin (données via le hub)."""
 
 from __future__ import annotations
-
-import sqlite3
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -12,9 +10,9 @@ from PySide6.QtWidgets import (
 
 
 class StockPage(QWidget):
-    def __init__(self, db_con: sqlite3.Connection, store_names: dict, parent=None):
+    def __init__(self, data, store_names: dict, parent=None):
         super().__init__(parent)
-        self._con = db_con
+        self._data = data
         self._names = store_names
 
         self._search = QLineEdit()
@@ -25,7 +23,6 @@ class StockPage(QWidget):
 
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(["Magasin", "Référence", "Désignation", "Dépôt", "Qté"])
-        self._table.horizontalHeader().setStretchLastSection(False)
         self._table.setColumnWidth(2, 260)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setSortingEnabled(True)
@@ -45,25 +42,21 @@ class StockPage(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        q = "%" + (self._search.text().strip() or "") + "%"
-        rows = self._con.execute(
-            "SELECT a.store_id, a.ref_art, a.designation, s.code_depot, s.qte_stock "
-            "FROM stock_snapshot s JOIN article a "
-            "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
-            "WHERE a.ref_art LIKE ? OR a.designation LIKE ? "
-            "ORDER BY a.store_id, a.ref_art LIMIT 500",
-            (q, q)).fetchall()
-
+        try:
+            rows = self._data.stock_rows(self._search.text().strip())
+        except Exception:  # noqa: BLE001
+            return
         self._table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            sid = r["store_id"] if hasattr(r, "__getitem__") else r[0]
-            name = self._names.get(sid, "M%d" % sid)
+            sid = r.get("store_id")
+            name = self._names.get(sid, "M%s" % sid)
             self._table.setItem(i, 0, QTableWidgetItem(name))
-            self._table.setItem(i, 1, QTableWidgetItem(str(r[1])))
-            self._table.setItem(i, 2, QTableWidgetItem(str(r[2] or "")))
-            self._table.setItem(i, 3, QTableWidgetItem(str(r[3] or "")))
-            qty = QTableWidgetItem("%.2f" % float(r[4] or 0))
+            self._table.setItem(i, 1, QTableWidgetItem(str(r.get("ref_art") or "")))
+            self._table.setItem(i, 2, QTableWidgetItem(str(r.get("designation") or "")))
+            self._table.setItem(i, 3, QTableWidgetItem(str(r.get("code_depot") or "")))
+            qval = float(r.get("qte_stock") or 0)
+            qty = QTableWidgetItem("%.2f" % qval)
             qty.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            if float(r[4] or 0) < 0:
+            if qval < 0:
                 qty.setForeground(Qt.red)
             self._table.setItem(i, 4, qty)

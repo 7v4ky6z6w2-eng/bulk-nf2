@@ -1,8 +1,12 @@
-"""Fenêtre principale PrimeNF Hub — barre latérale + pages empilées."""
+"""Fenêtre principale PrimeNF Hub — barre latérale + pages empilées.
+
+L'application est un CLIENT du hub : aucune base locale. Toutes les données et
+toutes les écritures passent par le hub via HTTP (objet HubData). Elle tourne
+donc sur n'importe quel PC (y compris un PC personnel sans base ni Firebird) :
+il suffit de stores.json et d'un accès réseau au magasin 1.
+"""
 
 from __future__ import annotations
-
-import sqlite3
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -11,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from stores import StoreRegistry
-from hub.central_db import connect, init_db
+from desktop.hub_data import HubData
 
 from desktop.pages.overview import OverviewPage
 from desktop.pages.stock import StockPage
@@ -22,28 +26,27 @@ from desktop.pages.bdr_page import BdrPage
 from desktop.pages.prix_page import PrixPage
 
 
+# (label, classe, besoin_du_registre)
 _PAGES = [
-    ("Vue d'ensemble", OverviewPage),
-    ("Stock", StockPage),
-    ("Ventes", VentesPage),
-    ("Trésorerie", TresoreriePage),
-    ("Import BDR", BdrPage),
-    ("Éditeur de prix", PrixPage),
-    ("Synchronisation", SyncStatusPage),
+    ("Vue d'ensemble", OverviewPage, False),
+    ("Stock", StockPage, False),
+    ("Ventes", VentesPage, False),
+    ("Trésorerie", TresoreriePage, False),
+    ("Import BDR", BdrPage, True),
+    ("Éditeur de prix", PrixPage, True),
+    ("Synchronisation", SyncStatusPage, False),
 ]
 
 
 class MainWindow(QWidget):
-    def __init__(self, registry: StoreRegistry, db_path: str):
+    def __init__(self, registry: StoreRegistry, data: HubData):
         super().__init__()
         self.setWindowTitle("PrimeNF Hub")
         self.resize(1100, 700)
 
-        init_db(db_path)
-        self._con: sqlite3.Connection = connect(db_path)
+        self._data = data
         names = registry.names()
 
-        # Sidebar
         self._nav = QListWidget()
         self._nav.setFixedWidth(160)
         self._nav.setStyleSheet(
@@ -54,14 +57,13 @@ class MainWindow(QWidget):
 
         self._stack = QStackedWidget()
 
-        for label, PageClass in _PAGES:
+        for label, PageClass, needs_registry in _PAGES:
             item = QListWidgetItem(label)
             self._nav.addItem(item)
-            if PageClass in (OverviewPage, StockPage, VentesPage,
-                             TresoreriePage, SyncStatusPage):
-                page = PageClass(self._con, names)
+            if needs_registry:
+                page = PageClass(registry, data)
             else:
-                page = PageClass(registry, self._con)
+                page = PageClass(data, names)
             self._stack.addWidget(page)
 
         self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
@@ -75,10 +77,3 @@ class MainWindow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
-
-    def closeEvent(self, event):
-        try:
-            self._con.close()
-        except Exception:
-            pass
-        super().closeEvent(event)

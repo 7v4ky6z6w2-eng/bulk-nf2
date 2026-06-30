@@ -189,3 +189,52 @@ def tresorerie_today(con: sqlite3.Connection, day: str | None = None) -> list:
         "FROM tresorerie_snapshot WHERE snap_date=? ORDER BY store_id, mode_paiement",
         (day,)).fetchall()
     return [dict(r) for r in rows]
+
+
+def stock_rows(con: sqlite3.Connection, search: str = "", limit: int = 500) -> list:
+    q = "%" + (search or "") + "%"
+    rows = con.execute(
+        "SELECT a.store_id, a.ref_art, a.designation, s.code_depot, s.qte_stock "
+        "FROM stock_snapshot s JOIN article a "
+        "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+        "WHERE a.ref_art LIKE ? OR a.designation LIKE ? "
+        "ORDER BY a.store_id, a.ref_art LIMIT ?", (q, q, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def ventes_rows(con: sqlite3.Connection, days: int = 7, limit: int = 300) -> list:
+    rows = con.execute(
+        "SELECT p.store_id, p.datepiece, p.nopiece, "
+        "  COALESCE(t.raison_sociale, p.code_tiers) AS client, "
+        "  p.montantttc, p.code_mode_regl "
+        "FROM piece p LEFT JOIN tiers t "
+        "  ON p.store_id=t.store_id AND p.code_tiers=t.code_tiers "
+        "WHERE p.datepiece >= date('now', ?) "
+        "ORDER BY p.datepiece DESC LIMIT ?", ("-%d days" % days, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def sync_logs(con: sqlite3.Connection, limit: int = 50) -> list:
+    rows = con.execute(
+        "SELECT l.id, l.store_id, m.store_name, l.started, l.finished, "
+        "  l.rows_pushed, l.status, l.error_msg "
+        "FROM sync_log l LEFT JOIN store_meta m ON l.store_id=m.store_id "
+        "ORDER BY l.id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def pending_ops_recent(con: sqlite3.Connection, limit: int = 50) -> list:
+    rows = con.execute(
+        "SELECT id, store_id, op_type, created_at, status, error_msg "
+        "FROM pending_ops ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def article_search(con: sqlite3.Connection, query: str = "", limit: int = 200) -> list:
+    """Articles correspondant à la recherche, une ligne par (article, magasin)."""
+    q = "%" + (query or "") + "%"
+    rows = con.execute(
+        "SELECT ref_art, designation, store_id, prixventeht "
+        "FROM article WHERE ref_art LIKE ? OR designation LIKE ? "
+        "ORDER BY ref_art, store_id LIMIT ?", (q, q, limit)).fetchall()
+    return [dict(r) for r in rows]

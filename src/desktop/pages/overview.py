@@ -1,17 +1,13 @@
-"""Page Vue d'ensemble : état des magasins + trésorerie du jour."""
+"""Page Vue d'ensemble : état des magasins (données via le hub)."""
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QScrollArea, QVBoxLayout, QWidget,
+    QGridLayout, QGroupBox, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
-
-from hub.central_db import store_status, tresorerie_today
 
 
 def _ago(ts: str | None) -> str:
@@ -59,9 +55,9 @@ class StoreCard(QGroupBox):
 
 
 class OverviewPage(QWidget):
-    def __init__(self, db_con: sqlite3.Connection, store_names: dict, parent=None):
+    def __init__(self, data, store_names: dict, parent=None):
         super().__init__(parent)
-        self._con = db_con
+        self._data = data
         self._names = store_names
         self._cards: dict[int, StoreCard] = {}
 
@@ -72,8 +68,12 @@ class OverviewPage(QWidget):
         self._grid.setAlignment(Qt.AlignTop)
         scroll.setWidget(inner)
 
+        self._status = QLabel()
+        self._status.setStyleSheet("color:#dc3545;")
+
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<h3>Vue d'ensemble</h3>"))
+        layout.addWidget(self._status)
         layout.addWidget(scroll)
 
         self._timer = QTimer(self)
@@ -82,8 +82,13 @@ class OverviewPage(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        statuses = store_status(self._con)
-        for i, s in enumerate(statuses):
+        try:
+            statuses = self._data.store_status()
+            self._status.setText("")
+        except Exception as exc:  # noqa: BLE001
+            self._status.setText("Hub injoignable : %s" % exc)
+            return
+        for s in statuses:
             sid = s["store_id"]
             name = self._names.get(sid, s.get("store_name") or "Magasin %d" % sid)
             if sid not in self._cards:

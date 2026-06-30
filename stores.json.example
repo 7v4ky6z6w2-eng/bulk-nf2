@@ -9,6 +9,7 @@
 
   "hub_port": 5000,
   "hub_api_key": "remplacez-par-une-cle-aleatoire-longue",
+  "access_code": "DIFA-2026",
 
   "stores": [
     {

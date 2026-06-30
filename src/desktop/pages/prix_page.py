@@ -1,12 +1,11 @@
-"""Page Éditeur de prix : sélection article + modification pour 1 ou 3 magasins."""
+"""Page Éditeur de prix : recherche (via hub) + soumission au hub (1 ou 3 magasins).
+
+Aucun accès Firebird ici : la recherche d'articles et l'application des prix
+passent par le hub. Pour chaque magasin sélectionné, le hub applique tout de
+suite (en ligne) ou met en file (hors ligne). TTC = HT (pas de TVA).
+"""
 
 from __future__ import annotations
-
-import sqlite3
-import sys
-import os
-import traceback
-from typing import NamedTuple
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -17,57 +16,41 @@ from PySide6.QtWidgets import (
 )
 
 from stores import StoreRegistry
-from hub.central_db import enqueue_op
-from hub.write_back import is_reachable, write_prices, WriteError
-
-_VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))), "vendor")
-_EDITOR_DIR = os.path.join(_VENDOR, "editor")
-if _EDITOR_DIR not in sys.path:
-    sys.path.insert(0, _EDITOR_DIR)
-
-
-class _WriteTask(NamedTuple):
-    store_id: int
-    connect_kwargs: dict
-    changes: list
-    online: bool
 
 
 class _PriceThread(QThread):
-    progress = Signal(int, bool, str)   # store_id, ok, message
+    progress = Signal(int, str, str)   # store_id, status, message
     finished_all = Signal()
 
-    def __init__(self, tasks: list[_WriteTask], db_con: sqlite3.Connection):
+    def __init__(self, data, store_ids: list, changes: list):
         super().__init__()
-        self._tasks = tasks
-        self._con = db_con
+        self._data = data
+        self._store_ids = store_ids
+        self._changes = changes
 
     def run(self) -> None:
-        for task in self._tasks:
-            if task.online:
-                try:
-                    write_prices(task.connect_kwargs, task.changes)
-                    self.progress.emit(task.store_id, True,
-                                       "Magasin %d : %d articles mis à jour." % (
-                                           task.store_id, len(task.changes)))
-                except WriteError as exc:
-                    self.progress.emit(task.store_id, False, str(exc))
-                except Exception as exc:  # noqa: BLE001
-                    self.progress.emit(task.store_id, False, traceback.format_exc())
-            else:
-                enqueue_op(self._con, task.store_id, "price_update",
-                           {"changes": task.changes})
-                self.progress.emit(task.store_id, True,
-                                   "Magasin %d hors ligne : mis en file." % task.store_id)
+        for sid in self._store_ids:
+            try:
+                res = self._data.submit_op(sid, "price_update", {"changes": self._changes})
+                status = res.get("status", "error")
+                if status == "applied":
+                    msg = "Magasin %d : appliqué (%s)." % (sid, res.get("count", "?"))
+                elif status == "queued":
+                    msg = "Magasin %d : hors ligne, mis en file (op #%s)." % (
+                        sid, res.get("op_id", "?"))
+                else:
+                    msg = "Magasin %d : %s" % (sid, res.get("error", "erreur"))
+                self.progress.emit(sid, status, msg)
+            except Exception as exc:  # noqa: BLE001
+                self.progress.emit(sid, "error", "Magasin %d : hub injoignable (%s)" % (sid, exc))
         self.finished_all.emit()
 
 
 class PrixPage(QWidget):
-    def __init__(self, registry: StoreRegistry, db_con: sqlite3.Connection, parent=None):
+    def __init__(self, registry: StoreRegistry, data, parent=None):
         super().__init__(parent)
         self._registry = registry
-        self._con = db_con
+        self._data = data
         self._thread: _PriceThread | None = None
 
         # ── Recherche article ──
@@ -79,10 +62,10 @@ class PrixPage(QWidget):
 
         self._results = QTableWidget(0, 5)
         self._results.setHorizontalHeaderLabels(
-            ["Référence", "Désignation", "M1 Prix HT", "M2 Prix HT", "M3 Prix HT"])
+            ["Référence", "Désignation", "M1 Prix", "M2 Prix", "M3 Prix"])
         self._results.setEditTriggers(QTableWidget.NoEditTriggers)
         self._results.setSelectionBehavior(QTableWidget.SelectRows)
-        self._results.setMaximumHeight(200)
+        self._results.setMaximumHeight(220)
 
         # ── Nouveau prix ──
         self._new_price = QDoubleSpinBox()
@@ -112,7 +95,7 @@ class PrixPage(QWidget):
         search_row.addWidget(search_btn)
 
         form = QFormLayout()
-        form.addRow("Nouveau prix HT :", self._new_price)
+        form.addRow("Nouveau prix (HT = TTC) :", self._new_price)
 
         scope_box = QGroupBox("Appliquer sur :")
         scope_box.setLayout(scope_layout)
@@ -135,41 +118,35 @@ class PrixPage(QWidget):
         self._log.append(msg)
 
     def _do_search(self) -> None:
-        q = "%" + self._search.text().strip() + "%"
-        store_ids = [s.id for s in self._registry.stores]
+        try:
+            rows = self._data.article_search(self._search.text().strip())
+        except Exception as exc:  # noqa: BLE001
+            self._log_msg("Hub injoignable : %s" % exc)
+            return
+        store_ids = [s.id for s in self._registry.stores][:3]
 
-        # Récupérer les articles depuis central.db (toutes les occurrences par magasin)
-        rows = self._con.execute(
-            "SELECT ref_art, designation, store_id, prixventeht "
-            "FROM article WHERE ref_art LIKE ? OR designation LIKE ? "
-            "ORDER BY ref_art, store_id LIMIT 100",
-            (q, q)).fetchall()
-
-        # Regrouper par ref_art
         by_ref: dict[str, dict] = {}
         for r in rows:
-            ref = r[0]
+            ref = r.get("ref_art")
             if ref not in by_ref:
-                by_ref[ref] = {"ref": ref, "desig": r[1], "prices": {}}
-            by_ref[ref]["prices"][r[2]] = r[3]
+                by_ref[ref] = {"ref": ref, "desig": r.get("designation"), "prices": {}}
+            by_ref[ref]["prices"][r.get("store_id")] = r.get("prixventeht")
 
         items = list(by_ref.values())
         self._results.setRowCount(len(items))
         for i, item in enumerate(items):
-            self._results.setItem(i, 0, QTableWidgetItem(item["ref"]))
-            self._results.setItem(i, 1, QTableWidgetItem(item["desig"] or ""))
-            for col, sid in enumerate(store_ids[:3], start=2):
+            self._results.setItem(i, 0, QTableWidgetItem(str(item["ref"])))
+            self._results.setItem(i, 1, QTableWidgetItem(str(item["desig"] or "")))
+            for col, sid in enumerate(store_ids, start=2):
                 price = item["prices"].get(sid)
                 cell = QTableWidgetItem("%.2f" % float(price) if price is not None else "—")
                 cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self._results.setItem(i, col, cell)
 
     def _do_apply(self) -> None:
-        sel = self._results.selectedItems()
-        if not sel:
+        if not self._results.selectedItems():
             QMessageBox.warning(self, "Aucune sélection", "Sélectionnez un article dans la liste.")
             return
-
         row = self._results.currentRow()
         ref_art = self._results.item(row, 0).text()
         new_ht = self._new_price.value()
@@ -177,30 +154,22 @@ class PrixPage(QWidget):
             QMessageBox.warning(self, "Prix invalide", "Le prix doit être > 0.")
             return
 
-        selected_stores = [sid for sid, cb in self._store_checks.items() if cb.isChecked()]
-        if not selected_stores:
+        selected = [sid for sid, cb in self._store_checks.items() if cb.isChecked()]
+        if not selected:
             QMessageBox.warning(self, "Scope vide", "Sélectionnez au moins un magasin.")
             return
 
-        self._log_msg("Application du prix %.2f DA pour %s sur %d magasin(s)…" % (
-            new_ht, ref_art, len(selected_stores)))
-
+        self._log_msg("Prix %.2f DA pour %s → %d magasin(s)…" % (new_ht, ref_art, len(selected)))
         changes = [{"ref0": ref_art, "values": {"PRIXVENTEHT": new_ht, "PRIXVENTETTC": new_ht}}]
 
-        tasks = []
-        for sid in selected_stores:
-            store = self._registry.get(sid)
-            kw = store.connect_kwargs()
-            online = is_reachable(store.host, store.port)
-            tasks.append(_WriteTask(sid, kw, changes, online))
-
-        self._thread = _PriceThread(tasks, self._con)
+        self._thread = _PriceThread(self._data, selected, changes)
         self._thread.progress.connect(self._on_progress)
         self._thread.finished_all.connect(self._on_all_done)
         self._thread.start()
 
-    def _on_progress(self, store_id: int, ok: bool, msg: str) -> None:
-        self._log_msg(("[OK] " if ok else "[ERREUR] ") + msg)
+    def _on_progress(self, store_id: int, status: str, msg: str) -> None:
+        tag = {"applied": "[OK] ", "queued": "[FILE] "}.get(status, "[ERREUR] ")
+        self._log_msg(tag + msg)
 
     def _on_all_done(self) -> None:
         self._log_msg("Terminé.")

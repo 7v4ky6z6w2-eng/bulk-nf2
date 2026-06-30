@@ -1,23 +1,19 @@
-"""Page Trésorerie : encaissements du jour par magasin et mode de paiement."""
+"""Page Trésorerie : encaissements du jour par magasin / mode (via le hub)."""
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QLabel, QScrollArea,
-    QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
-
-from hub.central_db import tresorerie_today
 
 
 class TresoreriePage(QWidget):
-    def __init__(self, db_con: sqlite3.Connection, store_names: dict, parent=None):
+    def __init__(self, data, store_names: dict, parent=None):
         super().__init__(parent)
-        self._con = db_con
+        self._data = data
         self._names = store_names
 
         self._day_lbl = QLabel()
@@ -48,14 +44,17 @@ class TresoreriePage(QWidget):
     def refresh(self) -> None:
         day = datetime.now().strftime("%Y-%m-%d")
         self._day_lbl.setText("<h3>%s</h3>" % day)
-        rows = tresorerie_today(self._con, day)
+        try:
+            rows = self._data.tresorerie_today(day)
+        except Exception:  # noqa: BLE001
+            return
         grand = sum(float(r.get("total_encaisse") or 0) for r in rows)
         self._total_lbl.setText("Total : %.2f DA" % grand)
 
         self._table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            sid = r["store_id"]
-            name = self._names.get(sid, "Magasin %d" % sid)
+            sid = r.get("store_id")
+            name = self._names.get(sid, "Magasin %s" % sid)
             self._table.setItem(i, 0, QTableWidgetItem(name))
             self._table.setItem(i, 1, QTableWidgetItem(r.get("mode_paiement") or "?"))
             amt = QTableWidgetItem("%.2f" % float(r.get("total_encaisse") or 0))

@@ -1,26 +1,26 @@
-"""Page Import BDR : sélecteur de magasin + import direct ou en file."""
+"""Page Import BDR : sélecteur de magasin + soumission au hub (direct ou file).
+
+L'aperçu (lecture Excel/PDF) se fait localement, sans base. L'import lui-même est
+envoyé au hub via HTTP : le hub l'applique tout de suite si le magasin est en
+ligne, sinon il le met en file (appliqué au prochain démarrage + notification).
+"""
 
 from __future__ import annotations
 
-import json
 import os
-import sqlite3
 import sys
-import tempfile
 import traceback
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from stores import StoreRegistry
-from hub.central_db import enqueue_op
-from hub.write_back import is_reachable, write_bdr, WriteError
 from desktop.store_picker import StorePicker
 
-# Vendor path pour accéder aux helpers BDR
+# Vendor path pour la lecture Excel/PDF (aucun accès Firebird ici).
 _VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "vendor")
 _BDR_DIR = os.path.join(_VENDOR, "bdr")
@@ -28,34 +28,35 @@ if _BDR_DIR not in sys.path:
     sys.path.insert(0, _BDR_DIR)
 
 
-class _ImportThread(QThread):
-    done = Signal(bool, str)  # (ok, message)
+class _SubmitThread(QThread):
+    done = Signal(dict, str)  # (résultat hub, message d'erreur réseau éventuel)
 
-    def __init__(self, connect_kwargs: dict, config: dict, lines: list):
+    def __init__(self, data, store_id: int, config: dict, lines: list):
         super().__init__()
-        self._kw = connect_kwargs
-        self._cfg = config
+        self._data = data
+        self._store_id = store_id
+        self._config = config
         self._lines = lines
 
     def run(self) -> None:
         try:
-            write_bdr(self._kw, self._cfg, self._lines)
-            self.done.emit(True, "Import BDR terminé avec succès (%d lignes)." % len(self._lines))
-        except WriteError as exc:
-            self.done.emit(False, str(exc))
+            res = self._data.submit_op(
+                self._store_id, "bdr_import",
+                {"config": self._config, "lines": self._lines})
+            self.done.emit(res, "")
         except Exception as exc:  # noqa: BLE001
-            self.done.emit(False, traceback.format_exc())
+            self.done.emit({}, str(exc))
 
 
 class BdrPage(QWidget):
-    def __init__(self, registry: StoreRegistry, db_con: sqlite3.Connection, parent=None):
+    def __init__(self, registry: StoreRegistry, data, parent=None):
         super().__init__(parent)
         self._registry = registry
-        self._con = db_con
+        self._data = data
         self._lines: list = []
         self._config: dict = {}
         self._excel_path: str = ""
-        self._thread: _ImportThread | None = None
+        self._thread: _SubmitThread | None = None
 
         self._picker = StorePicker(registry)
         self._excel_btn = QPushButton("Choisir fichier (Excel ou PDF)…")
@@ -66,7 +67,7 @@ class BdrPage(QWidget):
         self._import_btn.setEnabled(False)
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        self._log.setMaximumHeight(180)
+        self._log.setMaximumHeight(200)
 
         self._excel_btn.clicked.connect(self._choose_excel)
         self._preview_btn.clicked.connect(self._load_preview)
@@ -107,8 +108,13 @@ class BdrPage(QWidget):
             self._lines = []
             self._log_msg("Fichier : %s" % path)
 
+    def _build_config(self) -> dict:
+        # La connexion réelle est résolue côté hub ; on transmet seulement le
+        # type de pièce et les valeurs par défaut. Le hub force host/db/identifiants.
+        return {"type_piece": "PC_AC_B"}
+
     def _load_preview(self) -> None:
-        """Charge Excel ou PDF via le module BDR vendorisé et affiche un résumé."""
+        """Lit Excel ou PDF localement (sans base) et affiche un résumé."""
         try:
             import import_bon_reception as bdr  # type: ignore
             cfg = self._build_config()
@@ -119,7 +125,6 @@ class BdrPage(QWidget):
             else:
                 self._lines = bdr.read_excel(self._excel_path, cfg)
             self._config = cfg
-            # Avertir si des lignes PDF ont une réconciliation Qté×Prix douteuse
             if is_pdf:
                 bad = [l for l in self._lines if l.get("recon") is False]
                 if bad:
@@ -130,49 +135,37 @@ class BdrPage(QWidget):
             self._log_msg("Erreur chargement : %s" % exc)
             self._import_btn.setEnabled(False)
 
-    def _build_config(self) -> dict:
-        sid = self._picker.current_id() or 0
-        store = self._registry.get(sid)
-        kw = store.connect_kwargs()
-        return {
-            "host": kw["host"],
-            "port": kw["port"],
-            "database": kw["database"],
-            "user": kw["user"],
-            "password": kw["password"],
-            "charset": kw["charset"],
-            "type_piece": "PC_AC_B",
-        }
-
     def _do_import(self) -> None:
         if not self._lines:
             return
         sid = self._picker.current_id() or 0
         store = self._registry.get(sid)
-        kw = store.connect_kwargs()
-        online = is_reachable(store.host, store.port)
+        self._log_msg("Envoi au hub pour le magasin %s…" % store.name)
+        self._import_btn.setEnabled(False)
+        self._thread = _SubmitThread(self._data, sid, self._config, self._lines)
+        self._thread.done.connect(self._on_done)
+        self._thread.start()
 
-        if online:
-            self._log_msg("Magasin EN LIGNE — import direct…")
-            self._import_btn.setEnabled(False)
-            self._thread = _ImportThread(kw, self._config, self._lines)
-            self._thread.done.connect(self._on_done)
-            self._thread.start()
-        else:
-            # Mise en file
-            enqueue_op(self._con, sid, "bdr_import",
-                       {"config": self._config, "lines": self._lines})
-            self._log_msg(
-                "Magasin HORS LIGNE — opération mise en file.\n"
-                "Elle sera appliquée automatiquement à la prochaine connexion du magasin.")
-            QMessageBox.information(self, "En file",
-                "BDR mis en file d'attente pour %s.\n"
-                "Une notification Telegram/ntfy sera envoyée à l'application." % store.name)
-
-    def _on_done(self, ok: bool, msg: str) -> None:
+    def _on_done(self, res: dict, net_err: str) -> None:
         self._import_btn.setEnabled(True)
-        self._log_msg(msg)
-        if ok:
+        if net_err:
+            self._log_msg("Hub injoignable : %s" % net_err)
+            QMessageBox.critical(self, "Hub injoignable",
+                "Impossible de joindre le hub :\n%s\n\nVérifiez que le magasin 1 "
+                "est allumé et joignable (Tailscale)." % net_err)
+            return
+        status = res.get("status")
+        if status == "applied":
+            msg = "Import appliqué directement (%s lignes)." % res.get("count", "?")
+            self._log_msg(msg)
             QMessageBox.information(self, "Succès", msg)
+        elif status == "queued":
+            msg = ("Magasin hors ligne — mis en file (op #%s).\n"
+                   "Il sera appliqué au prochain démarrage du magasin, "
+                   "avec notification." % res.get("op_id", "?"))
+            self._log_msg(msg)
+            QMessageBox.information(self, "En file", msg)
         else:
-            QMessageBox.critical(self, "Échec", msg)
+            err = res.get("error", "erreur inconnue")
+            self._log_msg("Échec : %s" % err)
+            QMessageBox.critical(self, "Échec", err)

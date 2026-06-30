@@ -85,7 +85,20 @@ class StoreRegistry:
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     hub_port: int = 5000
     hub_api_key: str = ""
+    access_code: str = ""          # code de connexion pour les appareils clients
     path: str = STORES_PATH
+
+    @classmethod
+    def from_client(cls, stores_list: list, code: str = "") -> "StoreRegistry":
+        """Construit un registre LÉGER côté client (depuis /api/client/config).
+
+        Ne contient ni mot de passe ni chemin de base : juste id/nom/host/port,
+        suffisant pour les sélecteurs de magasin et le badge en ligne/hors-ligne.
+        """
+        stores = [Store(id=int(s["id"]), name=s.get("name", "Magasin %s" % s["id"]),
+                        host=s.get("host", ""), port=int(s.get("port", 3050)))
+                  for s in stores_list]
+        return cls(stores=stores, hub_api_key=code, access_code=code)
 
     def hub_url(self) -> str:
         """URL du serveur hub vue depuis CE poste (le host du magasin hub dans
@@ -130,6 +143,7 @@ class StoreRegistry:
         return cls(stores=stores, notify=notify,
                    hub_port=int(raw.get("hub_port", 5000)),
                    hub_api_key=raw.get("hub_api_key", ""),
+                   access_code=raw.get("access_code", ""),
                    path=path)
 
     # --- accès ------------------------------------------------------------
