@@ -10,6 +10,9 @@ pyinstaller --onefile ^
   --add-data "stores.json.example;." ^
   --hidden-import fdb ^
   --hidden-import requests ^
+  --hidden-import pikepdf ^
+  --hidden-import pdfplumber ^
+  --hidden-import fontTools ^
   sync_agent.py
 
 if errorlevel 1 (

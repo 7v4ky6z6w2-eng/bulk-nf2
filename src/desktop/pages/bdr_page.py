@@ -58,7 +58,7 @@ class BdrPage(QWidget):
         self._thread: _ImportThread | None = None
 
         self._picker = StorePicker(registry)
-        self._excel_btn = QPushButton("Choisir fichier Excel…")
+        self._excel_btn = QPushButton("Choisir fichier (Excel ou PDF)…")
         self._excel_lbl = QLabel("Aucun fichier sélectionné")
         self._preview_btn = QPushButton("Prévisualiser / Charger")
         self._preview_btn.setEnabled(False)
@@ -97,8 +97,8 @@ class BdrPage(QWidget):
 
     def _choose_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choisir un fichier Excel", "",
-            "Excel (*.xlsx *.xls);;Tous (*)")
+            self, "Choisir le fichier fournisseur (Excel ou PDF)", "",
+            "Fournisseur (*.xlsx *.xlsm *.pdf);;Excel (*.xlsx *.xlsm);;PDF (*.pdf);;Tous (*)")
         if path:
             self._excel_path = path
             self._excel_lbl.setText(os.path.basename(path))
@@ -108,12 +108,22 @@ class BdrPage(QWidget):
             self._log_msg("Fichier : %s" % path)
 
     def _load_preview(self) -> None:
-        """Charge l'Excel via le module BDR vendorisé (read_excel) et affiche un résumé."""
+        """Charge Excel ou PDF via le module BDR vendorisé et affiche un résumé."""
         try:
             import import_bon_reception as bdr  # type: ignore
             cfg = self._build_config()
-            self._lines = bdr.read_excel(self._excel_path, cfg)
+            is_pdf = self._excel_path.lower().endswith(".pdf")
+            if is_pdf:
+                self._log_msg("Lecture du PDF en cours (reconstruction glyphes)…")
+                self._lines = bdr.read_pdf(self._excel_path, cfg)
+            else:
+                self._lines = bdr.read_excel(self._excel_path, cfg)
             self._config = cfg
+            # Avertir si des lignes PDF ont une réconciliation Qté×Prix douteuse
+            if is_pdf:
+                bad = [l for l in self._lines if l.get("recon") is False]
+                if bad:
+                    self._log_msg("⚠ %d ligne(s) avec Qté × Prix ≠ Montant — vérifier." % len(bad))
             self._log_msg("Chargé : %d articles" % len(self._lines))
             self._import_btn.setEnabled(bool(self._lines))
         except Exception as exc:  # noqa: BLE001

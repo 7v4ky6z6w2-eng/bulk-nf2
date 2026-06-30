@@ -3,3 +3,7 @@ flask>=3.0
 requests>=2.31
 fdb==2.0.4
 openpyxl>=3.1
+# Import PDF fournisseur (optionnel mais recommandé)
+pikepdf>=8
+pdfplumber>=0.10
+fonttools>=4.40

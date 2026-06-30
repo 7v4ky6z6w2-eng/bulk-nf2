@@ -361,14 +361,197 @@ def load_lines_json(path, cfg):
 
 
 def load_lines(args, cfg):
-    """Charge les lignes depuis --excel OU --lines (une seule des deux)."""
+    """Charge les lignes depuis --excel, --pdf OU --lines (une seule des trois)."""
     if getattr(args, "lines", None):
         if not os.path.isfile(args.lines):
             sys.exit("Fichier de lignes introuvable : %s" % args.lines)
         return load_lines_json(args.lines, cfg)
+    if getattr(args, "pdf", None):
+        if not os.path.isfile(args.pdf):
+            sys.exit("Fichier PDF introuvable : %s" % args.pdf)
+        return read_pdf(args.pdf, cfg)
     if not os.path.isfile(args.excel):
         sys.exit("Fichier Excel introuvable : %s" % args.excel)
     return read_excel(args.excel, cfg)
+
+
+# --------------------------------------------------------------------------- #
+#  Lecture d'un bon fournisseur PDF
+# --------------------------------------------------------------------------- #
+#  De nombreux logiciels exportent un PDF dont la couche texte (ToUnicode) est
+#  cassee : a l'ecran les chiffres sont corrects, mais a la COPIE certains
+#  deviennent des lettres arabes (2 -> «س») ou disparaissent (1). On reconstruit
+#  le vrai texte a partir des GLYPHES de la police embarquee (correcte), en
+#  reecrivant le ToUnicode, puis on lit le tableau avec pdfplumber.
+# --------------------------------------------------------------------------- #
+def _pdf_gid2uni(font_obj):
+    import io as _io
+    from fontTools.ttLib import TTFont
+    try:
+        ff = font_obj.DescendantFonts[0].FontDescriptor.FontFile2
+    except Exception:
+        return {}
+    tt = TTFont(_io.BytesIO(bytes(ff.read_bytes())))
+    best = tt.getBestCmap()
+    n2g = {n: i for i, n in enumerate(tt.getGlyphOrder())}
+    return {n2g[g]: chr(u) for u, g in best.items() if g in n2g}
+
+
+def _pdf_tounicode_cmap(g2u):
+    items = sorted(g2u.items())
+    head = ("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+            "/CIDSystemInfo <</Registry (Adobe)/Ordering (UCS)/Supplement 0>> def\n"
+            "/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n"
+            "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n")
+    body = ""
+    for i in range(0, len(items), 100):
+        chunk = items[i:i + 100]
+        body += "%d beginbfchar\n" % len(chunk)
+        for gid, u in chunk:
+            body += "<%04X> <%s>\n" % (gid, "".join("%04X" % ord(c) for c in u))
+        body += "endbfchar\n"
+    return head + body + "endcmap\nend\nend\n"
+
+
+def _pdf_repair_tounicode(src, dst):
+    """Reecrit le ToUnicode de chaque police a partir des glyphes reels de la
+    police embarquee, et enregistre une copie dechiffree dans 'dst'."""
+    import pikepdf
+    pdf = pikepdf.open(src)
+    for page in pdf.pages:
+        try:
+            fonts = page.Resources.Font
+        except Exception:
+            continue
+        for _n, f in fonts.items():
+            try:
+                if str(f.get("/Subtype")) == "/Type0":
+                    g2u = _pdf_gid2uni(f)
+                    if g2u:
+                        f.ToUnicode = pdf.make_stream(_pdf_tounicode_cmap(g2u).encode("latin-1"))
+            except Exception:
+                continue
+    pdf.save(dst)
+
+
+def _pdf_clean(s):
+    if s is None:
+        return ""
+    s = s.replace("­", "").replace("\n", " ")   # trait conditionnel, retours
+    return " ".join(s.split())
+
+
+def _pdf_amount(s):
+    """Convertit '2 100.00 DA' -> 2100.0 ; '1 234,50' -> 1234.5."""
+    if not s:
+        return 0.0
+    s = re.sub(r"[^0-9,.\-]", "", str(s).replace(" ", ""))
+    if "," in s and "." not in s:
+        s = s.replace(",", ".")
+    else:
+        s = s.replace(",", "")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _pdf_extract_rows(path):
+    """Repare puis lit le tableau du PDF ; renvoie des dicts bruts par ligne."""
+    import tempfile
+    import pdfplumber
+    fd, tmp = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    try:
+        _pdf_repair_tounicode(path, tmp)
+        rows = []
+        with pdfplumber.open(tmp) as pdf:
+            for p in pdf.pages:
+                for t in p.extract_tables():
+                    rows.extend(t)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    colmap = None
+    out = []
+    for r in rows:
+        cells = [_pdf_clean(c) for c in r]
+        ncells = [norm(c) for c in cells]
+        if (any("reference" in n for n in ncells)
+                and any("designation" in n for n in ncells)):
+            colmap = {}
+            for i, n in enumerate(ncells):
+                if "reference" in n:
+                    colmap["ref"] = i
+                elif "designation" in n:
+                    colmap["designation"] = i
+                elif n.startswith("qte") or "quantite" in n:
+                    colmap["qte"] = i
+                elif "prix" in n:
+                    colmap["prix"] = i
+                elif "montant" in n:
+                    colmap["montant"] = i
+            continue
+        if not colmap:
+            continue
+        if len([c for c in cells if c]) <= 1:
+            continue                                  # titre / ligne vide
+
+        def cell(k):
+            i = colmap.get(k)
+            return cells[i] if i is not None and i < len(cells) else ""
+        ref = cell("ref").replace(" ", "")
+        qte = _pdf_amount(cell("qte"))
+        prix = _pdf_amount(cell("prix"))
+        montant = _pdf_amount(cell("montant"))
+        if not ref and qte == 0 and prix == 0:
+            continue
+        recon = None
+        if montant and prix and qte:
+            recon = abs(qte * prix - montant) <= max(0.5, montant * 0.01)
+        out.append({"ref_art": ref, "designation": cell("designation"),
+                    "qte": qte, "prix": prix, "montant": montant, "recon": recon})
+    return out
+
+
+def read_pdf(path, cfg):
+    """Lit un bon fournisseur PDF et renvoie des lignes au MEME format que
+    read_excel (assainies via le charset), avec en plus 'montant' et 'recon'
+    (reconciliation Qte x Prix = Montant) pour signaler une lecture douteuse."""
+    for mod, pipname in (("pikepdf", "pikepdf"), ("pdfplumber", "pdfplumber"),
+                         ("fontTools", "fonttools")):
+        try:
+            __import__(mod)
+        except ImportError:
+            raise ValueError(
+                "Lecture PDF : module « %s » manquant (pip install %s)."
+                % (mod, pipname))
+    raw = _pdf_extract_rows(path)
+    codec = codec_for(cfg.get("charset"))
+    txt = lambda v: safe_text(v, codec)
+    lines = []
+    for d in raw:
+        ref = str(d.get("ref_art") or "").strip()
+        if not ref:
+            continue
+        line = {
+            "ref_art":     txt(ref),
+            "designation": txt(d.get("designation") or ref),
+            "qte":         to_float(d.get("qte"), 0.0),
+            "prix":        to_float(d.get("prix"), 0.0),
+            "tva":         cfg["default_tva"],
+            "famille":     "",
+            "code_barres": "",
+            "montant":     to_float(d.get("montant"), 0.0),
+            "recon":       d.get("recon"),
+        }
+        apply_ref_to_designation(line, cfg)
+        lines.append(line)
+    return lines
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1113,6 +1296,7 @@ def main():
     ap.add_argument("--config", help="Fichier de configuration JSON")
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--excel", help="Fichier Excel du fournisseur (.xlsx)")
+    src.add_argument("--pdf", help="Bon fournisseur au format PDF (.pdf)")
     src.add_argument("--lines", help="Fichier JSON de lignes pre-analysees (table GUI editee)")
     ap.add_argument("--db", help="Chemin du .FDB (surcharge la config)")
     ap.add_argument("--date", help="Date du bon (AAAA-MM-JJ). Defaut : aujourd'hui.")
@@ -1159,8 +1343,8 @@ def main():
         mode_list_tiers(cfg, args.out); return
 
     # Modes / import necessitant des lignes
-    if not args.excel and not args.lines:
-        sys.exit("Indiquez --excel ou --lines (ou un mode --list-*/--cancel-piece/--make-template).")
+    if not args.excel and not args.lines and not args.pdf:
+        sys.exit("Indiquez --excel, --pdf ou --lines (ou un mode --list-*/--cancel-piece/--make-template).")
     lines = load_lines(args, cfg)
     if not lines:
         sys.exit("Aucune ligne d'article trouvee.")
