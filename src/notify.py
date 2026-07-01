@@ -39,16 +39,14 @@ class Notifier:
         op_type = op["op_type"]
         status = op["status"]
 
+        labels = {"bdr_import": ("BDR", "importé"),
+                  "price_update": ("Prix", "mis à jour"),
+                  "barcode_ops": ("Codes-barres", "mis à jour")}
+        action, verb = labels.get(op_type, ("Opération", "appliquée"))
         if status == "applied":
-            icon = "✅"
-            verb = "importé" if op_type == "bdr_import" else "mis à jour"
-            action = "BDR" if op_type == "bdr_import" else "Prix"
-            return "%s %s %s au %s" % (icon, action, verb, name)
-        else:
-            icon = "❌"
-            action = "BDR" if op_type == "bdr_import" else "Prix"
-            err = (op.get("error_msg") or "raison inconnue")[:200]
-            return "%s Échec %s au %s : %s" % (icon, action, name, err)
+            return "✅ %s %s au %s" % (action, verb, name)
+        err = (op.get("error_msg") or "raison inconnue")[:200]
+        return "❌ Échec %s au %s : %s" % (action, name, err)
 
     def _send_telegram(self, text: str) -> bool:
         if not self.bot_token or not self.chat_id:

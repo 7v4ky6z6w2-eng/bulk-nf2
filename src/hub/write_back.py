@@ -98,6 +98,52 @@ def write_prices(connect_kwargs: dict, changes: list) -> None:
         repo.close()
 
 
+def write_barcode_ops(connect_kwargs: dict, ops: list) -> None:
+    """Applique des ajouts/suppressions de codes-barres dans EQUIV_CBARRES.
+
+    N'écrit QUE dans EQUIV_CBARRES (la table affichée par Netfact2) : ni
+    ARTICLE.CODE_BARRE(35) ni ARTICLE.CODE_BARRES(60) ne sont touchés.
+      * action 'add'    → add_barcode_equiv (logique vendorisée, générateur,
+                          respect de l'unicité, idempotent) ;
+      * action 'remove' → DELETE de la ligne (ref_art, code_barres).
+    """
+    import import_bon_reception as bdr  # type: ignore
+
+    cfg = {
+        "host": connect_kwargs.get("host", "localhost"),
+        "port": connect_kwargs.get("port", 3050),
+        "database": connect_kwargs["database"],
+        "user": connect_kwargs.get("user", "SYSDBA"),
+        "password": connect_kwargs.get("password", ""),
+        "charset": connect_kwargs.get("charset", "WIN1256"),
+    }
+    if not ops:
+        raise WriteError("Aucune opération de code-barres.")
+
+    con = bdr.connect(cfg)
+    imp = bdr.Importer(con, cfg)
+    cur = con.cursor()
+    try:
+        for op in ops:
+            ref = (op.get("ref_art") or "").strip()
+            bc = (op.get("barcode") or "").strip()
+            if not ref or not bc:
+                continue
+            if op.get("action") == "remove":
+                cur.execute("DELETE FROM EQUIV_CBARRES WHERE REF_ART = ? AND CODE_BARRES = ?",
+                            (ref, bc))
+            else:
+                imp.add_barcode_equiv(ref, bc)   # ajoute dans EQUIV_CBARRES
+        con.commit()
+    except Exception as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            con.rollback()
+        raise WriteError("Écriture code-barres échouée : %s" % exc) from exc
+    finally:
+        with contextlib.suppress(Exception):
+            con.close()
+
+
 def is_reachable(host: str, port: int = 3050, timeout: float = 3.0) -> bool:
     """Teste rapidement si le serveur Firebird du magasin est joignable."""
     import socket

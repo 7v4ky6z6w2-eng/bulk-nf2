@@ -13,7 +13,10 @@ from hub.central_db import (
     store_status, tresorerie_today, tresorerie_caisses, stock_rows, ventes_rows,
     sync_logs, pending_ops_recent, article_search,
 )
-from hub.write_back import is_reachable, write_bdr, write_prices, WriteError
+from hub.write_back import (
+    is_reachable, write_bdr, write_prices, write_barcode_ops, WriteError,
+)
+from hub.central_db import apply_barcode_ops_local, article_barcodes
 
 bp = Blueprint("api", __name__)
 
@@ -231,6 +234,17 @@ def data_article_search():
     return jsonify(rows=article_search(_db(), request.args.get("q", "")))
 
 
+@bp.get("/api/data/article_barcodes")
+def data_article_barcodes():
+    err = _check_key()
+    if err:
+        return err
+    ref = request.args.get("ref", "")
+    if not ref:
+        return jsonify(rows=[])
+    return jsonify(rows=article_barcodes(_db(), ref))
+
+
 # ── Soumission d'une opération d'écriture (BDR / prix) ───────────────────────
 #  Le client bureau n'écrit JAMAIS directement dans Firebird : il envoie l'op
 #  ici. Le hub (magasin 1, toujours allumé, possède fbclient + accès Tailscale)
@@ -245,7 +259,7 @@ def submit_op():
     store_id = int(data.get("store_id", 0))
     op_type = data.get("op_type", "")
     payload = data.get("payload") or {}
-    if not store_id or op_type not in ("bdr_import", "price_update"):
+    if not store_id or op_type not in ("bdr_import", "price_update", "barcode_ops"):
         return jsonify(error="store_id et op_type valides requis"), 400
 
     registry = current_app.config.get("registry")
@@ -263,9 +277,14 @@ def submit_op():
             if op_type == "bdr_import":
                 write_bdr(kw, payload.get("config") or {}, payload.get("lines") or [])
                 n = len(payload.get("lines") or [])
-            else:
+            elif op_type == "price_update":
                 write_prices(kw, payload.get("changes") or [])
                 n = len(payload.get("changes") or [])
+            else:  # barcode_ops
+                ops = payload.get("ops") or []
+                write_barcode_ops(kw, ops)
+                apply_barcode_ops_local(_db(), store_id, ops)  # miroir cohérent
+                n = len(ops)
             return jsonify(status="applied", count=n)
         except WriteError as exc:
             return jsonify(status="error", error=str(exc))

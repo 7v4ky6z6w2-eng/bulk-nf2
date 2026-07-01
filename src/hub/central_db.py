@@ -37,6 +37,7 @@ COLUMN_MAP = {
     "item": ["nopiece", "noitem", "ref_art", "qte", "prixht", "remise",
              "marge", "annulee"],
     "stock_snapshot": ["ref_art", "code_depot", "qte_stock", "pump"],
+    "equiv_cbarres": ["ref_art", "code_barres"],
     "tresorerie_snapshot": ["snap_date", "caisse", "sens", "mode_paiement",
                             "total_encaisse", "nb_transactions"],
 }
@@ -275,3 +276,30 @@ def article_search(con: sqlite3.Connection, query: str = "", limit: int = 200) -
         "FROM article WHERE ref_art LIKE ? OR designation LIKE ? "
         "ORDER BY ref_art, store_id LIMIT ?", (q, q, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+def article_barcodes(con: sqlite3.Connection, ref_art: str) -> list:
+    """Codes-barres équivalents connus d'un article, par magasin (dernier sync)."""
+    rows = con.execute(
+        "SELECT store_id, code_barres FROM equiv_cbarres WHERE ref_art=? "
+        "ORDER BY store_id, code_barres", (ref_art,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def apply_barcode_ops_local(con: sqlite3.Connection, store_id: int, ops: list) -> None:
+    """Répercute immédiatement des ajouts/suppressions de codes-barres sur le
+    miroir central (pour que l'affichage reste cohérent après une écriture
+    directe sur un magasin en ligne)."""
+    for op in ops:
+        ref = op.get("ref_art")
+        bc = op.get("barcode")
+        if not ref or not bc:
+            continue
+        if op.get("action") == "remove":
+            con.execute("DELETE FROM equiv_cbarres WHERE store_id=? AND ref_art=? "
+                        "AND code_barres=?", (store_id, ref, bc))
+        else:
+            con.execute("INSERT OR IGNORE INTO equiv_cbarres "
+                        "(store_id, ref_art, code_barres, synced_at) VALUES (?,?,?,?)",
+                        (store_id, ref, bc, now_iso()))
+    con.commit()

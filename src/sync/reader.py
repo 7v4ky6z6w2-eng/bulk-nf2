@@ -200,6 +200,24 @@ class FirebirdReader:
             params = (cutoff,)
         return self._fetch(sql, params)
 
+    # -- codes-barres équivalents (table affichée par Netfact2) -----------
+    def read_equiv_cbarres(self) -> list:
+        """Tous les codes-barres de EQUIV_CBARRES (REF_ART + CODE_BARRES).
+
+        C'est la table que Netfact2 affiche dans la fiche article et utilise
+        pour le scan (contrairement à ARTICLE.CODE_BARRE(35)/CODE_BARRES(60)).
+        """
+        if not self.has_table("EQUIV_CBARRES"):
+            return []
+        cols = self.columns("EQUIV_CBARRES")
+        ref = _candidate(cols, "REF_ART")
+        bc = _candidate(cols, "CODE_BARRES", "CODE_BARRE", "CBARRE")
+        if not ref or not bc:
+            return []
+        return self._fetch(
+            "SELECT %s AS ref_art, %s AS code_barres FROM EQUIV_CBARRES "
+            "WHERE %s IS NOT NULL AND CHAR_LENGTH(TRIM(%s)) > 0" % (ref, bc, bc, bc))
+
     # -- stock (instantané) ------------------------------------------------
     def read_stock_snapshot(self) -> list:
         """Instantané du stock par article et dépôt.
@@ -333,6 +351,7 @@ class FirebirdReader:
         yield "piece", self.read_piece(w("piece"))
         yield "item", self.read_item_for_recent(w("piece"))
         yield "stock_snapshot", self.read_stock_snapshot()
+        yield "equiv_cbarres", self.read_equiv_cbarres()
         yield "tresorerie_snapshot", self.read_tresorerie_today()
 
 

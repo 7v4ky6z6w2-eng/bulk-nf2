@@ -76,6 +76,9 @@ class HubData:
     def article_search(self, query: str) -> list:
         return self._get("/api/data/article_search", {"q": query}).get("rows", [])
 
+    def article_barcodes(self, ref_art: str) -> list:
+        return self._get("/api/data/article_barcodes", {"ref": ref_art}).get("rows", [])
+
     # -- écriture (BDR / prix) --------------------------------------------
     def submit_op(self, store_id: int, op_type: str, payload: dict,
                   timeout: float = 180.0) -> dict:

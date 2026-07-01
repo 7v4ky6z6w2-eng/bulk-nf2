@@ -24,6 +24,7 @@ from desktop.pages.tresorerie import TresoreriePage
 from desktop.pages.sync_status import SyncStatusPage
 from desktop.pages.bdr_page import BdrPage
 from desktop.pages.prix_page import PrixPage
+from desktop.pages.cbarre_page import CbarrePage
 
 
 # (label, classe, besoin_du_registre)
@@ -34,6 +35,7 @@ _PAGES = [
     ("Trésorerie", TresoreriePage, False),
     ("Import BDR", BdrPage, True),
     ("Éditeur de prix", PrixPage, True),
+    ("Codes-barres", CbarrePage, True),
     ("Synchronisation", SyncStatusPage, False),
 ]
 

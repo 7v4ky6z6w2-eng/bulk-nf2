@@ -181,3 +181,15 @@ CREATE TABLE IF NOT EXISTS tresorerie_snapshot (
     UNIQUE (store_id, snap_date, caisse, sens, mode_paiement)
 );
 CREATE INDEX IF NOT EXISTS idx_treso_store_date ON tresorerie_snapshot (store_id, snap_date);
+
+-- Codes-barres équivalents (miroir de EQUIV_CBARRES, table affichée par Netfact2)
+CREATE TABLE IF NOT EXISTS equiv_cbarres (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id     INTEGER NOT NULL,
+    ref_art      TEXT    NOT NULL,
+    code_barres  TEXT    NOT NULL,
+    synced_at    TEXT    NOT NULL,
+    UNIQUE (store_id, ref_art, code_barres)
+);
+CREATE INDEX IF NOT EXISTS idx_equiv_ref ON equiv_cbarres (store_id, ref_art);
+CREATE INDEX IF NOT EXISTS idx_equiv_bc  ON equiv_cbarres (code_barres);

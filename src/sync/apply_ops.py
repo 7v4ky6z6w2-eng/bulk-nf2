@@ -42,8 +42,50 @@ def apply_op(op: dict, connect_kwargs: dict) -> None:
         _apply_bdr(payload, connect_kwargs)
     elif op_type == "price_update":
         _apply_price(payload, connect_kwargs)
+    elif op_type == "barcode_ops":
+        _apply_barcode(payload, connect_kwargs)
     else:
         raise ApplyError("Type d'opération inconnu : %s" % op_type)
+
+
+def _apply_barcode(payload: dict, connect_kwargs: dict) -> None:
+    """Applique des ajouts/suppressions de codes-barres (EQUIV_CBARRES)."""
+    import import_bon_reception as bdr  # type: ignore
+
+    cfg = {
+        "host": "localhost",
+        "port": connect_kwargs.get("port", 3050),
+        "database": connect_kwargs["database"],
+        "user": connect_kwargs.get("user", "SYSDBA"),
+        "password": connect_kwargs.get("password", ""),
+        "charset": connect_kwargs.get("charset", "WIN1256"),
+    }
+    ops = payload.get("ops") or []
+    if not ops:
+        raise ApplyError("Aucune opération de code-barres.")
+
+    con = bdr.connect(cfg)
+    imp = bdr.Importer(con, cfg)
+    cur = con.cursor()
+    try:
+        for op in ops:
+            ref = (op.get("ref_art") or "").strip()
+            bc = (op.get("barcode") or "").strip()
+            if not ref or not bc:
+                continue
+            if op.get("action") == "remove":
+                cur.execute("DELETE FROM EQUIV_CBARRES WHERE REF_ART = ? AND CODE_BARRES = ?",
+                            (ref, bc))
+            else:
+                imp.add_barcode_equiv(ref, bc)
+        con.commit()
+    except Exception as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            con.rollback()
+        raise ApplyError("Écriture code-barres échouée : %s" % exc) from exc
+    finally:
+        with contextlib.suppress(Exception):
+            con.close()
 
 
 # --------------------------------------------------------------------------- #
