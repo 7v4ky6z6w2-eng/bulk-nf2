@@ -256,7 +256,12 @@ class FirebirdReader:
 
     # -- trésorerie (encaissements du jour) --------------------------------
     def read_tresorerie_today(self, day: str | None = None) -> list:
-        """Total encaissé aujourd'hui par mode de règlement.
+        """Total encaissé aujourd'hui par CAISSE et par mode de règlement.
+
+        Netfact2 stocke la caisse (caisse1, caisse2…) dans la colonne PIECE.CAISSE
+        et ces valeurs varient d'une base à l'autre. On regroupe donc par
+        (caisse, mode) ; le tableau de bord permet ensuite de choisir une caisse
+        ou « Globale » (toutes cumulées).
 
         Note : sur les pièces de VENTE, ANNULEE=0 = active (le BDR utilise =1).
         On retient les pièces avec MONTANTVERSE renseigné et non annulées.
@@ -271,17 +276,42 @@ class FirebirdReader:
         join = "JOIN MODE_REGL MR ON P.CODE_MODE_REGL = MR.CODE_MODE_REGL" if has_mr else ""
         annulee_clause = "AND (P.ANNULEE = 0 OR P.ANNULEE IS NULL)" \
             if _candidate(cols, "ANNULEE") else ""
+
+        # Colonne caisse (détectée : varie selon les installations).
+        caisse_col = _candidate(cols, "CAISSE", "CODE_CAISSE", "NUM_CAISSE", "NOCAISSE")
+        caisse_sel = "P.%s AS caisse, " % caisse_col if caisse_col else "'(globale)' AS caisse, "
+        caisse_grp = ", P.%s" % caisse_col if caisse_col else ""
+
+        # Sens entrée / sortie : Netfact2 encode le sens financier de la pièce
+        # dans COEFF_PIECE (+ COEFF_PIECE_TR). Signe >= 0 → recette (entrée) ;
+        # < 0 → dépense (sortie). À défaut, on se rabat sur le signe du montant
+        # versé (certaines installations stockent les sorties en négatif).
+        cp = _candidate(cols, "COEFF_PIECE")
+        cptr = _candidate(cols, "COEFF_PIECE_TR")
+        if cp:
+            coeff = "COALESCE(P.%s,0)" % cp
+            if cptr:
+                coeff += " + COALESCE(P.%s,0)" % cptr
+            sens_expr = "CASE WHEN (%s) < 0 THEN 'sortie' ELSE 'entree' END" % coeff
+        else:
+            sens_expr = "CASE WHEN P.MONTANTVERSE < 0 THEN 'sortie' ELSE 'entree' END"
+
         sql = (
-            "SELECT %s AS mode_paiement, SUM(P.MONTANTVERSE) AS total_encaisse, "
+            "SELECT %s%s AS mode_paiement, %s AS sens, "
+            "       SUM(ABS(P.MONTANTVERSE)) AS total_encaisse, "
             "       COUNT(*) AS nb_transactions "
             "FROM PIECE P %s "
             "WHERE CAST(P.DATEPIECE AS DATE) = ? %s "
-            "  AND P.MONTANTVERSE IS NOT NULL "
-            "GROUP BY %s" % (mode_expr, join, annulee_clause, mode_expr))
+            "  AND P.MONTANTVERSE IS NOT NULL AND P.MONTANTVERSE <> 0 "
+            "GROUP BY %s%s, %s" % (caisse_sel, mode_expr, sens_expr, join,
+                                   annulee_clause, mode_expr, caisse_grp, sens_expr))
         rows = self._fetch(sql, (day,))
         for r in rows:
             r["snap_date"] = day
             r["mode_paiement"] = r.get("mode_paiement") or "(inconnu)"
+            r["sens"] = r.get("sens") or "entree"
+            r["caisse"] = (str(r.get("caisse")).strip() if r.get("caisse") is not None
+                           else "(globale)") or "(globale)"
         return rows
 
     # -- orchestration -----------------------------------------------------

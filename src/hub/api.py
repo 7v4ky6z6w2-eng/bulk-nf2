@@ -10,7 +10,7 @@ from flask import Blueprint, jsonify, request, current_app
 from hub.central_db import (
     upsert_batch, start_sync, finish_sync, add_rows_pushed,
     pending_ops_for, mark_op, enqueue_op, SYNC_TABLES,
-    store_status, tresorerie_today, stock_rows, ventes_rows,
+    store_status, tresorerie_today, tresorerie_caisses, stock_rows, ventes_rows,
     sync_logs, pending_ops_recent, article_search,
 )
 from hub.write_back import is_reachable, write_bdr, write_prices, WriteError
@@ -179,7 +179,16 @@ def data_tresorerie():
     if err:
         return err
     day = request.args.get("day") or None
-    return jsonify(rows=tresorerie_today(_db(), day))
+    caisse = request.args.get("caisse") or None
+    return jsonify(rows=tresorerie_today(_db(), day, caisse))
+
+
+@bp.get("/api/data/caisses")
+def data_caisses():
+    err = _check_key()
+    if err:
+        return err
+    return jsonify(rows=tresorerie_caisses(_db()))
 
 
 @bp.get("/api/data/stock")

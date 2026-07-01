@@ -1,27 +1,48 @@
 {% extends "base.html" %}
 {% block title %}Trésorerie — PrimeNF Hub{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
+<div class="d-flex justify-content-between align-items-center mb-3">
   <h4 class="mb-0">Trésorerie du {{ day }}</h4>
-  <span class="badge bg-primary fs-6">Total : {{ "%.2f"|format(grand_total) }} DA</span>
+  <form method="get" class="d-flex align-items-center gap-2">
+    <label class="text-muted small mb-0">Caisse :</label>
+    <select name="caisse" class="form-select form-select-sm" style="width:auto"
+            onchange="this.form.submit()">
+      <option value="" {% if not selected_caisse %}selected{% endif %}>Globale (toutes)</option>
+      {% for c in caisses %}
+      <option value="{{ c }}" {% if selected_caisse == c %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+  </form>
 </div>
+
+<div class="row g-2 mb-4">
+  <div class="col-auto"><span class="badge bg-success fs-6">Entrées : {{ "%.2f"|format(tot_entree) }} DA</span></div>
+  <div class="col-auto"><span class="badge bg-danger fs-6">Sorties : {{ "%.2f"|format(tot_sortie) }} DA</span></div>
+  <div class="col-auto"><span class="badge bg-primary fs-6">Solde : {{ "%.2f"|format(solde) }} DA</span></div>
+</div>
+
 <div class="row g-3">
   {% for s in stores %}
   <div class="col-md-4">
-    <div class="card treso-card h-100">
+    <div class="card h-100">
       <div class="card-header d-flex justify-content-between">
         <strong>{{ s.name }}</strong>
         <small class="text-muted">{{ s.synced_at }}</small>
       </div>
       <div class="card-body">
-        <p class="fs-5 fw-bold mb-3">{{ "%.2f"|format(s.total) }} DA</p>
+        <div class="d-flex justify-content-between mb-2">
+          <span class="text-success">Entrées : {{ "%.2f"|format(s.entree) }}</span>
+          <span class="text-danger">Sorties : {{ "%.2f"|format(s.sortie) }}</span>
+        </div>
+        <p class="fw-bold mb-3">Solde : {{ "%.2f"|format(s.solde) }} DA</p>
         <table class="table table-sm table-borderless mb-0">
+          <thead><tr><th></th><th class="text-end text-success">Entrée</th><th class="text-end text-danger">Sortie</th></tr></thead>
           <tbody>
             {% for m in s.modes %}
             <tr>
               <td>{{ m.mode }}</td>
-              <td class="text-end">{{ "%.2f"|format(m.total) }}</td>
-              <td class="text-end text-muted small">{{ m.nb }} op.</td>
+              <td class="text-end">{{ "%.2f"|format(m.entree) }}</td>
+              <td class="text-end">{{ "%.2f"|format(m.sortie) }}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -30,9 +51,7 @@
     </div>
   </div>
   {% else %}
-  <div class="col-12">
-    <p class="text-muted">Aucune donnée de trésorerie pour aujourd'hui.</p>
-  </div>
+  <div class="col-12"><p class="text-muted">Aucune donnée de trésorerie pour aujourd'hui.</p></div>
   {% endfor %}
 </div>
 {% endblock %}

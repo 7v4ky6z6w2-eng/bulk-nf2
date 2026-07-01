@@ -37,8 +37,8 @@ COLUMN_MAP = {
     "item": ["nopiece", "noitem", "ref_art", "qte", "prixht", "remise",
              "marge", "annulee"],
     "stock_snapshot": ["ref_art", "code_depot", "qte_stock", "pump"],
-    "tresorerie_snapshot": ["snap_date", "mode_paiement", "total_encaisse",
-                            "nb_transactions"],
+    "tresorerie_snapshot": ["snap_date", "caisse", "sens", "mode_paiement",
+                            "total_encaisse", "nb_transactions"],
 }
 
 SYNC_TABLES = set(COLUMN_MAP)
@@ -65,8 +65,30 @@ def init_db(db_path: str) -> None:
     try:
         con.executescript(schema)
         con.commit()
+        _migrate(con)
+        con.commit()
     finally:
         con.close()
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    """Migrations légères des bases déjà créées avant une évolution de schéma."""
+    # Ajout des colonnes « caisse » et « sens » à tresorerie_snapshot.
+    # La contrainte UNIQUE doit les inclure : on recrée la table si besoin (ce
+    # n'est qu'un cache journalier, repeuplé à la prochaine synchro).
+    cols = [r[1] for r in con.execute("PRAGMA table_info(tresorerie_snapshot)").fetchall()]
+    if cols and ("caisse" not in cols or "sens" not in cols):
+        con.execute("DROP TABLE tresorerie_snapshot")
+        con.executescript(
+            "CREATE TABLE tresorerie_snapshot ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, store_id INTEGER NOT NULL,"
+            " snap_date TEXT NOT NULL, caisse TEXT DEFAULT '(globale)',"
+            " sens TEXT DEFAULT 'entree', mode_paiement TEXT NOT NULL,"
+            " total_encaisse REAL DEFAULT 0, nb_transactions INTEGER DEFAULT 0,"
+            " synced_at TEXT NOT NULL,"
+            " UNIQUE (store_id, snap_date, caisse, sens, mode_paiement));"
+            "CREATE INDEX IF NOT EXISTS idx_treso_store_date "
+            " ON tresorerie_snapshot (store_id, snap_date);")
 
 
 # --------------------------------------------------------------------------- #
@@ -182,12 +204,27 @@ def store_status(con: sqlite3.Connection) -> list:
     return [dict(r) for r in rows]
 
 
-def tresorerie_today(con: sqlite3.Connection, day: str | None = None) -> list:
+def tresorerie_today(con: sqlite3.Connection, day: str | None = None,
+                     caisse: str | None = None) -> list:
+    """Encaissements du jour. Si `caisse` est fourni (et != 'Globale'), on ne
+    garde que cette caisse ; sinon toutes les caisses sont renvoyées (le client
+    peut cumuler pour obtenir la vue « Globale »)."""
     day = day or datetime.now().strftime("%Y-%m-%d")
+    sql = ("SELECT store_id, caisse, sens, mode_paiement, total_encaisse, "
+           "nb_transactions, synced_at FROM tresorerie_snapshot WHERE snap_date=?")
+    params = [day]
+    if caisse and caisse.lower() not in ("globale", "(globale)", "toutes", ""):
+        sql += " AND caisse=?"
+        params.append(caisse)
+    sql += " ORDER BY store_id, caisse, mode_paiement"
+    return [dict(r) for r in con.execute(sql, params).fetchall()]
+
+
+def tresorerie_caisses(con: sqlite3.Connection) -> list:
+    """Liste des caisses connues (toutes dates), pour peupler le sélecteur."""
     rows = con.execute(
-        "SELECT store_id, mode_paiement, total_encaisse, nb_transactions, synced_at "
-        "FROM tresorerie_snapshot WHERE snap_date=? ORDER BY store_id, mode_paiement",
-        (day,)).fetchall()
+        "SELECT DISTINCT store_id, caisse FROM tresorerie_snapshot "
+        "ORDER BY store_id, caisse").fetchall()
     return [dict(r) for r in rows]
 
 

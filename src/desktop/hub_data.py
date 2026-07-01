@@ -49,9 +49,17 @@ class HubData:
     def store_status(self) -> list:
         return self._get("/api/data/stores").get("rows", [])
 
-    def tresorerie_today(self, day: str | None = None) -> list:
-        return self._get("/api/data/tresorerie",
-                         {"day": day} if day else {}).get("rows", [])
+    def tresorerie_today(self, day: str | None = None,
+                         caisse: str | None = None) -> list:
+        params = {}
+        if day:
+            params["day"] = day
+        if caisse:
+            params["caisse"] = caisse
+        return self._get("/api/data/tresorerie", params).get("rows", [])
+
+    def caisses(self) -> list:
+        return self._get("/api/data/caisses").get("rows", [])
 
     def stock_rows(self, search: str = "") -> list:
         return self._get("/api/data/stock", {"q": search}).get("rows", [])

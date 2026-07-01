@@ -172,10 +172,12 @@ CREATE TABLE IF NOT EXISTS tresorerie_snapshot (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     store_id         INTEGER NOT NULL,
     snap_date        TEXT    NOT NULL,         -- AAAA-MM-JJ
+    caisse           TEXT    DEFAULT '(globale)',  -- caisse1, caisse2… (varie par base)
+    sens             TEXT    DEFAULT 'entree', -- 'entree' (recette) | 'sortie' (dépense)
     mode_paiement    TEXT    NOT NULL,
     total_encaisse   REAL    DEFAULT 0,
     nb_transactions  INTEGER DEFAULT 0,
     synced_at        TEXT    NOT NULL,
-    UNIQUE (store_id, snap_date, mode_paiement)
+    UNIQUE (store_id, snap_date, caisse, sens, mode_paiement)
 );
 CREATE INDEX IF NOT EXISTS idx_treso_store_date ON tresorerie_snapshot (store_id, snap_date);

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, render_template, current_app
 
-from hub.central_db import tresorerie_today, store_status
+from hub.central_db import tresorerie_today, tresorerie_caisses, store_status
 
 bp = Blueprint("dashboard", __name__)
 
@@ -52,27 +52,39 @@ def overview():
 
 @bp.get("/tresorerie")
 def tresorerie():
+    from flask import request
     day = datetime.now().strftime("%Y-%m-%d")
-    rows = tresorerie_today(_db(), day)
+    caisse = request.args.get("caisse") or None
+    rows = tresorerie_today(_db(), day, caisse)
+    # Liste des caisses pour le sélecteur
+    caisses = sorted({c["caisse"] for c in tresorerie_caisses(_db())
+                      if c.get("caisse") and c["caisse"] != "(globale)"})
     names = _store_names()
     by_store: dict = {}
     for r in rows:
         sid = r["store_id"]
-        by_store.setdefault(sid, {
+        st = by_store.setdefault(sid, {
             "name": names.get(sid, "Magasin %d" % sid),
-            "total": 0.0,
-            "modes": [],
+            "entree": 0.0, "sortie": 0.0,
+            "modes": {},
             "synced_at": _ago(r.get("synced_at")),
         })
-        by_store[sid]["total"] += float(r.get("total_encaisse") or 0)
-        by_store[sid]["modes"].append({
-            "mode": r.get("mode_paiement", "?"),
-            "total": float(r.get("total_encaisse") or 0),
-            "nb": int(r.get("nb_transactions") or 0),
-        })
-    grand_total = sum(s["total"] for s in by_store.values())
+        val = float(r.get("total_encaisse") or 0)
+        mode = r.get("mode_paiement", "?")
+        m = st["modes"].setdefault(mode, {"mode": mode, "entree": 0.0, "sortie": 0.0})
+        if r.get("sens") == "sortie":
+            st["sortie"] += val; m["sortie"] += val
+        else:
+            st["entree"] += val; m["entree"] += val
+    for st in by_store.values():
+        st["solde"] = st["entree"] - st["sortie"]
+        st["modes"] = list(st["modes"].values())
+    tot_entree = sum(s["entree"] for s in by_store.values())
+    tot_sortie = sum(s["sortie"] for s in by_store.values())
     return render_template("tresorerie.html", stores=by_store.values(),
-                           grand_total=grand_total, day=day)
+                           tot_entree=tot_entree, tot_sortie=tot_sortie,
+                           solde=tot_entree - tot_sortie, day=day,
+                           caisses=caisses, selected_caisse=(caisse or ""))
 
 
 @bp.get("/stock")
