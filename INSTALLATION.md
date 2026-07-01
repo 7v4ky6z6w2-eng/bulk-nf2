@@ -247,6 +247,36 @@ côte à côte et double-cliquez — l'app se configure toute seule.
 
 ---
 
+## Étape 7 (optionnelle) — Éditer depuis le téléphone (sans app)
+
+En plus de l'application bureau, le hub expose des **pages mobiles** dans le
+navigateur du téléphone : importer un Bon de Réception (Excel **ou PDF**, ex.
+une photo/scan) et modifier un prix, sans installer quoi que ce soit.
+
+1. Installez **Tailscale** sur le téléphone (même compte), pour joindre le hub.
+2. Ouvrez dans le navigateur : `http://100.x.y.z:5000/m/` (IP Tailscale du
+   magasin 1).
+3. Entrez le **code d'accès** (`access_code` de `stores.json`). La session
+   reste ouverte 30 jours.
+4. Depuis l'accueil mobile :
+   - **📦 Importer un Bon de Réception** → choisir le magasin → envoyer le
+     fichier → un aperçu des lignes s'affiche → **Confirmer**. Le hub lit le
+     fichier lui-même (pas besoin d'app), applique tout de suite si le
+     magasin est en ligne, sinon met en file (+ notification).
+   - **💲 Modifier un prix** → chercher l'article → nouveau prix → cocher
+     les magasins → **Appliquer**.
+   - **💰 Voir la trésorerie** / **📊 Tableau de bord** → mêmes pages que sur
+     ordinateur, adaptées à l'écran du téléphone.
+
+> Astuce : sur iPhone/Android, utilisez « Ajouter à l'écran d'accueil » depuis
+> le navigateur pour avoir une icône comme une vraie application.
+
+> Sécurité : ces pages sont protégées par le `access_code` (session de 30
+> jours). Elles ne sont accessibles que via le réseau Tailscale (l'IP
+> `100.x.y.z`), pas depuis Internet.
+
+---
+
 ## Vérification (à faire AVANT de se fier au système)
 
 Sur **chaque** poste qui a Python :

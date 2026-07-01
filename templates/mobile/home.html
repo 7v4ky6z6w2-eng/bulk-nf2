@@ -1,0 +1,18 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}PrimeNF Mobile{% endblock %}
+{% block content %}
+<div class="d-grid gap-3">
+  <a href="{{ url_for('mobile.bdr_upload_form') }}" class="btn btn-success btn-lg-block">
+    📦 Importer un Bon de Réception
+  </a>
+  <a href="{{ url_for('mobile.prix_search') }}" class="btn btn-primary btn-lg-block">
+    💲 Modifier un prix
+  </a>
+  <a href="/tresorerie" class="btn btn-outline-light btn-lg-block">
+    💰 Voir la trésorerie
+  </a>
+  <a href="/" class="btn btn-outline-light btn-lg-block">
+    📊 Tableau de bord complet
+  </a>
+</div>
+{% endblock %}

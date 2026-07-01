@@ -1,0 +1,13 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Connexion — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-3">Connexion</h5>
+{% if error %}<div class="alert alert-danger py-2">{{ error }}</div>{% endif %}
+<form method="post">
+  <div class="mb-3">
+    <label class="form-label">Code d'accès</label>
+    <input type="password" name="code" class="form-control form-control-lg" autofocus required>
+  </div>
+  <button type="submit" class="btn btn-primary btn-lg-block">Se connecter</button>
+</form>
+{% endblock %}

@@ -26,6 +26,7 @@ from stores import StoreRegistry, StoresError          # noqa: E402
 from hub.central_db import init_db, connect            # noqa: E402
 from hub.api import bp as api_bp                       # noqa: E402
 from hub.dashboard import bp as dash_bp                # noqa: E402
+from hub.mobile import bp as mobile_bp                 # noqa: E402
 from notify import Notifier                            # noqa: E402
 
 log = logging.getLogger("hub")
@@ -35,12 +36,23 @@ def create_app(db_path: str, api_key: str = "",
                notifier: Notifier | None = None,
                store_names: dict | None = None,
                registry=None) -> Flask:
+    import hashlib
+    from datetime import timedelta
+
     app = Flask(__name__, template_folder="templates")
     app.config["API_KEY"] = api_key
     app.config["ACCESS_CODE"] = getattr(registry, "access_code", "") if registry else ""
     app.config["store_names"] = store_names or {}
     app.config["notifier"] = notifier
     app.config["registry"] = registry
+
+    # Clé de session (pages mobiles) : dérivée de la clé API / du code d'accès,
+    # stable entre les redémarrages (les sessions du téléphone restent valides).
+    seed = (api_key or app.config["ACCESS_CODE"] or "primenf-hub-defaut")
+    app.secret_key = hashlib.sha256(seed.encode("utf-8")).digest()
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 Mo (upload BDR)
 
     # Une connexion SQLite par thread (thread_local via closure)
     import threading
@@ -70,6 +82,7 @@ def create_app(db_path: str, api_key: str = "",
 
     app.register_blueprint(api_bp)
     app.register_blueprint(dash_bp)
+    app.register_blueprint(mobile_bp)
     return app
 
 

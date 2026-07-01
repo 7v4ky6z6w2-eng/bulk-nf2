@@ -1,0 +1,32 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Aperçu BDR — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-1">Aperçu — {{ store_name }}</h5>
+<p class="text-muted small mb-3">{{ filename }} — {{ lines|length }} article(s)</p>
+{% if bad_count %}
+<div class="alert alert-warning py-2">
+  ⚠ {{ bad_count }} ligne(s) avec Qté × Prix ≠ Montant — vérifiez avant de confirmer.
+</div>
+{% endif %}
+
+<div class="list-group mb-3" style="max-height:50vh; overflow-y:auto;">
+  {% for l in lines %}
+  <div class="list-group-item bg-dark {% if l.recon == False %}border-warning{% endif %}">
+    <div class="d-flex justify-content-between">
+      <strong>{{ l.ref_art }}</strong>
+      <span>{{ "%.2f"|format(l.qte|float) }} × {{ "%.2f"|format(l.prix|float) }} DA</span>
+    </div>
+    <div class="text-muted small">{{ l.designation }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+<form method="post" action="{{ url_for('mobile.bdr_confirm') }}" class="d-grid gap-2">
+  <input type="hidden" name="token" value="{{ token }}">
+  <button type="submit" class="btn btn-success btn-lg-block">Confirmer l'import</button>
+</form>
+<form method="post" action="{{ url_for('mobile.bdr_cancel') }}" class="mt-2">
+  <input type="hidden" name="token" value="{{ token }}">
+  <button type="submit" class="btn btn-outline-secondary btn-lg-block">Annuler</button>
+</form>
+{% endblock %}

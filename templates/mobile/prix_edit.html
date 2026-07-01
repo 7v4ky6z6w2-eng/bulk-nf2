@@ -1,0 +1,24 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Modifier prix — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-3">Nouveau prix — {{ ref }}</h5>
+{% if error %}<div class="alert alert-danger py-2">{{ error }}</div>{% endif %}
+<form method="post" action="{{ url_for('mobile.prix_apply') }}">
+  <input type="hidden" name="ref" value="{{ ref }}">
+  <div class="mb-3">
+    <label class="form-label">Prix (HT = TTC)</label>
+    <input type="number" step="0.01" min="0.01" name="price" class="form-control form-control-lg" required autofocus>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Appliquer sur :</label>
+    {% for s in stores %}
+    <div class="form-check form-check-lg">
+      <input class="form-check-input" type="checkbox" name="store_id" value="{{ s.id }}"
+             id="s{{ s.id }}" checked>
+      <label class="form-check-label" for="s{{ s.id }}">{{ s.name }}</label>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="submit" class="btn btn-primary btn-lg-block">Appliquer</button>
+</form>
+{% endblock %}

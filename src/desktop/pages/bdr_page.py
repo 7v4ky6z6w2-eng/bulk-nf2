@@ -108,16 +108,17 @@ class BdrPage(QWidget):
             self._lines = []
             self._log_msg("Fichier : %s" % path)
 
-    def _build_config(self) -> dict:
-        # La connexion réelle est résolue côté hub ; on transmet seulement le
-        # type de pièce et les valeurs par défaut. Le hub force host/db/identifiants.
-        return {"type_piece": "PC_AC_B"}
+    def _build_config(self, bdr) -> dict:
+        # Config par défaut complète (colonnes/alias, TVA, arrondi…) : read_excel
+        # / read_pdf en ont besoin (cfg["colonnes"] notamment). La connexion
+        # réelle est résolue côté hub, qui force host/db/identifiants.
+        return bdr.load_config(None)
 
     def _load_preview(self) -> None:
         """Lit Excel ou PDF localement (sans base) et affiche un résumé."""
         try:
             import import_bon_reception as bdr  # type: ignore
-            cfg = self._build_config()
+            cfg = self._build_config(bdr)
             is_pdf = self._excel_path.lower().endswith(".pdf")
             if is_pdf:
                 self._log_msg("Lecture du PDF en cours (reconstruction glyphes)…")

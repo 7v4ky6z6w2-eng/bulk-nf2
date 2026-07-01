@@ -13,10 +13,8 @@ from hub.central_db import (
     store_status, tresorerie_today, tresorerie_caisses, stock_rows, ventes_rows,
     sync_logs, pending_ops_recent, article_search,
 )
-from hub.write_back import (
-    is_reachable, write_bdr, write_prices, write_barcode_ops, WriteError,
-)
-from hub.central_db import apply_barcode_ops_local, article_barcodes
+from hub.central_db import article_barcodes
+from hub.ops import submit_op as _submit_op, OP_TYPES
 
 bp = Blueprint("api", __name__)
 
@@ -259,38 +257,9 @@ def submit_op():
     store_id = int(data.get("store_id", 0))
     op_type = data.get("op_type", "")
     payload = data.get("payload") or {}
-    if not store_id or op_type not in ("bdr_import", "price_update", "barcode_ops"):
+    if not store_id or op_type not in OP_TYPES:
         return jsonify(error="store_id et op_type valides requis"), 400
 
     registry = current_app.config.get("registry")
-    store = None
-    if registry:
-        try:
-            store = registry.get(store_id)
-        except Exception:  # noqa: BLE001
-            store = None
-
-    online = bool(store and is_reachable(store.host, store.port))
-    if online:
-        try:
-            kw = store.connect_kwargs()
-            if op_type == "bdr_import":
-                write_bdr(kw, payload.get("config") or {}, payload.get("lines") or [])
-                n = len(payload.get("lines") or [])
-            elif op_type == "price_update":
-                write_prices(kw, payload.get("changes") or [])
-                n = len(payload.get("changes") or [])
-            else:  # barcode_ops
-                ops = payload.get("ops") or []
-                write_barcode_ops(kw, ops)
-                apply_barcode_ops_local(_db(), store_id, ops)  # miroir cohérent
-                n = len(ops)
-            return jsonify(status="applied", count=n)
-        except WriteError as exc:
-            return jsonify(status="error", error=str(exc))
-        except Exception as exc:  # noqa: BLE001
-            return jsonify(status="error", error=str(exc))
-
-    # Magasin hors ligne → file d'attente
-    op_id = enqueue_op(_db(), store_id, op_type, payload)
-    return jsonify(status="queued", op_id=op_id)
+    result = _submit_op(_db(), registry, store_id, op_type, payload)
+    return jsonify(**result)
