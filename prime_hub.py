@@ -34,6 +34,30 @@ from desktop import client_config
 from desktop.login_dialog import LoginDialog
 
 
+def _apply_dark_palette(app) -> None:
+    """Thème sombre (assorti au tableau de bord web), sur le style Fusion."""
+    from PySide6.QtGui import QColor, QPalette
+    p = QPalette()
+    bg, panel, text = QColor("#212529"), QColor("#2b3035"), QColor("#e9ecef")
+    accent, disabled = QColor("#0d6efd"), QColor("#6c757d")
+    p.setColor(QPalette.Window, bg)
+    p.setColor(QPalette.WindowText, text)
+    p.setColor(QPalette.Base, panel)
+    p.setColor(QPalette.AlternateBase, QColor("#343a40"))
+    p.setColor(QPalette.Text, text)
+    p.setColor(QPalette.Button, panel)
+    p.setColor(QPalette.ButtonText, text)
+    p.setColor(QPalette.ToolTipBase, panel)
+    p.setColor(QPalette.ToolTipText, text)
+    p.setColor(QPalette.Highlight, accent)
+    p.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    p.setColor(QPalette.Link, accent)
+    p.setColor(QPalette.PlaceholderText, disabled)
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        p.setColor(QPalette.Disabled, role, disabled)
+    app.setPalette(p)
+
+
 def _from_stores_json(path):
     """(registry, hub_url, code, data) depuis stores.json, ou None si absent."""
     try:
@@ -66,6 +90,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("PrimeNF Hub")
     app.setStyle("Fusion")
+    _apply_dark_palette(app)
 
     if args.logout:
         client_config.clear()

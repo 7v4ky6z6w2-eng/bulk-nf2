@@ -277,6 +277,31 @@ une photo/scan) et modifier un prix, sans installer quoi que ce soit.
 
 ---
 
+## Étape 8 — Sauvegardes nocturnes (hub, fortement recommandé)
+
+Sur le magasin 1, en Administrateur :
+
+```bat
+notepad install_windows\backup_hub.bat     REM adapter les variables en tête
+install_windows\backup_hub.bat             REM test manuel : vérifier backups\
+install_windows\setup_backup_task.bat      REM planifie chaque nuit à 02:00
+```
+
+Ce que la sauvegarde fait chaque nuit dans `backups\` :
+- **`central_AAAA-MM-JJ.db`** — copie cohérente de la base centrale (API backup
+  SQLite, sûre pendant que le hub tourne).
+- **`DIFA2_AAAA-MM-JJ.fbk`** — sauvegarde à chaud de votre base Netfact2 via
+  `gbak` (l'outil officiel Firebird ; la base reste utilisable pendant).
+- Les fichiers de plus de **14 jours** sont supprimés automatiquement.
+
+> Vérifiez le chemin de `gbak.exe` dans le script (installation Firebird 2.5).
+> Restauration d'un `.fbk` : `gbak -c -user SYSDBA -password ... DIFA2_date.fbk C:\restaure\DIFA2.FDB`.
+
+> **Connexion navigateur** : depuis la mise à jour sécurité, le tableau de bord
+> web demande le même code d'accès que les pages mobiles (session 30 jours).
+
+---
+
 ## Vérification (à faire AVANT de se fier au système)
 
 Sur **chaque** poste qui a Python :

@@ -8,18 +8,29 @@ from __future__ import annotations
 
 import sqlite3
 
-from hub.central_db import enqueue_op, apply_barcode_ops_local
+from hub.central_db import (
+    enqueue_op, apply_barcode_ops_local, completed_op_result, record_completed_op,
+)
 from hub.write_back import is_reachable, write_bdr, write_prices, write_barcode_ops, WriteError
 
 OP_TYPES = ("bdr_import", "price_update", "barcode_ops")
 
 
 def submit_op(con: sqlite3.Connection, registry, store_id: int,
-             op_type: str, payload: dict) -> dict:
+             op_type: str, payload: dict, op_uid: str | None = None) -> dict:
     """Applique l'opération sur le magasin s'il est joignable, sinon la met en
-    file. Renvoie {"status": "applied"|"queued"|"error", ...}."""
+    file. Renvoie {"status": "applied"|"queued"|"error", ...}.
+
+    `op_uid` (optionnel) rend l'appel idempotent : un retry client (timeout
+    réseau après un import BDR long) renvoie le résultat déjà enregistré au
+    lieu de ré-exécuter l'écriture — pas de double stock."""
     if op_type not in OP_TYPES:
         return {"status": "error", "error": "Type d'opération inconnu : %s" % op_type}
+
+    if op_uid:
+        prev = completed_op_result(con, op_uid)
+        if prev is not None:
+            return prev
 
     store = None
     if registry:
@@ -47,11 +58,14 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
                 write_barcode_ops(kw, bops)
                 apply_barcode_ops_local(con, store_id, bops)
                 n = len(bops)
-            return {"status": "applied", "count": n}
+            result = {"status": "applied", "count": n}
+            if op_uid:
+                record_completed_op(con, op_uid, result)
+            return result
         except WriteError as exc:
             return {"status": "error", "error": str(exc)}
         except Exception as exc:  # noqa: BLE001
             return {"status": "error", "error": str(exc)}
 
-    op_id = enqueue_op(con, store_id, op_type, payload)
+    op_id = enqueue_op(con, store_id, op_type, payload, op_uid=op_uid)
     return {"status": "queued", "op_id": op_id}

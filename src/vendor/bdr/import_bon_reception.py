@@ -561,15 +561,32 @@ _NUM_RE = re.compile(r"\d+")
 _SIZE_TOKEN_RE = re.compile(r"""^(
         \d{1,3}\s?[x*]\s?\d{1,3}(\s?[x*]\s?\d{1,3})?  |   # 24x32, 10x15x5
         a\d                                           |   # a4, a3, a5
-        \d{1,3}(f|gr?|g|ml|cl|l|cm|mm|m|p|w|v)         |   # 10f, 9gr, 500ml, 80g
+        \d{1,4}(f|gr?|g|ml|cl|l|cm|mm|m|p|w|v)         |   # 10f, 9gr, 500ml, 80g, 100f
         \d{1,2}(eme|er|e)                                 # 1er, 2eme
     )$""", re.VERBOSE)
+# Reperage des memes tailles/formats mais A L'INTERIEUR du texte (pas seulement
+# un token isole), pour les retirer AVANT d'extraire les numeros 'code' :
+# "100f", "80gr", "24x32" sont des CONTENANCES/FORMATS, pas des references, et
+# se retrouvent dans des dizaines d'articles differents -> faux positifs.
+_SIZE_SPAN_RE = re.compile(
+    r"\b\d{1,4}\s?[x*]\s?\d{1,3}(\s?[x*]\s?\d{1,3})?\b"        # 24x32, 10x15x5
+    r"|\ba\d\b"                                                # a4, a3
+    r"|\b\d{1,4}(f|gr?|g|ml|cl|l|cm|mm|m|p|w|v)\b"              # 100f, 9gr, 500ml
+    r"|\b\d{1,2}(eme|er|e)\b"                                   # 1er, 2eme
+)
+# Numero 'code' minimal : 4 chiffres. Les nombres de 3 chiffres (100, 300, 500…)
+# sont presque toujours des quantites/conditionnements partages par de tres
+# nombreux articles differents -> exclus pour eviter les faux rapprochements.
+_MIN_CODE_DIGITS = 4
 
 
 def number_tokens(text_norm):
-    """Numeros 'code' candidats : suites de >= 3 chiffres (70010, 3578).
-    Les tailles courtes (24, 10, 9) sont exclues -> evite les faux positifs."""
-    return {m.group(0) for m in _NUM_RE.finditer(text_norm) if len(m.group(0)) >= 3}
+    """Numeros 'code' candidats : suites de >= 4 chiffres (70010, 3578), en
+    ignorant d'abord les formats/contenances (100f, 24x32, 9gr...) qui ne sont
+    pas des references mais des quantites partagees par des dizaines d'articles."""
+    stripped = _SIZE_SPAN_RE.sub(" ", text_norm)
+    return {m.group(0) for m in _NUM_RE.finditer(stripped)
+            if len(m.group(0)) >= _MIN_CODE_DIGITS}
 
 
 def is_size_token(w):
@@ -588,28 +605,72 @@ def word_tokens(text_norm):
     return out
 
 
+# Mots generiques exclus meme sans calcul de frequence (categories/formes tres
+# communes qui ne discriminent jamais un article d'un autre : "feutre" et
+# "gomme" apparaissent dans des dizaines d'articles totalement differents).
+_GENERIC_WORDS = {
+    "art", "bte", "boite", "boitier", "set", "kit", "lot", "pack", "pcs", "ctn",
+    "ref", "reference", "couleur", "couleurs", "coloris", "color", "colors",
+    "scolaire", "school", "office", "bureau", "extra", "blanc", "blanche",
+    "noir", "noire", "grand", "petit", "petite", "modele", "type", "taille",
+}
+
+
 def build_article_index(cur):
     """Index memoire des articles existants par numero-token (une requete).
-    Retourne (by_number, exact_refs, prix_achat_by_ref)."""
+    Retourne (by_number, exact_refs, prix_achat_by_ref, common_words).
+    common_words : mots presents dans beaucoup d'articles (categories generiques
+    comme 'feutre', 'gomme', 'compas') -> non-discriminants, exclus du calcul de
+    similarite pour eviter les faux rapprochements par simple coincidence de
+    categorie + numero de conditionnement."""
     cur.execute("SELECT REF_ART, DESIGNATION, PRIXACHATHT FROM ARTICLE")
+    rows = cur.fetchall()
+
+    # 1) frequence documentaire des mots (sur TOUS les articles) pour detecter
+    #    les mots trop communs (non-discriminants).
+    doc_freq = {}
+    parsed = []
+    for ref, desig, pa in rows:
+        dnorm = norm(desig)
+        words = set(word_tokens(dnorm))
+        parsed.append((ref, desig, dnorm, words))
+        for w in words:
+            doc_freq[w] = doc_freq.get(w, 0) + 1
+    n_articles = len(rows) or 1
+    freq_cutoff = max(6, int(0.04 * n_articles))
+    common_words = {w for w, c in doc_freq.items() if c > freq_cutoff} | _GENERIC_WORDS
+
+    # 2) construction de l'index numero -> candidats, avec mots SIGNIFICATIFS
+    #    (tous les mots du libelle, moins les mots communs) plutot que les 3
+    #    premiers mots seulement.
     by_number, exact_refs, prix = {}, set(), {}
-    for ref, desig, pa in cur.fetchall():
+    for ref, desig, pa in rows:
         exact_refs.add(ref)
         prix[ref] = pa
-        dnorm = norm(desig)
+    for ref, desig, dnorm, words in parsed:
         nums = number_tokens(dnorm)
         if not nums:
             continue
-        lead = set(word_tokens(dnorm)[:3])
-        entry = (ref, desig, lead)
+        sig = words - common_words
+        entry = (ref, desig, sig)
         for n in nums:
             by_number.setdefault(n, []).append(entry)
-    return by_number, exact_refs, prix
+    return by_number, exact_refs, prix, common_words
 
 
-def best_match_for_line(line, by_number, exact_refs, prix, min_score=0.60):
+def best_match_for_line(line, by_number, exact_refs, prix,
+                        min_score=0.60, common_words=None):
     """Pour une ligne fournisseur, retourne le rapprochement {ref_exists,
-    match_ref, match_designation, match_score, match_prix_achat, status}."""
+    match_ref, match_designation, match_score, match_prix_achat, status}.
+
+    Rapprochement STRICT en 2 temps pour eviter les faux positifs (numero de
+    conditionnement partage + simple mot de categorie generique) :
+      1. le meme numero 'code' (>= 4 chiffres, hors formats/contenances) doit
+         apparaitre dans la designation de l'article existant ;
+      2. il faut EN PLUS au moins 2 mots significatifs communs (hors mots
+         generiques/tres frequents) — sauf si ce numero ne pointe QUE vers UN
+         SEUL article de toute la base (alors le numero seul suffit, avec un
+         score plus prudent)."""
     ref = line["ref_art"]
     if ref in exact_refs:
         return {"ref_exists": True, "match_ref": ref, "match_designation": None,
@@ -618,18 +679,40 @@ def best_match_for_line(line, by_number, exact_refs, prix, min_score=0.60):
 
     src = norm(line.get("designation") or line["ref_art"])
     src_nums = number_tokens(src)
-    src_lead = set(word_tokens(src)[:3])
     miss = {"ref_exists": False, "match_ref": None, "match_designation": None,
             "match_score": 0.0, "match_prix_achat": None, "status": "new"}
     if not src_nums:
         return miss
-    best = None
+
+    common_words = common_words or set()
+    src_sig = set(word_tokens(src)) - common_words
+
+    # Tous les candidats partageant AU MOINS un numero-code avec la ligne.
+    candidates = {}
     for n in src_nums:
-        for cand_ref, cand_desig, cand_lead in by_number.get(n, ()):
-            overlap = (len(src_lead & cand_lead) / len(src_lead)) if src_lead else 0.0
-            score = 0.55 + 0.45 * overlap
-            if best is None or score > best[0]:
-                best = (score, cand_ref, cand_desig)
+        for cand_ref, cand_desig, cand_sig in by_number.get(n, ()):
+            candidates[cand_ref] = (cand_desig, cand_sig)
+    if not candidates:
+        return miss
+
+    best = None
+    unique_candidate = len(candidates) == 1
+    for cand_ref, (cand_desig, cand_sig) in candidates.items():
+        overlap = src_sig & cand_sig
+        union = src_sig | cand_sig
+        jaccard = (len(overlap) / len(union)) if union else 0.0
+        if len(overlap) >= 2:
+            score = 0.65 + 0.35 * jaccard
+        elif unique_candidate and (len(overlap) >= 1 or not src_sig):
+            # Numero non-ambigu (un seul article de la base le porte) : on
+            # accepte avec un score plus prudent, meme sans recouvrement de mots
+            # (designation trop courte pour comparer), ou avec 1 seul mot commun.
+            score = 0.62 + 0.10 * jaccard
+        else:
+            continue   # pas assez de recouvrement -> on ignore ce candidat
+        if best is None or score > best[0]:
+            best = (score, cand_ref, cand_desig)
+
     if best and best[0] >= min_score:
         return {"ref_exists": False, "match_ref": best[1],
                 "match_designation": best[2], "match_score": round(best[0], 3),
@@ -1025,12 +1108,13 @@ def mode_match(cfg, lines, out_path):
     con = connect(cfg)
     try:
         cur = con.cursor()
-        by_number, exact_refs, prix = build_article_index(cur)
+        by_number, exact_refs, prix, common_words = build_article_index(cur)
         min_score = float(cfg.get("match_min_score", 0.60))
         result = []
         for ln in lines:
             if auto:
-                m = best_match_for_line(ln, by_number, exact_refs, prix, min_score)
+                m = best_match_for_line(ln, by_number, exact_refs, prix,
+                                        min_score, common_words)
             elif ln["ref_art"] in exact_refs:
                 m = {"ref_exists": True, "match_ref": ln["ref_art"],
                      "match_designation": None, "match_score": 1.0,

@@ -75,7 +75,10 @@ def login_submit():
         return render_template("mobile/login.html", error="Code invalide.")
     session["mobile_auth"] = True
     session.permanent = True
-    nxt = request.args.get("next") or url_for("mobile.home")
+    # Anti-redirection ouverte : seuls les chemins internes ("/…") sont suivis.
+    nxt = request.args.get("next") or ""
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = url_for("mobile.home")
     return redirect(nxt)
 
 
@@ -229,7 +232,8 @@ def bdr_confirm():
                                message="Aperçu expiré ou déjà confirmé (recommencez l'envoi "
                                        "si l'import n'a pas eu lieu).")
     result = submit_op(_db(), _registry(), data["store_id"], "bdr_import",
-                       {"config": data["config"], "lines": data["lines"]})
+                       {"config": data["config"], "lines": data["lines"]},
+                       op_uid="mobile-" + secure_filename(token))
     names = _store_names()
     store_name = names.get(data["store_id"], "Magasin %s" % data["store_id"])
     return render_template("mobile/bdr_result.html", ok=(result["status"] != "error"),

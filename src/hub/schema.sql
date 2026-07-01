@@ -29,15 +29,27 @@ CREATE TABLE IF NOT EXISTS store_meta (
 CREATE TABLE IF NOT EXISTS pending_ops (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     store_id      INTEGER NOT NULL,
-    op_type       TEXT    NOT NULL,            -- bdr_import | price_update
+    op_type       TEXT    NOT NULL,            -- bdr_import | price_update | barcode_ops
     payload       TEXT    NOT NULL,            -- JSON
     created_at    TEXT    NOT NULL,
     applied_at    TEXT,
     status        TEXT    DEFAULT 'pending',   -- pending | applied | failed
     error_msg     TEXT,
-    notified      INTEGER DEFAULT 0
+    notified      INTEGER DEFAULT 0,
+    op_uid        TEXT                          -- uid d'idempotence (client), nullable
 );
 CREATE INDEX IF NOT EXISTS idx_ops_store_status ON pending_ops (store_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_uid ON pending_ops (op_uid)
+    WHERE op_uid IS NOT NULL;
+
+-- Résultats des opérations appliquées DIRECTEMENT (magasin en ligne), indexés
+-- par l'uid d'idempotence : un client qui ré-envoie le même op_uid (retry après
+-- timeout réseau) reçoit le résultat enregistré au lieu de ré-exécuter l'import.
+CREATE TABLE IF NOT EXISTS completed_ops (
+    op_uid      TEXT PRIMARY KEY,
+    result      TEXT NOT NULL,                 -- JSON du résultat renvoyé
+    created_at  TEXT NOT NULL
+);
 
 -- ───────────────────────────── ARTICLE ────────────────────────────────────
 CREATE TABLE IF NOT EXISTS article (

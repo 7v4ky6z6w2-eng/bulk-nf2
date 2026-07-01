@@ -16,9 +16,9 @@
 </div>
 
 <div class="row g-2 mb-4">
-  <div class="col-auto"><span class="badge bg-success fs-6">Entrées : {{ "%.2f"|format(tot_entree) }} DA</span></div>
-  <div class="col-auto"><span class="badge bg-danger fs-6">Sorties : {{ "%.2f"|format(tot_sortie) }} DA</span></div>
-  <div class="col-auto"><span class="badge bg-primary fs-6">Solde : {{ "%.2f"|format(solde) }} DA</span></div>
+  <div class="col-auto"><span class="badge bg-success fs-6">Entrées : {{ tot_entree|fmt_da }}</span></div>
+  <div class="col-auto"><span class="badge bg-danger fs-6">Sorties : {{ tot_sortie|fmt_da }}</span></div>
+  <div class="col-auto"><span class="badge bg-primary fs-6">Solde : {{ solde|fmt_da }}</span></div>
 </div>
 
 <div class="row g-3">
@@ -31,18 +31,18 @@
       </div>
       <div class="card-body">
         <div class="d-flex justify-content-between mb-2">
-          <span class="text-success">Entrées : {{ "%.2f"|format(s.entree) }}</span>
-          <span class="text-danger">Sorties : {{ "%.2f"|format(s.sortie) }}</span>
+          <span class="text-success">Entrées : {{ s.entree|fmt_da("") }}</span>
+          <span class="text-danger">Sorties : {{ s.sortie|fmt_da("") }}</span>
         </div>
-        <p class="fw-bold mb-3">Solde : {{ "%.2f"|format(s.solde) }} DA</p>
+        <p class="fw-bold mb-3">Solde : {{ s.solde|fmt_da }}</p>
         <table class="table table-sm table-borderless mb-0">
           <thead><tr><th></th><th class="text-end text-success">Entrée</th><th class="text-end text-danger">Sortie</th></tr></thead>
           <tbody>
             {% for m in s.modes %}
             <tr>
               <td>{{ m.mode }}</td>
-              <td class="text-end">{{ "%.2f"|format(m.entree) }}</td>
-              <td class="text-end">{{ "%.2f"|format(m.sortie) }}</td>
+              <td class="text-end">{{ m.entree|fmt_da("") }}</td>
+              <td class="text-end">{{ m.sortie|fmt_da("") }}</td>
             </tr>
             {% endfor %}
           </tbody>

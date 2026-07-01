@@ -1,7 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Stock — PrimeNF Hub{% endblock %}
 {% block content %}
-<h4 class="mb-4">Stock (500 premiers articles)</h4>
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Stock</h4>
+  <form method="get" class="d-flex gap-2">
+    <input type="search" name="q" value="{{ q }}" class="form-control form-control-sm"
+           placeholder="Référence ou désignation…" style="width:260px">
+    <button type="submit" class="btn btn-sm btn-primary">Chercher</button>
+  </form>
+</div>
 <div class="table-responsive">
   <table class="table table-sm table-hover align-middle">
     <thead class="table-dark">
@@ -16,7 +23,7 @@
         <td class="font-monospace small">{{ r.ref_art }}</td>
         <td>{{ r.designation }}</td>
         <td>{{ r.code_depot }}</td>
-        <td class="text-end {% if r.qte_stock|float < 0 %}text-danger{% endif %}">{{ r.qte_stock }}</td>
+        <td class="text-end {% if r.qte_stock|float <= 0 %}text-danger fw-bold{% endif %}">{{ r.qte_stock|fmt_qty }}</td>
       </tr>
       {% else %}
       <tr><td colspan="5" class="text-muted text-center">Aucune donnée</td></tr>

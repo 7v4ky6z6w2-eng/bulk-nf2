@@ -16,7 +16,7 @@
         <td>{{ r.datepiece }}</td>
         <td class="font-monospace small">{{ r.nopiece }}</td>
         <td>{{ r.raison_sociale or r.code_tiers or '—' }}</td>
-        <td class="text-end">{{ "%.2f"|format(r.montantttc|float) }}</td>
+        <td class="text-end">{{ r.montantttc|float|fmt_da("") }}</td>
         <td>{{ r.code_mode_regl or '—' }}</td>
       </tr>
       {% else %}

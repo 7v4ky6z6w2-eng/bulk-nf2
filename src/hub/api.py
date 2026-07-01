@@ -13,7 +13,7 @@ from hub.central_db import (
     store_status, tresorerie_today, tresorerie_caisses, stock_rows, ventes_rows,
     sync_logs, pending_ops_recent, article_search,
 )
-from hub.central_db import article_barcodes
+from hub.central_db import article_barcodes, replace_snapshot
 from hub.ops import submit_op as _submit_op, OP_TYPES
 
 bp = Blueprint("api", __name__)
@@ -91,6 +91,12 @@ def sync_push(table: str):
     if not store_id or not rows:
         return jsonify(accepted=0)
     con = _db()
+    # Tables « instantané » : le 1er lot du cycle porte replace=true → on purge
+    # l'état précédent du magasin pour que les lignes disparues côté Firebird
+    # (code-barres supprimé, stock à zéro…) disparaissent aussi du miroir.
+    # Purge + upsert dans la même transaction (commit unique ci-dessous).
+    if data.get("replace"):
+        replace_snapshot(con, table, store_id, rows)
     n = upsert_batch(con, table, store_id, rows)
     con.commit()
     if session_id:
@@ -257,9 +263,10 @@ def submit_op():
     store_id = int(data.get("store_id", 0))
     op_type = data.get("op_type", "")
     payload = data.get("payload") or {}
+    op_uid = data.get("op_uid") or None
     if not store_id or op_type not in OP_TYPES:
         return jsonify(error="store_id et op_type valides requis"), 400
 
     registry = current_app.config.get("registry")
-    result = _submit_op(_db(), registry, store_id, op_type, payload)
+    result = _submit_op(_db(), registry, store_id, op_type, payload, op_uid=op_uid)
     return jsonify(**result)

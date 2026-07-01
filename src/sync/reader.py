@@ -264,8 +264,15 @@ class FirebirdReader:
                     continue
                 desc = [d[0].lower() for d in cur.description]
                 rec = {c: v for c, v in zip(desc, row)}
-                qte = rec.get("qte_stock") or rec.get("qte") or rec.get("stock")
-                if qte in (None, 0):
+                qte = rec.get("qte_stock")
+                if qte is None:
+                    qte = rec.get("qte")
+                if qte is None:
+                    qte = rec.get("stock")
+                # Les quantités à 0 sont CONSERVÉES : une rupture de stock doit
+                # rester visible au tableau de bord (0 en rouge), pas disparaître
+                # comme si l'article n'existait plus.
+                if qte is None:
                     continue
                 out.append({"ref_art": ref, "code_depot": dep,
                             "qte_stock": qte,

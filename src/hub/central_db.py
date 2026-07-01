@@ -64,9 +64,13 @@ def init_db(db_path: str) -> None:
         schema = fh.read()
     con = connect(db_path)
     try:
-        con.executescript(schema)
-        con.commit()
+        # Migrations D'ABORD : schema.sql référence des colonnes récentes (ex.
+        # l'index partiel sur pending_ops.op_uid) qui doivent exister avant
+        # executescript sur une base ancienne. Sur une base neuve, _migrate ne
+        # fait rien (tables absentes).
         _migrate(con)
+        con.commit()
+        con.executescript(schema)
         con.commit()
     finally:
         con.close()
@@ -102,6 +106,13 @@ def _migrate(con: sqlite3.Connection) -> None:
             "  nb_transactions, synced_at FROM tresorerie_snapshot_old"
             % (caisse_expr, sens_expr))
         con.execute("DROP TABLE tresorerie_snapshot_old")
+
+    # Colonne op_uid (idempotence) sur pending_ops (bases créées avant).
+    op_cols = [r[1] for r in con.execute("PRAGMA table_info(pending_ops)").fetchall()]
+    if op_cols and "op_uid" not in op_cols:
+        con.execute("ALTER TABLE pending_ops ADD COLUMN op_uid TEXT")
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_uid "
+                    "ON pending_ops (op_uid) WHERE op_uid IS NOT NULL")
 
 
 # --------------------------------------------------------------------------- #
@@ -148,6 +159,33 @@ def upsert_batch(con: sqlite3.Connection, table: str, store_id: int,
         return n
 
 
+# Tables « instantané » : l'agent pousse à chaque cycle l'état COMPLET actuel.
+# Sans purge préalable, une ligne disparue côté Firebird (code-barres supprimé,
+# stock retombé…) resterait indéfiniment dans le miroir.
+SNAPSHOT_TABLES = {"stock_snapshot", "equiv_cbarres", "tresorerie_snapshot"}
+
+
+def replace_snapshot(con: sqlite3.Connection, table: str, store_id: int,
+                     rows: list) -> None:
+    """Purge le miroir du magasin avant l'upsert d'un lot « replace ».
+
+    Pour tresorerie_snapshot on ne purge que les journées présentes dans le
+    lot (l'historique des jours précédents est conservé). Appelé uniquement
+    avec un lot NON vide (un agent qui n'a rien lu ne vide jamais le miroir).
+    """
+    if table not in SNAPSHOT_TABLES or not rows:
+        return
+    if table == "tresorerie_snapshot":
+        days = sorted({r.get("snap_date") for r in rows if r.get("snap_date")})
+        if not days:
+            return
+        marks = ",".join("?" * len(days))
+        con.execute("DELETE FROM tresorerie_snapshot WHERE store_id=? "
+                    "AND snap_date IN (%s)" % marks, [store_id] + days)
+    else:
+        con.execute("DELETE FROM %s WHERE store_id=?" % table, (store_id,))
+
+
 # --------------------------------------------------------------------------- #
 #  Sessions de synchro / présence des magasins
 # --------------------------------------------------------------------------- #
@@ -181,13 +219,34 @@ def add_rows_pushed(con: sqlite3.Connection, session_id: int, n: int) -> None:
 #  File d'attente des écritures (pending_ops)
 # --------------------------------------------------------------------------- #
 def enqueue_op(con: sqlite3.Connection, store_id: int, op_type: str,
-               payload: dict) -> int:
+               payload: dict, op_uid: str | None = None) -> int:
+    if op_uid:
+        # Idempotence : le même uid re-soumis (retry client) ne crée pas de
+        # doublon, on renvoie l'op déjà en file.
+        row = con.execute("SELECT id FROM pending_ops WHERE op_uid=?",
+                          (op_uid,)).fetchone()
+        if row:
+            return row["id"]
     cur = con.execute(
-        "INSERT INTO pending_ops (store_id, op_type, payload, created_at, status) "
-        "VALUES (?, ?, ?, ?, 'pending')",
-        (store_id, op_type, json.dumps(payload, ensure_ascii=False), now_iso()))
+        "INSERT INTO pending_ops (store_id, op_type, payload, created_at, status, op_uid) "
+        "VALUES (?, ?, ?, ?, 'pending', ?)",
+        (store_id, op_type, json.dumps(payload, ensure_ascii=False), now_iso(), op_uid))
     con.commit()
     return cur.lastrowid
+
+
+def completed_op_result(con: sqlite3.Connection, op_uid: str) -> dict | None:
+    """Résultat enregistré d'une op déjà appliquée directement (par op_uid)."""
+    row = con.execute("SELECT result FROM completed_ops WHERE op_uid=?",
+                      (op_uid,)).fetchone()
+    return json.loads(row["result"]) if row else None
+
+
+def record_completed_op(con: sqlite3.Connection, op_uid: str, result: dict) -> None:
+    con.execute("INSERT OR REPLACE INTO completed_ops (op_uid, result, created_at) "
+                "VALUES (?, ?, ?)",
+                (op_uid, json.dumps(result, ensure_ascii=False), now_iso()))
+    con.commit()
 
 
 def pending_ops_for(con: sqlite3.Connection, store_id: int) -> list:

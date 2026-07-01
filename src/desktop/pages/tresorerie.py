@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from desktop.format import fmt_da
+
 _GLOBALE = "Globale (toutes caisses)"
 
 
@@ -106,9 +108,9 @@ class TresoreriePage(QWidget):
             else:
                 a["entree"] += val; tot_e += val
 
-        self._entree_lbl.setText("%.2f DA" % tot_e)
-        self._sortie_lbl.setText("%.2f DA" % tot_s)
-        self._solde_lbl.setText("%.2f DA" % (tot_e - tot_s))
+        self._entree_lbl.setText(fmt_da(tot_e))
+        self._sortie_lbl.setText(fmt_da(tot_s))
+        self._solde_lbl.setText(fmt_da(tot_e - tot_s))
 
         self._table.setRowCount(len(agg))
         for i, ((sid, mode), a) in enumerate(
@@ -116,10 +118,10 @@ class TresoreriePage(QWidget):
             name = self._names.get(sid, "Magasin %s" % sid)
             self._table.setItem(i, 0, QTableWidgetItem(name))
             self._table.setItem(i, 1, QTableWidgetItem(mode))
-            e = QTableWidgetItem("%.2f" % a["entree"]); e.setForeground(Qt.green)
+            e = QTableWidgetItem(fmt_da(a["entree"], suffix="")); e.setForeground(Qt.green)
             e.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._table.setItem(i, 2, e)
-            s = QTableWidgetItem("%.2f" % a["sortie"])
+            s = QTableWidgetItem(fmt_da(a["sortie"], suffix=""))
             if a["sortie"]:
                 s.setForeground(Qt.red)
             s.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)

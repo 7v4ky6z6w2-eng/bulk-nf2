@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from desktop.format import fmt_qty
+
 
 class StockPage(QWidget):
     def __init__(self, data, store_names: dict, parent=None):
@@ -26,6 +28,8 @@ class StockPage(QWidget):
         self._table.setColumnWidth(2, 260)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setSortingEnabled(True)
+        self._table.setAlternatingRowColors(True)
+        self._table.horizontalHeader().setStretchLastSection(True)
 
         top = QHBoxLayout()
         top.addWidget(self._search)
@@ -55,8 +59,8 @@ class StockPage(QWidget):
             self._table.setItem(i, 2, QTableWidgetItem(str(r.get("designation") or "")))
             self._table.setItem(i, 3, QTableWidgetItem(str(r.get("code_depot") or "")))
             qval = float(r.get("qte_stock") or 0)
-            qty = QTableWidgetItem("%.2f" % qval)
+            qty = QTableWidgetItem(fmt_qty(qval))
             qty.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            if qval < 0:
+            if qval <= 0:   # rupture (0) ou anomalie (négatif) : en rouge
                 qty.setForeground(Qt.red)
             self._table.setItem(i, 4, qty)

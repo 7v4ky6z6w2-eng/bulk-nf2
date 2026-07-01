@@ -8,6 +8,10 @@
     <div class="card h-100">
       <div class="card-body">
         <h5 class="card-title">{{ s.name }}</h5>
+        <p class="mb-2">
+          <span class="badge bg-success">Entrées : {{ s.entree|fmt_da }}</span>
+          <span class="badge bg-primary">Solde : {{ s.solde|fmt_da }}</span>
+        </p>
         <p class="mb-1 text-muted small">Dernière synchro réussie</p>
         <p class="fs-6 mb-2">{{ s.last_ok_ago }}</p>
         <p class="mb-1 text-muted small">Dernier contact</p>

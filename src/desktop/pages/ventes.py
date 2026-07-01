@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from desktop.format import fmt_da
+
 
 class VentesPage(QWidget):
     def __init__(self, data, store_names: dict, parent=None):
@@ -52,7 +54,7 @@ class VentesPage(QWidget):
             self._table.setItem(i, 1, QTableWidgetItem(str(r.get("datepiece") or "")))
             self._table.setItem(i, 2, QTableWidgetItem(str(r.get("nopiece") or "")))
             self._table.setItem(i, 3, QTableWidgetItem(str(r.get("client") or "—")))
-            ttc = QTableWidgetItem("%.2f" % float(r.get("montantttc") or 0))
+            ttc = QTableWidgetItem(fmt_da(r.get("montantttc"), suffix=""))
             ttc.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._table.setItem(i, 4, ttc)
             self._table.setItem(i, 5, QTableWidgetItem(str(r.get("code_mode_regl") or "")))

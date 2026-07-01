@@ -94,6 +94,11 @@ def create_app(db_path: str, api_key: str = "",
             time.sleep(600)
     threading.Thread(target=_sweep_loop, daemon=True, name="preview-sweep").start()
 
+    # Filtre Jinja de formatage monétaire (partagé avec l'app bureau).
+    from desktop.format import fmt_da, fmt_qty
+    app.jinja_env.filters["fmt_da"] = fmt_da
+    app.jinja_env.filters["fmt_qty"] = fmt_qty
+
     app.register_blueprint(api_bp)
     app.register_blueprint(dash_bp)
     app.register_blueprint(mobile_bp)

@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
     QGridLayout, QGroupBox, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from desktop.format import fmt_da
+
 
 def _ago(ts: str | None) -> str:
     if not ts:
@@ -34,16 +36,19 @@ class StoreCard(QGroupBox):
         super().__init__(name, parent)
         self._lbl_sync = QLabel("—")
         self._lbl_seen = QLabel("—")
+        self._lbl_money = QLabel("—")
         self._lbl_badge = QLabel()
 
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Aujourd'hui :</b>"))
+        layout.addWidget(self._lbl_money)
         layout.addWidget(QLabel("<b>Dernière synchro :</b>"))
         layout.addWidget(self._lbl_sync)
         layout.addWidget(QLabel("<b>Dernier contact :</b>"))
         layout.addWidget(self._lbl_seen)
         layout.addWidget(self._lbl_badge)
 
-        for lbl in (self._lbl_sync, self._lbl_seen, self._lbl_badge):
+        for lbl in (self._lbl_sync, self._lbl_seen, self._lbl_money, self._lbl_badge):
             lbl.setTextFormat(Qt.RichText)
 
     def update_data(self, s: dict) -> None:
@@ -52,6 +57,11 @@ class StoreCard(QGroupBox):
         ok = bool(s.get("last_ok"))
         color, txt = ("#28a745", "● Actif") if ok else ("#6c757d", "● Jamais synchro")
         self._lbl_badge.setText("<span style='color:%s'>%s</span>" % (color, txt))
+
+    def update_money(self, entree: float, sortie: float) -> None:
+        self._lbl_money.setText(
+            "<span style='color:#28a745'>%s</span> &nbsp; "
+            "<b>Solde : %s</b>" % (fmt_da(entree), fmt_da(entree - sortie)))
 
 
 class OverviewPage(QWidget):
@@ -97,3 +107,17 @@ class OverviewPage(QWidget):
                 row, col = divmod(len(self._cards) - 1, 3)
                 self._grid.addWidget(card, row, col)
             self._cards[sid].update_data(s)
+
+        # Entrées / solde du jour par magasin (mêmes données que la page Trésorerie).
+        try:
+            treso = self._data.tresorerie_today()
+        except Exception:  # noqa: BLE001
+            return
+        money: dict[int, dict] = {}
+        for r in treso:
+            m = money.setdefault(r.get("store_id"), {"entree": 0.0, "sortie": 0.0})
+            val = float(r.get("total_encaisse") or 0)
+            m["sortie" if r.get("sens") == "sortie" else "entree"] += val
+        for sid, m in money.items():
+            if sid in self._cards:
+                self._cards[sid].update_money(m["entree"], m["sortie"])

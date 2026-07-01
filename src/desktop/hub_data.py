@@ -79,21 +79,30 @@ class HubData:
     def article_barcodes(self, ref_art: str) -> list:
         return self._get("/api/data/article_barcodes", {"ref": ref_art}).get("rows", [])
 
-    # -- écriture (BDR / prix) --------------------------------------------
+    # -- écriture (BDR / prix / codes-barres) -------------------------------
     def submit_op(self, store_id: int, op_type: str, payload: dict,
-                  timeout: float = 180.0) -> dict:
+                  timeout: float | None = None, op_uid: str | None = None) -> dict:
         """Envoie une opération au hub.
 
         Renvoie un dict : {"status": "applied"|"queued"|"error", ...}.
           * applied : appliqué tout de suite (magasin en ligne).
           * queued  : magasin hors ligne, mis en file (op_id renvoyé).
           * error   : échec de l'application directe (message dans "error").
+
+        `op_uid` : uid d'idempotence — un retry (timeout réseau) avec le même
+        uid renvoie le résultat déjà enregistré côté hub au lieu de ré-exécuter
+        (indispensable pour bdr_import : évite un double import de stock).
+        Les imports BDR peuvent être longs (gros fichier + sérialisation côté
+        hub) : timeout par défaut 600 s pour eux, 180 s sinon.
         """
+        if timeout is None:
+            timeout = 600.0 if op_type == "bdr_import" else 180.0
+        body = {"store_id": store_id, "op_type": op_type, "payload": payload}
+        if op_uid:
+            body["op_uid"] = op_uid
         try:
-            r = self._sess.post(
-                self.base + "/api/op",
-                json={"store_id": store_id, "op_type": op_type, "payload": payload},
-                headers=self._headers(), timeout=timeout)
+            r = self._sess.post(self.base + "/api/op", json=body,
+                                headers=self._headers(), timeout=timeout)
             r.raise_for_status()
             return r.json()
         except requests.RequestException as exc:

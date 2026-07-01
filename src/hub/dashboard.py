@@ -1,15 +1,34 @@
-"""Routes Flask du tableau de bord web (lecture seule)."""
+"""Routes Flask du tableau de bord web (lecture seule).
+
+Protégé par la MÊME session que les pages mobiles (/m/login, code d'accès) :
+un navigateur non connecté est redirigé vers l'écran de connexion. Les agents
+et l'app bureau ne passent pas par ici (ils utilisent /api/* avec X-Api-Key).
+"""
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timedelta
 
-from flask import Blueprint, jsonify, render_template, current_app
+from flask import Blueprint, jsonify, redirect, render_template, request, \
+    session, url_for, current_app
 
-from hub.central_db import tresorerie_today, tresorerie_caisses, store_status
+from hub.central_db import (
+    tresorerie_today, tresorerie_caisses, store_status, stock_rows,
+)
 
 bp = Blueprint("dashboard", __name__)
+
+
+@bp.before_request
+def _require_login():
+    # Même session que /m/ ; si aucun code n'est configuré, accès libre
+    # (cohérent avec le mode « ouvert » de l'API).
+    has_code = bool(current_app.config.get("API_KEY")
+                    or current_app.config.get("ACCESS_CODE"))
+    if has_code and not session.get("mobile_auth"):
+        return redirect(url_for("mobile.login_form", next=request.path))
+    return None
 
 
 def _db() -> sqlite3.Connection:
@@ -43,10 +62,19 @@ def _ago(ts: str | None) -> str:
 def overview():
     statuses = store_status(_db())
     names = _store_names()
+    # Entrées / solde du jour par magasin (affichés sur les cartes).
+    money: dict = {}
+    for r in tresorerie_today(_db()):
+        m = money.setdefault(r["store_id"], {"entree": 0.0, "sortie": 0.0})
+        val = float(r.get("total_encaisse") or 0)
+        m["sortie" if r.get("sens") == "sortie" else "entree"] += val
     for s in statuses:
         s["name"] = names.get(s["store_id"], s.get("store_name") or "Magasin %d" % s["store_id"])
         s["last_ok_ago"] = _ago(s.get("last_ok"))
         s["last_seen_ago"] = _ago(s.get("last_seen"))
+        m = money.get(s["store_id"], {"entree": 0.0, "sortie": 0.0})
+        s["entree"] = m["entree"]
+        s["solde"] = m["entree"] - m["sortie"]
     return render_template("overview.html", stores=statuses)
 
 
@@ -89,14 +117,10 @@ def tresorerie():
 
 @bp.get("/stock")
 def stock():
-    con = _db()
-    rows = con.execute(
-        "SELECT a.store_id, a.ref_art, a.designation, s.code_depot, s.qte_stock "
-        "FROM stock_snapshot s JOIN article a "
-        "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
-        "ORDER BY a.store_id, a.ref_art LIMIT 500").fetchall()
+    q = request.args.get("q", "").strip()
+    rows = stock_rows(_db(), q)
     names = _store_names()
-    return render_template("stock.html", rows=[dict(r) for r in rows], store_names=names)
+    return render_template("stock.html", rows=rows, store_names=names, q=q)
 
 
 @bp.get("/ventes")

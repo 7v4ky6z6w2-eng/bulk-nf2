@@ -8,10 +8,10 @@ il suffit de stores.json et d'un accès réseau au magasin 1.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QListWidget, QListWidgetItem, QHBoxLayout,
-    QSplitter, QStackedWidget, QWidget,
+    QLabel, QListWidget, QListWidgetItem, QHBoxLayout,
+    QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from stores import StoreRegistry
@@ -71,11 +71,48 @@ class MainWindow(QWidget):
         self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
         self._nav.setCurrentRow(0)
 
+        # Indicateur d'état du hub, toujours visible en bas de la barre latérale.
+        self._hub_status = QLabel()
+        self._hub_status.setTextFormat(Qt.RichText)
+        self._hub_status.setStyleSheet("padding:8px 12px; background:#1a1d20;")
+
+        side = QWidget()
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.setSpacing(0)
+        side_layout.addWidget(self._nav, 1)
+        side_layout.addWidget(self._hub_status)
+        side.setFixedWidth(160)
+
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._nav)
+        splitter.addWidget(side)
         splitter.addWidget(self._stack)
         splitter.setStretchFactor(1, 1)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
+
+        self._ping_timer = QTimer(self)
+        self._ping_timer.timeout.connect(self._refresh_hub_status)
+        self._ping_timer.start(30_000)
+        self._refresh_hub_status()
+
+    def _refresh_hub_status(self) -> None:
+        from datetime import datetime
+        ok = False
+        try:
+            ok = self._data.ping()
+        except Exception:  # noqa: BLE001
+            ok = False
+        ts = datetime.now().strftime("%H:%M:%S")
+        if ok:
+            self._hub_status.setText(
+                "<span style='color:#28a745'>●</span> "
+                "<span style='color:#adb5bd'>Hub connecté<br>"
+                "<small>actualisé %s</small></span>" % ts)
+        else:
+            self._hub_status.setText(
+                "<span style='color:#dc3545'>●</span> "
+                "<span style='color:#adb5bd'>Hub injoignable<br>"
+                "<small>essai %s</small></span>" % ts)

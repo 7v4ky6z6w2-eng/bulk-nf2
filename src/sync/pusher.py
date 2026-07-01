@@ -69,13 +69,31 @@ class HubClient:
                           json={"store_id": self.store_id, "store_name": store_name})
         return r.json()["session_id"]
 
+    # Taille de lot : reste très en dessous de la limite de corps HTTP du hub
+    # (25 Mo) même pour des lignes larges, et borne la mémoire côté hub.
+    CHUNK_ROWS = 5000
+
     def push(self, session_id: int, table: str, rows: list) -> int:
+        """Pousse une table par lots de CHUNK_ROWS lignes.
+
+        Le PREMIER lot porte replace=true : pour les tables « instantané »
+        (stock, codes-barres, trésorerie du jour), le hub purge l'état
+        précédent du magasin avant d'insérer — les lignes disparues côté
+        Firebird disparaissent aussi du miroir. Les lots suivants complètent
+        sans re-purger.
+        """
         if not rows:
             return 0
-        r = self._request("POST", "/api/sync/push/%s" % table,
-                          json={"session_id": session_id, "store_id": self.store_id,
-                                "rows": rows})
-        return r.json().get("accepted", 0)
+        accepted = 0
+        for start in range(0, len(rows), self.CHUNK_ROWS):
+            chunk = rows[start:start + self.CHUNK_ROWS]
+            r = self._request("POST", "/api/sync/push/%s" % table,
+                              json={"session_id": session_id,
+                                    "store_id": self.store_id,
+                                    "rows": chunk,
+                                    "replace": start == 0})
+            accepted += r.json().get("accepted", 0)
+        return accepted
 
     def finish_sync(self, session_id: int, rows: int, status: str = "ok",
                     error_msg: str | None = None) -> None:
