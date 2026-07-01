@@ -42,7 +42,9 @@ def run_cycle(store_id: int, registry: StoreRegistry, state: StateManager) -> No
     store = registry.get(store_id)
     hub_client = HubClient(
         base_url=registry.hub_url(),
-        api_key=registry.hub_api_key,
+        # Le hub accepte la clé API ou le code d'accès ; on envoie celle qui est
+        # configurée (évite un 403 si seul access_code est renseigné).
+        api_key=registry.hub_api_key or registry.access_code,
         store_id=store_id,
     )
 
