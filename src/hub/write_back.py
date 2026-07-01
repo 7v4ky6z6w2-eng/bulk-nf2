@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 
 _VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
 _BDR_DIR = os.path.join(_VENDOR, "bdr")
@@ -19,6 +20,12 @@ _EDITOR_DIR = os.path.join(_VENDOR, "editor")
 for _d in (_BDR_DIR, _EDITOR_DIR):
     if _d not in sys.path:
         sys.path.insert(0, _d)
+
+# bdr.main() lit ses arguments via argparse sur sys.argv (global au process).
+# Le hub Flask tourne en threaded=True : sans ce verrou, deux imports BDR
+# simultanés (bureau + mobile, ou deux téléphones) peuvent lire les chemins de
+# fichiers temporaires l'un de l'autre.
+_BDR_LOCK = threading.Lock()
 
 
 class WriteError(Exception):
@@ -50,19 +57,20 @@ def write_bdr(connect_kwargs: dict, config: dict, lines: list) -> None:
         json.dump(lines, fh, ensure_ascii=False)
 
     argv = ["import_bon_reception", "--config", cfg_path, "--lines", lines_path]
-    old_argv = sys.argv
     buf = io.StringIO()
-    try:
-        sys.argv = argv
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            bdr.main()
-    except SystemExit as exc:
-        if exc.code not in (0, None):
-            raise WriteError("BDR échoué : %s" % (buf.getvalue().strip()[-400:] or exc.code)) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise WriteError("BDR échoué : %s" % exc) from exc
-    finally:
-        sys.argv = old_argv
+    with _BDR_LOCK:  # sys.argv est global au process : sérialise les imports BDR
+        old_argv = sys.argv
+        try:
+            sys.argv = argv
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                bdr.main()
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                raise WriteError("BDR échoué : %s" % (buf.getvalue().strip()[-400:] or exc.code)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise WriteError("BDR échoué : %s" % exc) from exc
+        finally:
+            sys.argv = old_argv
 
 
 def write_prices(connect_kwargs: dict, changes: list) -> None:

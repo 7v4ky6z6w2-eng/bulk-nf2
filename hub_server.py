@@ -80,6 +80,20 @@ def create_app(db_path: str, api_key: str = "",
         t = threading.Thread(target=_notify_loop, daemon=True, name="notifier")
         t.start()
 
+    # Thread de fond : purge les aperçus BDR mobiles abandonnés (jamais
+    # confirmés ni annulés) — sinon ils s'accumulent indéfiniment dans le
+    # dossier temporaire du système.
+    def _sweep_loop():
+        import time
+        from hub.mobile import sweep_expired_previews
+        while True:
+            try:
+                sweep_expired_previews()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(600)
+    threading.Thread(target=_sweep_loop, daemon=True, name="preview-sweep").start()
+
     app.register_blueprint(api_bp)
     app.register_blueprint(dash_bp)
     app.register_blueprint(mobile_bp)

@@ -59,9 +59,22 @@ def run_cycle(store_id: int, registry: StoreRegistry, state: StateManager) -> No
     for op in ops:
         op_id = op["id"]
         op_type = op.get("op_type", "?")
+
+        # Si un acquittement précédent a échoué après une écriture Firebird
+        # réussie, le hub représente la même op (toujours 'pending'). Ne pas
+        # la ré-exécuter (double BDR / double écriture) : juste ré-acquitter.
+        if state.is_op_applied(op_id):
+            log.info("Op #%d déjà appliquée localement — ré-acquittement.", op_id)
+            try:
+                hub_client.report_op(op_id, ok=True)
+            except HubError as exc:
+                log.warning("Impossible de ré-acquitter op #%d : %s", op_id, exc)
+            continue
+
         log.info("Application op #%d (%s)…", op_id, op_type)
         try:
             apply_op(op, local_kw)
+            state.mark_op_applied(op_id)  # avant l'acquittement : source de vérité locale
             hub_client.report_op(op_id, ok=True)
             log.info("Op #%d appliquée avec succès.", op_id)
         except ApplyError as exc:

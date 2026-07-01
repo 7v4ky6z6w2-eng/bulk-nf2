@@ -74,12 +74,14 @@ def init_db(db_path: str) -> None:
 
 def _migrate(con: sqlite3.Connection) -> None:
     """Migrations légères des bases déjà créées avant une évolution de schéma."""
-    # Ajout des colonnes « caisse » et « sens » à tresorerie_snapshot.
-    # La contrainte UNIQUE doit les inclure : on recrée la table si besoin (ce
-    # n'est qu'un cache journalier, repeuplé à la prochaine synchro).
+    # Ajout des colonnes « caisse » et « sens » à tresorerie_snapshot. La
+    # contrainte UNIQUE doit les inclure, donc on recrée la table — mais en
+    # PRÉSERVANT les lignes existantes (copiées avec caisse/sens par défaut),
+    # au lieu de les jeter : un simple redémarrage du hub ne doit jamais
+    # effacer une journée de trésorerie déjà synchronisée.
     cols = [r[1] for r in con.execute("PRAGMA table_info(tresorerie_snapshot)").fetchall()]
     if cols and ("caisse" not in cols or "sens" not in cols):
-        con.execute("DROP TABLE tresorerie_snapshot")
+        con.execute("ALTER TABLE tresorerie_snapshot RENAME TO tresorerie_snapshot_old")
         con.executescript(
             "CREATE TABLE tresorerie_snapshot ("
             " id INTEGER PRIMARY KEY AUTOINCREMENT, store_id INTEGER NOT NULL,"
@@ -90,6 +92,16 @@ def _migrate(con: sqlite3.Connection) -> None:
             " UNIQUE (store_id, snap_date, caisse, sens, mode_paiement));"
             "CREATE INDEX IF NOT EXISTS idx_treso_store_date "
             " ON tresorerie_snapshot (store_id, snap_date);")
+        caisse_expr = "caisse" if "caisse" in cols else "'(globale)'"
+        sens_expr = "sens" if "sens" in cols else "'entree'"
+        con.execute(
+            "INSERT OR IGNORE INTO tresorerie_snapshot "
+            " (store_id, snap_date, caisse, sens, mode_paiement, total_encaisse, "
+            "  nb_transactions, synced_at) "
+            "SELECT store_id, snap_date, %s, %s, mode_paiement, total_encaisse, "
+            "  nb_transactions, synced_at FROM tresorerie_snapshot_old"
+            % (caisse_expr, sens_expr))
+        con.execute("DROP TABLE tresorerie_snapshot_old")
 
 
 # --------------------------------------------------------------------------- #
@@ -117,8 +129,23 @@ def upsert_batch(con: sqlite3.Connection, table: str, store_id: int,
     for row in rows:
         vals = [store_id] + [row.get(c) for c in cols] + [synced_at]
         params.append(vals)
-    con.executemany(sql, params)
-    return len(params)
+    try:
+        con.executemany(sql, params)
+        return len(params)
+    except sqlite3.Error:
+        # Une seule ligne malformée (ex. clé métier NULL) fait échouer
+        # executemany() et annule TOUT le lot (rollback implicite). On repasse
+        # ligne par ligne pour ne perdre que la ligne fautive, sinon l'agent
+        # ré-envoie indéfiniment le même lot en butant toujours sur la même
+        # ligne (la synchro du magasin resterait bloquée).
+        n = 0
+        for p in params:
+            try:
+                con.execute(sql, p)
+                n += 1
+            except sqlite3.Error:
+                continue
+        return n
 
 
 # --------------------------------------------------------------------------- #

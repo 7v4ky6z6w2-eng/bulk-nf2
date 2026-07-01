@@ -12,12 +12,14 @@ import os
 from datetime import datetime, timezone
 
 DEFAULT_WATERMARK = "1900-01-01T00:00:00"
+MAX_APPLIED_OPS = 2000  # borne la taille du fichier (purge des plus anciens)
 
 
 class StateManager:
     def __init__(self, path: str):
         self.path = path
-        self.data = {"store_id": None, "watermarks": {}, "last_sync_ok": None}
+        self.data = {"store_id": None, "watermarks": {}, "last_sync_ok": None,
+                     "applied_ops": []}
         self.load()
 
     def load(self) -> None:
@@ -28,6 +30,7 @@ class StateManager:
             except (json.JSONDecodeError, OSError):
                 pass
         self.data.setdefault("watermarks", {})
+        self.data.setdefault("applied_ops", [])
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(self.path)) or ".", exist_ok=True)
@@ -48,3 +51,18 @@ class StateManager:
     def mark_ok(self) -> None:
         self.data["last_sync_ok"] = datetime.now(timezone.utc).astimezone().isoformat(
             timespec="seconds")
+
+    # -- suivi des opérations déjà appliquées (idempotence) -----------------
+    # Si l'acquittement au hub échoue après une écriture Firebird réussie (op
+    # écrite mais toujours 'pending' côté hub), le prochain cycle la
+    # re-proposera. Ce registre local évite de la ré-exécuter : on se contente
+    # alors de ré-acquitter.
+    def is_op_applied(self, op_id: int) -> bool:
+        return op_id in self.data["applied_ops"]
+
+    def mark_op_applied(self, op_id: int) -> None:
+        if op_id not in self.data["applied_ops"]:
+            self.data["applied_ops"].append(op_id)
+            if len(self.data["applied_ops"]) > MAX_APPLIED_OPS:
+                self.data["applied_ops"] = self.data["applied_ops"][-MAX_APPLIED_OPS:]
+        self.save()

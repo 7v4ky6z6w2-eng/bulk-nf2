@@ -26,7 +26,11 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
         try:
             store = registry.get(store_id)
         except Exception:  # noqa: BLE001
-            store = None
+            # Le magasin n'existe pas dans stores.json (id erroné/périmé) : ce
+            # n'est PAS "hors ligne", il ne faut donc pas mettre en file (l'op
+            # ne serait jamais récupérée par aucun agent et resterait bloquée
+            # indéfiniment en 'pending' sans jamais échouer ni notifier).
+            return {"status": "error", "error": "Magasin inconnu (id=%s)." % store_id}
 
     online = bool(store and is_reachable(store.host, store.port))
     if online:

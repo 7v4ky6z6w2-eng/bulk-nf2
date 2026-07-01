@@ -11,6 +11,7 @@ page de connexion avec le code d'accès.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -108,6 +109,7 @@ def _save_preview(data: dict) -> str:
 
 
 def _load_preview(token: str) -> dict | None:
+    """Lecture SANS consommer (aperçu, annulation) : ne supprime que si expiré."""
     token = secure_filename(token or "")
     path = os.path.join(_preview_dir(), token + ".json")
     if not os.path.isfile(path):
@@ -119,11 +121,52 @@ def _load_preview(token: str) -> dict | None:
         return json.load(fh)
 
 
+def _claim_preview(token: str) -> dict | None:
+    """Récupère ET consomme un aperçu de façon ATOMIQUE (os.rename).
+
+    Empêche un double-tap / double-soumission (réseau mobile lent, retry
+    client) d'appliquer deux fois le même BDR : seule la requête qui gagne le
+    rename obtient les données ; la seconde reçoit None (déjà traité).
+    """
+    token = secure_filename(token or "")
+    src = os.path.join(_preview_dir(), token + ".json")
+    dst = os.path.join(_preview_dir(), token + ".claimed.json")
+    try:
+        os.rename(src, dst)
+    except OSError:
+        return None  # déjà réclamé par une autre requête, ou inexistant/expiré
+    try:
+        if time.time() - os.path.getmtime(dst) > _PREVIEW_TTL:
+            return None
+        with open(dst, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(dst)
+
+
 def _delete_preview(token: str) -> None:
     token = secure_filename(token or "")
     path = os.path.join(_preview_dir(), token + ".json")
     if os.path.isfile(path):
         os.remove(path)
+
+
+def sweep_expired_previews() -> None:
+    """Nettoie les aperçus abandonnés (jamais confirmés ni annulés)."""
+    d = _preview_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    now = time.time()
+    for name in names:
+        path = os.path.join(d, name)
+        try:
+            if now - os.path.getmtime(path) > _PREVIEW_TTL:
+                os.remove(path)
+        except OSError:
+            continue
 
 
 # ── Import BDR depuis le téléphone ────────────────────────────────────────────
@@ -178,13 +221,15 @@ def bdr_upload():
 @bp.post("/bdr/confirm")
 def bdr_confirm():
     token = request.form.get("token", "")
-    data = _load_preview(token)
+    # Réclamation ATOMIQUE : un double-tap / retry réseau ne peut appliquer le
+    # BDR qu'une seule fois (la seconde requête reçoit None, pas les données).
+    data = _claim_preview(token)
     if not data:
-        return render_template("mobile/bdr_result.html",
-                               ok=False, message="Aperçu expiré, recommencez l'envoi.")
+        return render_template("mobile/bdr_result.html", ok=False,
+                               message="Aperçu expiré ou déjà confirmé (recommencez l'envoi "
+                                       "si l'import n'a pas eu lieu).")
     result = submit_op(_db(), _registry(), data["store_id"], "bdr_import",
                        {"config": data["config"], "lines": data["lines"]})
-    _delete_preview(token)
     names = _store_names()
     store_name = names.get(data["store_id"], "Magasin %s" % data["store_id"])
     return render_template("mobile/bdr_result.html", ok=(result["status"] != "error"),
