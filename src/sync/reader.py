@@ -283,53 +283,62 @@ class FirebirdReader:
     def read_tresorerie_today(self, day: str | None = None) -> list:
         """Total encaissé aujourd'hui par CAISSE et par mode de règlement.
 
-        Netfact2 stocke la caisse (caisse1, caisse2…) dans la colonne PIECE.CAISSE
-        et ces valeurs varient d'une base à l'autre. On regroupe donc par
-        (caisse, mode) ; le tableau de bord permet ensuite de choisir une caisse
-        ou « Globale » (toutes cumulées).
+        Netfact2/PRIME enregistre les MOUVEMENTS d'argent (versements,
+        dépenses, opérations de tiroir…) comme des pièces à part — pas comme
+        un simple champ sur la pièce de vente. Confirmé sur une base réelle
+        (diag_columns.py) : ce sont les pièces avec CODE_MODE_REGL renseigné
+        (PC_DV_VRS_EN = versement entrée, PC_DV_DEP = dépense, PC_DV_TB…) ;
+        le montant réel est dans PIECE.MONTANT (PAS MONTANTVERSE, toujours à 0
+        sur ces mouvements) ; le sens entrée/sortie est donné par le signe de
+        PIECE.COEFF (pas COEFF_PIECE — colonne inexistante sur cette base ;
+        et COEFF_TR ne doit PAS être additionné, ça fausse le signe).
 
-        Note : sur les pièces de VENTE, ANNULEE=0 = active (le BDR utilise =1).
-        On retient les pièces avec MONTANTVERSE renseigné et non annulées.
+        ANNULEE : sur CE produit, ANNULEE=1 = pièce ACTIVE (même convention
+        que les BDR PC_AC_B) — vérifié sur 3 mouvements réels du jour, tous à
+        ANNULEE=1. On ne filtre donc PAS dessus ; CODE_MODE_REGL IS NOT NULL
+        suffit à isoler les pièces de mouvement d'argent.
+
+        Colonne « caisse » : absente de PIECE sur cette base (confirmé) — pas
+        de panne, ce produit ne suit simplement pas cette dimension. On
+        regroupe quand même par une colonne caisse SI elle existe (autre
+        variante Netfact2), sinon tout tombe sous "(globale)".
         """
         cols = self.columns("PIECE")
-        if not _candidate(cols, "MONTANTVERSE") or not _candidate(cols, "CODE_MODE_REGL"):
+        has_montant = _candidate(cols, "MONTANT")
+        has_montantverse = _candidate(cols, "MONTANTVERSE")
+        if not (has_montant or has_montantverse) or not _candidate(cols, "CODE_MODE_REGL"):
             return []
+        montant_col = "MONTANT" if has_montant else "MONTANTVERSE"
+
         day = day or datetime.now().strftime("%Y-%m-%d")
         name = self._name_col("MODE_REGL") or "DESIGNATION"
         has_mr = self.has_table("MODE_REGL")
         mode_expr = "MR.%s" % name if has_mr else "P.CODE_MODE_REGL"
         join = "JOIN MODE_REGL MR ON P.CODE_MODE_REGL = MR.CODE_MODE_REGL" if has_mr else ""
-        annulee_clause = "AND (P.ANNULEE = 0 OR P.ANNULEE IS NULL)" \
-            if _candidate(cols, "ANNULEE") else ""
 
-        # Colonne caisse (détectée : varie selon les installations).
+        # Colonne caisse (détectée : absente sur ce produit, présente sur d'autres).
         caisse_col = _candidate(cols, "CAISSE", "CODE_CAISSE", "NUM_CAISSE", "NOCAISSE")
         caisse_sel = "P.%s AS caisse, " % caisse_col if caisse_col else "'(globale)' AS caisse, "
         caisse_grp = ", P.%s" % caisse_col if caisse_col else ""
 
-        # Sens entrée / sortie : Netfact2 encode le sens financier de la pièce
-        # dans COEFF_PIECE (+ COEFF_PIECE_TR). Signe >= 0 → recette (entrée) ;
-        # < 0 → dépense (sortie). À défaut, on se rabat sur le signe du montant
-        # versé (certaines installations stockent les sorties en négatif).
-        cp = _candidate(cols, "COEFF_PIECE")
-        cptr = _candidate(cols, "COEFF_PIECE_TR")
-        if cp:
-            coeff = "COALESCE(P.%s,0)" % cp
-            if cptr:
-                coeff += " + COALESCE(P.%s,0)" % cptr
-            sens_expr = "CASE WHEN (%s) < 0 THEN 'sortie' ELSE 'entree' END" % coeff
+        # Sens entrée / sortie : signe de COEFF (COEFF_TR est un concept séparé,
+        # NE PAS l'additionner — vérifié : ça inverse le sens sur des cas réels).
+        coeff_col = _candidate(cols, "COEFF")
+        if coeff_col:
+            sens_expr = "CASE WHEN COALESCE(P.%s,0) < 0 THEN 'sortie' ELSE 'entree' END" % coeff_col
         else:
-            sens_expr = "CASE WHEN P.MONTANTVERSE < 0 THEN 'sortie' ELSE 'entree' END"
+            sens_expr = "CASE WHEN P.%s < 0 THEN 'sortie' ELSE 'entree' END" % montant_col
 
         sql = (
             "SELECT %s%s AS mode_paiement, %s AS sens, "
-            "       SUM(ABS(P.MONTANTVERSE)) AS total_encaisse, "
+            "       SUM(ABS(P.%s)) AS total_encaisse, "
             "       COUNT(*) AS nb_transactions "
             "FROM PIECE P %s "
-            "WHERE CAST(P.DATEPIECE AS DATE) = ? %s "
-            "  AND P.MONTANTVERSE IS NOT NULL AND P.MONTANTVERSE <> 0 "
-            "GROUP BY %s%s, %s" % (caisse_sel, mode_expr, sens_expr, join,
-                                   annulee_clause, mode_expr, caisse_grp, sens_expr))
+            "WHERE CAST(P.DATEPIECE AS DATE) = ? "
+            "  AND P.CODE_MODE_REGL IS NOT NULL "
+            "  AND P.%s IS NOT NULL AND P.%s <> 0 "
+            "GROUP BY %s%s, %s" % (caisse_sel, mode_expr, sens_expr, montant_col, join,
+                                   montant_col, montant_col, mode_expr, caisse_grp, sens_expr))
         rows = self._fetch(sql, (day,))
         for r in rows:
             r["snap_date"] = day
