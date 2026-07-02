@@ -21,12 +21,24 @@ set FB_PASSWORD=masterkey
 set RETENTION_DAYS=14
 REM ============================================================================
 
+REM Détection automatique de la commande Python (voir build_windows.bat).
+set PYCMD=
+python --version >nul 2>&1 && set PYCMD=python
+if not defined PYCMD (py -3.11 --version >nul 2>&1 && set PYCMD=py -3.11)
+if not defined PYCMD (py -3.12 --version >nul 2>&1 && set PYCMD=py -3.12)
+if not defined PYCMD (py --version >nul 2>&1 && set PYCMD=py)
+if not defined PYCMD (
+  echo ERREUR : aucune commande Python trouvee - la sauvegarde central.db sera ignoree.
+)
+
 for /f "tokens=1-3 delims=/-. " %%a in ("%DATE%") do set STAMP=%%c-%%b-%%a
 mkdir "%BACKUP_DIR%" 2>nul
 
 echo [1/3] Sauvegarde de central.db...
-if exist "%CENTRAL_DB%" (
-  python -c "import sqlite3; s=sqlite3.connect(r'%CENTRAL_DB%'); d=sqlite3.connect(r'%BACKUP_DIR%\central_%STAMP%.db'); s.backup(d); d.close(); s.close(); print('  central.db -> central_%STAMP%.db')"
+if not defined PYCMD (
+  echo   Python introuvable - sauvegarde central.db ignoree.
+) else if exist "%CENTRAL_DB%" (
+  %PYCMD% -c "import sqlite3; s=sqlite3.connect(r'%CENTRAL_DB%'); d=sqlite3.connect(r'%BACKUP_DIR%\central_%STAMP%.db'); s.backup(d); d.close(); s.close(); print('  central.db -> central_%STAMP%.db')"
   if errorlevel 1 echo   ERREUR sauvegarde central.db
 ) else (
   echo   central.db introuvable (%CENTRAL_DB%) - ignore.
