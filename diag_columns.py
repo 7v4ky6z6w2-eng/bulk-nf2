@@ -39,6 +39,12 @@ def main() -> None:
     ap.add_argument("--local", action="store_true",
                     help="Connexion locale (localhost) : à utiliser si ce script "
                          "tourne SUR le poste du magasin lui-même, pas depuis le hub.")
+    ap.add_argument("--order-by", default=None,
+                    help="Colonne de tri (ex. DATEPIECE) — sans ça, les lignes "
+                         "retournées sont arbitraires (souvent de vieilles données).")
+    ap.add_argument("--desc", action="store_true", help="Tri décroissant (plus récent d'abord)")
+    ap.add_argument("--where", default=None,
+                    help="Condition SQL brute (ex. \"CODE_MODE_REGL IS NOT NULL\")")
     args = ap.parse_args()
 
     registry = StoreRegistry.load(args.stores_path) if args.stores_path else StoreRegistry.load()
@@ -67,7 +73,13 @@ def main() -> None:
     if args.sample > 0:
         print("\n=== %d ligne(s) d'exemple ===" % args.sample)
         col_list = ", ".join(cols)
-        cur.execute("SELECT FIRST %d %s FROM %s" % (args.sample, col_list, table))
+        sql = "SELECT FIRST %d %s FROM %s" % (args.sample, col_list, table)
+        if args.where:
+            sql += " WHERE %s" % args.where
+        if args.order_by:
+            sql += " ORDER BY %s%s" % (args.order_by, " DESC" if args.desc else "")
+        print("(%s)" % sql)
+        cur.execute(sql)
         rows = cur.fetchall()
         for row in rows:
             print("-" * 40)
