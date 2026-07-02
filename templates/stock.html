@@ -9,6 +9,12 @@
     <button type="submit" class="btn btn-sm btn-primary">Chercher</button>
   </form>
 </div>
+<div class="text-muted small mb-2">
+  {% if total %}
+    {{ total }} article(s) — page {{ page }}/{{ pages }}
+    ({{ (page - 1) * page_size + 1 }}–{{ [page * page_size, total] | min }})
+  {% endif %}
+</div>
 <div class="table-responsive">
   <table class="table table-sm table-hover align-middle">
     <thead class="table-dark">
@@ -31,4 +37,17 @@
     </tbody>
   </table>
 </div>
+{% if pages and pages > 1 %}
+<nav>
+  <ul class="pagination pagination-sm">
+    <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+      <a class="page-link" href="?q={{ q }}&page={{ page - 1 }}">Précédent</a>
+    </li>
+    <li class="page-item disabled"><span class="page-link">{{ page }} / {{ pages }}</span></li>
+    <li class="page-item {% if page >= pages %}disabled{% endif %}">
+      <a class="page-link" href="?q={{ q }}&page={{ page + 1 }}">Suivant</a>
+    </li>
+  </ul>
+</nav>
+{% endif %}
 {% endblock %}

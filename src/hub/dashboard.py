@@ -14,7 +14,7 @@ from flask import Blueprint, jsonify, redirect, render_template, request, \
     session, url_for, current_app
 
 from hub.central_db import (
-    tresorerie_today, tresorerie_caisses, store_status, stock_rows,
+    tresorerie_today, tresorerie_caisses, store_status, stock_rows, stock_count,
 )
 
 bp = Blueprint("dashboard", __name__)
@@ -118,9 +118,19 @@ def tresorerie():
 @bp.get("/stock")
 def stock():
     q = request.args.get("q", "").strip()
-    rows = stock_rows(_db(), q)
+    page_size = 500
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except ValueError:
+        page = 1
+    con = _db()
+    total = stock_count(con, q)
+    pages = max(1, -(-total // page_size))  # ceil
+    page = min(page, pages)
+    rows = stock_rows(con, q, limit=page_size, offset=(page - 1) * page_size)
     names = _store_names()
-    return render_template("stock.html", rows=rows, store_names=names, q=q)
+    return render_template("stock.html", rows=rows, store_names=names, q=q,
+                           page=page, pages=pages, total=total, page_size=page_size)
 
 
 @bp.get("/ventes")

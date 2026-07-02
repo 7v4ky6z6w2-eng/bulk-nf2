@@ -315,15 +315,26 @@ def tresorerie_caisses(con: sqlite3.Connection) -> list:
     return [dict(r) for r in rows]
 
 
-def stock_rows(con: sqlite3.Connection, search: str = "", limit: int = 500) -> list:
+def stock_rows(con: sqlite3.Connection, search: str = "", limit: int = 500,
+              offset: int = 0) -> list:
     q = "%" + (search or "") + "%"
     rows = con.execute(
         "SELECT a.store_id, a.ref_art, a.designation, s.code_depot, s.qte_stock "
         "FROM stock_snapshot s JOIN article a "
         "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
         "WHERE a.ref_art LIKE ? OR a.designation LIKE ? "
-        "ORDER BY a.store_id, a.ref_art LIMIT ?", (q, q, limit)).fetchall()
+        "ORDER BY a.store_id, a.ref_art LIMIT ? OFFSET ?",
+        (q, q, limit, offset)).fetchall()
     return [dict(r) for r in rows]
+
+
+def stock_count(con: sqlite3.Connection, search: str = "") -> int:
+    q = "%" + (search or "") + "%"
+    row = con.execute(
+        "SELECT COUNT(*) AS n FROM stock_snapshot s JOIN article a "
+        "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+        "WHERE a.ref_art LIKE ? OR a.designation LIKE ?", (q, q)).fetchone()
+    return row["n"] if row else 0
 
 
 def ventes_rows(con: sqlite3.Connection, days: int = 7, limit: int = 300) -> list:
