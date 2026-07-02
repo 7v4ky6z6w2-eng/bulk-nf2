@@ -143,9 +143,12 @@ class FirebirdReader:
             add(real, alias)
         sql = "SELECT " + ", ".join(sel) + " FROM ARTICLE"
         params = ()
-        if since and _candidate(cols, "DATEMODIF"):
+        if since and _is_iso(since) and _candidate(cols, "DATEMODIF"):
             sql += " WHERE DATEMODIF > ? OR DATEMODIF IS NULL"
-            params = (since,)
+            # Firebird n'accepte pas le séparateur 'T' ISO 8601 en conversion
+            # implicite chaîne -> timestamp (SQLCODE -303) : il faut un vrai
+            # datetime Python, pas la chaîne JSON brute du fichier d'état.
+            params = (datetime.fromisoformat(since),)
         return self._normalize_dates(self._fetch(sql, params), "datemodif")
 
     def read_tiers(self, since: str | None = None) -> list:
@@ -158,9 +161,11 @@ class FirebirdReader:
             sel.append("%s AS datemodif" % date_col)
         sql = "SELECT " + ", ".join(sel) + " FROM TIERS"
         params = ()
-        if since and date_col:
+        if since and _is_iso(since) and date_col:
             sql += " WHERE %s > ? OR %s IS NULL" % (date_col, date_col)
-            params = (since,)
+            # Même correctif que read_article() : Firebird refuse le 'T' ISO
+            # 8601 en conversion implicite chaîne -> timestamp (SQLCODE -303).
+            params = (datetime.fromisoformat(since),)
         return self._normalize_dates(self._fetch(sql, params), "datemodif")
 
     # -- pièces / lignes (ventes) ------------------------------------------
