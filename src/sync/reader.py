@@ -279,24 +279,29 @@ class FirebirdReader:
                             "pump": rec.get("pump") or rec.get("prixstock")})
         return out
 
+    # Types de pièce représentant un MOUVEMENT d'argent réel (encaissement /
+    # décaissement / dépense) — confirmé par l'utilisateur sur sa base réelle.
+    # Les pièces de vente (PC_VE_TIK, PC_VE_B…) sont volontairement EXCLUES :
+    # leur paiement est enregistré séparément via une pièce PC_DV_VRS_EN liée
+    # (PIECE.NOPIECE_O), pas sur la pièce de vente elle-même — les inclure
+    # compterait le même paiement deux fois.
+    _TRESO_TYPES_ENTREE = ("PC_DV_VRS_EN",)   # encaissement
+    _TRESO_TYPES_SORTIE = ("PC_DV_VRS_SO", "PC_DV_DEP")  # décaissement, dépense/charge
+
     # -- trésorerie (encaissements du jour) --------------------------------
     def read_tresorerie_today(self, day: str | None = None) -> list:
         """Total encaissé aujourd'hui par CAISSE et par mode de règlement.
 
         Netfact2/PRIME enregistre les MOUVEMENTS d'argent (versements,
-        dépenses, opérations de tiroir…) comme des pièces à part — pas comme
-        un simple champ sur la pièce de vente. Confirmé sur une base réelle
-        (diag_columns.py) : ce sont les pièces avec CODE_MODE_REGL renseigné
-        (PC_DV_VRS_EN = versement entrée, PC_DV_DEP = dépense, PC_DV_TB…) ;
-        le montant réel est dans PIECE.MONTANT (PAS MONTANTVERSE, toujours à 0
-        sur ces mouvements) ; le sens entrée/sortie est donné par le signe de
-        PIECE.COEFF (pas COEFF_PIECE — colonne inexistante sur cette base ;
-        et COEFF_TR ne doit PAS être additionné, ça fausse le signe).
+        dépenses…) comme des pièces à part, PAS comme un champ sur la pièce de
+        vente — confirmé sur une base réelle (diag_columns.py) : ce sont les
+        pièces de type PC_DV_VRS_EN (encaissement), PC_DV_VRS_SO
+        (décaissement) et PC_DV_DEP (dépense/charge). Le montant réel est dans
+        PIECE.MONTANT (PAS MONTANTVERSE, toujours à 0 sur ces mouvements).
 
         ANNULEE : sur CE produit, ANNULEE=1 = pièce ACTIVE (même convention
-        que les BDR PC_AC_B) — vérifié sur 3 mouvements réels du jour, tous à
-        ANNULEE=1. On ne filtre donc PAS dessus ; CODE_MODE_REGL IS NOT NULL
-        suffit à isoler les pièces de mouvement d'argent.
+        que les BDR PC_AC_B) — vérifié sur des mouvements réels du jour, tous
+        à ANNULEE=1. On ne filtre donc PAS dessus.
 
         Colonne « caisse » : absente de PIECE sur cette base (confirmé) — pas
         de panne, ce produit ne suit simplement pas cette dimension. On
@@ -306,7 +311,8 @@ class FirebirdReader:
         cols = self.columns("PIECE")
         has_montant = _candidate(cols, "MONTANT")
         has_montantverse = _candidate(cols, "MONTANTVERSE")
-        if not (has_montant or has_montantverse) or not _candidate(cols, "CODE_MODE_REGL"):
+        has_type = _candidate(cols, "CODE_TYPE_PIECE")
+        if not (has_montant or has_montantverse) or not has_type:
             return []
         montant_col = "MONTANT" if has_montant else "MONTANTVERSE"
 
@@ -321,13 +327,12 @@ class FirebirdReader:
         caisse_sel = "P.%s AS caisse, " % caisse_col if caisse_col else "'(globale)' AS caisse, "
         caisse_grp = ", P.%s" % caisse_col if caisse_col else ""
 
-        # Sens entrée / sortie : signe de COEFF (COEFF_TR est un concept séparé,
-        # NE PAS l'additionner — vérifié : ça inverse le sens sur des cas réels).
-        coeff_col = _candidate(cols, "COEFF")
-        if coeff_col:
-            sens_expr = "CASE WHEN COALESCE(P.%s,0) < 0 THEN 'sortie' ELSE 'entree' END" % coeff_col
-        else:
-            sens_expr = "CASE WHEN P.%s < 0 THEN 'sortie' ELSE 'entree' END" % montant_col
+        # Sens dérivé directement du type de pièce (fiable, confirmé par
+        # l'utilisateur) plutôt que du signe d'un champ dont la sémantique
+        # varie (COEFF/COEFF_TR se sont révélés peu fiables sur des cas réels).
+        entree_list = ",".join("'%s'" % t for t in self._TRESO_TYPES_ENTREE)
+        type_in = ",".join("'%s'" % t for t in self._TRESO_TYPES_ENTREE + self._TRESO_TYPES_SORTIE)
+        sens_expr = "CASE WHEN P.CODE_TYPE_PIECE IN (%s) THEN 'entree' ELSE 'sortie' END" % entree_list
 
         sql = (
             "SELECT %s%s AS mode_paiement, %s AS sens, "
@@ -335,10 +340,11 @@ class FirebirdReader:
             "       COUNT(*) AS nb_transactions "
             "FROM PIECE P %s "
             "WHERE CAST(P.DATEPIECE AS DATE) = ? "
-            "  AND P.CODE_MODE_REGL IS NOT NULL "
+            "  AND P.CODE_TYPE_PIECE IN (%s) "
             "  AND P.%s IS NOT NULL AND P.%s <> 0 "
             "GROUP BY %s%s, %s" % (caisse_sel, mode_expr, sens_expr, montant_col, join,
-                                   montant_col, montant_col, mode_expr, caisse_grp, sens_expr))
+                                   type_in, montant_col, montant_col,
+                                   mode_expr, caisse_grp, sens_expr))
         rows = self._fetch(sql, (day,))
         for r in rows:
             r["snap_date"] = day
