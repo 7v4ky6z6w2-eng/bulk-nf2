@@ -2,9 +2,16 @@
 d'exemple, pour identifier les noms réels de colonnes (ex. caisse) qui varient
 d'une installation Netfact2/PrimeOffice à l'autre.
 
+Se connecte par défaut EN DISTANT (via l'adresse Tailscale du magasin dans
+stores.json, port Firebird 3050) — utile pour lancer ce diagnostic depuis le
+hub (le seul poste avec Python) contre la base d'un magasin 2/3 qui n'a pas
+Python. Ajoutez --local si vous lancez ce script SUR le poste du magasin
+lui-même (connexion Firebird locale).
+
 Usage :
-  python diag_columns.py --store-id 1 --table PIECE
-  python diag_columns.py --store-id 1 --table PIECE --like CAISSE
+  python diag_columns.py --store-id 2 --table PIECE            (depuis le hub, vers le magasin 2)
+  python diag_columns.py --store-id 1 --table PIECE --local    (sur le poste du magasin 1 lui-même)
+  python diag_columns.py --store-id 2 --table PIECE --like CAISSE
 """
 
 from __future__ import annotations
@@ -29,11 +36,15 @@ def main() -> None:
                     help="N'afficher que les colonnes contenant ce texte (ex. CAISSE)")
     ap.add_argument("--stores-path", default=None)
     ap.add_argument("--sample", type=int, default=2, help="Nombre de lignes d'exemple")
+    ap.add_argument("--local", action="store_true",
+                    help="Connexion locale (localhost) : à utiliser si ce script "
+                         "tourne SUR le poste du magasin lui-même, pas depuis le hub.")
     args = ap.parse_args()
 
     registry = StoreRegistry.load(args.stores_path) if args.stores_path else StoreRegistry.load()
     store = registry.get(args.store_id)
-    kw = store.connect_kwargs(local=True)
+    kw = store.connect_kwargs(local=args.local)
+    print("Connexion à %s:%s (%s)..." % (kw["host"], kw["port"], store.name))
     con = fdb.connect(**kw)
     cur = con.cursor()
 
