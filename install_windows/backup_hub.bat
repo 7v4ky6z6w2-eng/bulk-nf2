@@ -10,6 +10,15 @@ REM À personnaliser ci-dessous puis planifier via setup_backup_task.bat.
 
 setlocal
 
+REM Ce script tourne AUSSI seul chaque nuit via la tâche planifiée (sans
+REM personne devant l'écran) : pas de "pause" sans condition, sinon la
+REM sauvegarde nocturne resterait bloquée pour toujours en attendant une
+REM touche que personne n'appuiera. setup_backup_task.bat passe le mot
+REM "scheduled" en argument ; un lancement manuel (double-clic, ou depuis ce
+REM guide) n'a pas cet argument et affiche donc "Appuyez sur une touche..."
+REM à la fin pour qu'on puisse lire le résultat.
+set MODE=%1
+
 REM ======== PARAMÈTRES À ADAPTER ==============================================
 set ROOT=%~dp0..
 set CENTRAL_DB=%ROOT%\central.db
@@ -57,4 +66,8 @@ forfiles /p "%BACKUP_DIR%" /m *.db  /d -%RETENTION_DAYS% /c "cmd /c del @path" 2
 forfiles /p "%BACKUP_DIR%" /m *.fbk /d -%RETENTION_DAYS% /c "cmd /c del @path" 2>nul
 
 echo Terminé.
+if /I not "%MODE%"=="scheduled" (
+  echo.
+  pause
+)
 endlocal

@@ -14,6 +14,7 @@ if not defined PYCMD (py --version >nul 2>&1 && set PYCMD=py)
 if not defined PYCMD (
   echo ERREUR : aucune commande Python trouvee ^(essaye : python, py -3.11, py -3.12, py^).
   echo Installez Python : https://www.python.org/downloads/windows/
+  pause
   exit /b 1
 )
 echo Python detecte : %PYCMD%
@@ -25,6 +26,7 @@ if errorlevel 1 (
   echo ERREUR : PyInstaller n'est pas installe pour ce Python.
   echo Installez-le avec :   %PYCMD% -m pip install pyinstaller
   echo Puis relancez ce script.
+  pause
   exit /b 1
 )
 
@@ -42,6 +44,7 @@ echo [1/2] Construction de PrimeNFAgent.exe (agent de synchronisation)...
 
 if errorlevel 1 (
   echo ERREUR : pyinstaller a echoue pour PrimeNFAgent
+  pause
   exit /b 1
 )
 
@@ -59,6 +62,7 @@ echo [2/2] Construction de PrimeNFHub.exe (application bureau)...
 
 if errorlevel 1 (
   echo ERREUR : pyinstaller a echoue pour PrimeNFHub
+  pause
   exit /b 1
 )
 
@@ -66,3 +70,5 @@ echo.
 echo Construction terminee.
 echo   dist\PrimeNFAgent.exe  -- a copier sur les postes 2 et 3
 echo   dist\PrimeNFHub.exe    -- application bureau (tout poste)
+echo.
+pause

@@ -165,6 +165,31 @@ def _watermark_col(table: str) -> str | None:
 # ─── entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # PrimeNFAgent.exe est un outil de FOND (sans fenêtre), normalement lancé
+    # automatiquement par la tâche planifiée créée par install_agent.bat /
+    # setup_task.ps1. Si quelqu'un le double-clique par erreur dans
+    # l'Explorateur Windows, aucun argument n'est fourni : sans ce message,
+    # argparse afficherait une erreur et la fenêtre se refermerait aussitôt
+    # (impossible à lire). On l'explique et on attend une touche avant de
+    # fermer, uniquement dans ce cas précis (double-clic = zéro argument).
+    if len(sys.argv) == 1:
+        print("=" * 70)
+        print("PrimeNF Agent — outil de synchronisation (sans fenêtre)")
+        print("=" * 70)
+        print()
+        print("Ce programme ne doit PAS etre double-clique directement : il a")
+        print("besoin de savoir quel magasin synchroniser (--store-id).")
+        print()
+        print("Normalement, install_agent.bat (ou setup_task.ps1) a deja cree")
+        print("une tache planifiee Windows qui le lance automatiquement toutes")
+        print("les 15 minutes — vous n'avez rien a faire vous-meme.")
+        print()
+        print("Pour tester manuellement :")
+        print("    PrimeNFAgent.exe --store-id 2 --once")
+        print()
+        input("Appuyez sur Entree pour fermer...")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(description="Agent de synchronisation PrimeNF")
     parser.add_argument("--store-id", type=int, required=True, help="ID du magasin")
     parser.add_argument("--stores-path", default=None, help="Chemin vers stores.json")

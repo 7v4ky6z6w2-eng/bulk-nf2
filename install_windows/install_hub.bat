@@ -13,6 +13,7 @@ REM Vérifier NSSM
 if not exist "%NSSM%" (
   echo NSSM introuvable. Téléchargez nssm.exe depuis https://nssm.cc et placez-le
   echo dans install_windows\ puis relancez ce script.
+  pause
   exit /b 1
 )
 
@@ -36,6 +37,7 @@ if not defined PYTHON (
   echo complet vers python.exe, par exemple :
   echo   set PYTHON=C:\Users\VOTRE_NOM\AppData\Local\Programs\Python\Python311\python.exe
   echo Puis relancez ce script.
+  pause
   exit /b 1
 )
 echo python.exe detecte : %PYTHON%
@@ -59,4 +61,6 @@ echo Démarrage du service...
 echo.
 echo *** Service PrimeNFHub installé et démarré ***
 echo Tableau de bord : http://localhost:5000
+echo.
+pause
 endlocal
