@@ -3,8 +3,18 @@ REM ── PrimeNF Hub — construction des exécutables Windows ─────
 REM Prérequis : Python 3.11+ avec pyinstaller, fdb, requests, PySide6, openpyxl
 REM Lancer depuis la racine du projet : install_windows\build_windows.bat
 
+echo Verification de PyInstaller...
+python -m PyInstaller --version >nul 2>&1
+if errorlevel 1 (
+  echo.
+  echo ERREUR : PyInstaller n'est pas installe pour ce Python.
+  echo Installez-le avec :   pip install pyinstaller
+  echo Puis relancez ce script.
+  exit /b 1
+)
+
 echo [1/2] Construction de PrimeNFAgent.exe (agent de synchronisation)...
-pyinstaller --onefile ^
+python -m PyInstaller --onefile ^
   --name PrimeNFAgent ^
   --add-data "src;src" ^
   --add-data "stores.json.example;." ^
@@ -21,7 +31,7 @@ if errorlevel 1 (
 )
 
 echo [2/2] Construction de PrimeNFHub.exe (application bureau)...
-pyinstaller --onefile ^
+python -m PyInstaller --onefile ^
   --name PrimeNFHub ^
   --add-data "src;src" ^
   --add-data "stores.json.example;." ^
