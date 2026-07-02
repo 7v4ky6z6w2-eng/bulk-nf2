@@ -10,6 +10,7 @@ import sqlite3
 
 from hub.central_db import (
     enqueue_op, apply_barcode_ops_local, completed_op_result, record_completed_op,
+    log_immediate_op,
 )
 from hub.write_back import is_reachable, write_bdr, write_prices, write_barcode_ops, WriteError
 
@@ -61,10 +62,15 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
             result = {"status": "applied", "count": n}
             if op_uid:
                 record_completed_op(con, op_uid, result)
+            log_immediate_op(con, store_id, op_type, payload, "applied", op_uid=op_uid)
             return result
         except WriteError as exc:
+            log_immediate_op(con, store_id, op_type, payload, "failed",
+                             error_msg=str(exc), op_uid=op_uid)
             return {"status": "error", "error": str(exc)}
         except Exception as exc:  # noqa: BLE001
+            log_immediate_op(con, store_id, op_type, payload, "failed",
+                             error_msg=str(exc), op_uid=op_uid)
             return {"status": "error", "error": str(exc)}
 
     op_id = enqueue_op(con, store_id, op_type, payload, op_uid=op_uid)

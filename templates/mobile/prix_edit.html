@@ -3,7 +3,8 @@
 {% block content %}
 <h5 class="mb-3">Nouveau prix — {{ ref }}</h5>
 {% if error %}<div class="alert alert-danger py-2">{{ error }}</div>{% endif %}
-<form method="post" action="{{ url_for('mobile.prix_apply') }}">
+<form method="post" action="{{ url_for('mobile.prix_apply') }}"
+      onsubmit="return confirmPrixSubmit(this)">
   <input type="hidden" name="ref" value="{{ ref }}">
   <div class="mb-3">
     <label class="form-label">Prix (HT = TTC)</label>
@@ -21,4 +22,13 @@
   </div>
   <button type="submit" class="btn btn-primary btn-lg-block">Appliquer</button>
 </form>
+<script>
+function confirmPrixSubmit(form) {
+  const price = form.price.value;
+  const stores = Array.from(form.querySelectorAll('input[name=store_id]:checked'))
+    .map(cb => cb.nextElementSibling.textContent).join(', ');
+  if (!stores) { alert('Sélectionnez au moins un magasin.'); return false; }
+  return confirm('Appliquer ' + price + ' DA pour {{ ref }} sur : ' + stores + ' ?');
+}
+</script>
 {% endblock %}

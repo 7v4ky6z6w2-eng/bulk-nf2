@@ -187,6 +187,15 @@ class BdrPage(QWidget):
             return
         sid = self._picker.current_id() or 0
         store = self._registry.get(sid)
+        confirm = QMessageBox.question(
+            self, "Confirmer l'import du bon",
+            "Importer %d ligne(s) (fichier : %s) dans le stock de %s ?\n\n"
+            "Si le magasin est en ligne, l'import sera écrit immédiatement "
+            "dans sa base." % (len(self._lines), os.path.basename(self._excel_path),
+                               store.name),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
         self._log_msg("Envoi au hub pour le magasin %s…" % store.name)
         self._import_btn.setEnabled(False)
         self._thread = _SubmitThread(self._data, sid, self._config,

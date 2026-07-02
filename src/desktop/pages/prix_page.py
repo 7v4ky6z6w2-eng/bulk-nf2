@@ -159,6 +159,16 @@ class PrixPage(QWidget):
             QMessageBox.warning(self, "Scope vide", "Sélectionnez au moins un magasin.")
             return
 
+        store_names = ", ".join(self._registry.get(sid).name for sid in selected)
+        confirm = QMessageBox.question(
+            self, "Confirmer le changement de prix",
+            "Appliquer le prix %.2f DA pour l'article %s sur : %s ?\n\n"
+            "Si un magasin est en ligne, ce changement sera écrit immédiatement." % (
+                new_ht, ref_art, store_names),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+
         self._log_msg("Prix %.2f DA pour %s → %d magasin(s)…" % (new_ht, ref_art, len(selected)))
         changes = [{"ref0": ref_art, "values": {"PRIXVENTEHT": new_ht, "PRIXVENTETTC": new_ht}}]
 

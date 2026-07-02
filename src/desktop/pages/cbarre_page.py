@@ -183,6 +183,21 @@ class CbarrePage(QWidget):
             QMessageBox.warning(self, "Scope vide", "Sélectionnez au moins un magasin.")
             return
 
+        store_names = ", ".join(self._registry.get(sid).name for sid in selected)
+        detail_lines = []
+        if to_add:
+            detail_lines.append("Ajouter : " + ", ".join(sorted(to_add)))
+        if to_remove:
+            detail_lines.append("Retirer : " + ", ".join(sorted(to_remove)))
+        confirm = QMessageBox.question(
+            self, "Confirmer les changements de codes-barres",
+            "Article %s — %s\nMagasin(s) : %s\n\n"
+            "Si un magasin est en ligne, ce changement sera écrit immédiatement." % (
+                self._ref, "\n".join(detail_lines), store_names),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+
         self._log.setText("Envoi : +%d / -%d code(s) sur %d magasin(s)…" % (
             len(to_add), len(to_remove), len(selected)))
         self._thread = _OpThread(self._data, selected, ops)

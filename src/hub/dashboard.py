@@ -15,6 +15,7 @@ from flask import Blueprint, jsonify, redirect, render_template, request, \
 
 from hub.central_db import (
     tresorerie_today, tresorerie_caisses, store_status, stock_rows, stock_count,
+    ops_history,
 )
 
 bp = Blueprint("dashboard", __name__)
@@ -158,6 +159,13 @@ def sync_status():
     names = _store_names()
     return render_template("sync_status.html", logs=[dict(r) for r in logs],
                            store_names=names)
+
+
+@bp.get("/historique")
+def historique():
+    rows = ops_history(_db())
+    names = _store_names()
+    return render_template("historique.html", rows=rows, store_names=names)
 
 
 # API JSON (pour la page bureau qui rafraîchit sans rechargement)

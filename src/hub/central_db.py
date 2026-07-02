@@ -235,6 +235,62 @@ def enqueue_op(con: sqlite3.Connection, store_id: int, op_type: str,
     return cur.lastrowid
 
 
+def log_immediate_op(con: sqlite3.Connection, store_id: int, op_type: str,
+                     payload: dict, status: str, error_msg: str | None = None,
+                     op_uid: str | None = None) -> int:
+    """Trace une op appliquée TOUT DE SUITE (magasin en ligne) dans pending_ops,
+    pour qu'elle apparaisse dans l'historique au même titre que les ops mises en
+    file. notified=1 dès l'insertion : l'utilisateur est déjà devant l'écran qui
+    vient de lui afficher le résultat, pas besoin d'un Telegram redondant.
+
+    Upsert sur op_uid : un retry (ex. BDR ré-essayé après échec avec le même
+    op_uid) met à jour la ligne existante au lieu de violer l'index unique
+    idx_ops_uid (sinon IntegrityError sur le 2e essai)."""
+    now = now_iso()
+    cur = con.execute(
+        "INSERT INTO pending_ops (store_id, op_type, payload, created_at, applied_at, "
+        "                        status, error_msg, notified, op_uid) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?) "
+        "ON CONFLICT(op_uid) WHERE op_uid IS NOT NULL DO UPDATE SET "
+        "  applied_at=excluded.applied_at, status=excluded.status, "
+        "  error_msg=excluded.error_msg, notified=1",
+        (store_id, op_type, json.dumps(payload, ensure_ascii=False), now, now,
+         status, error_msg, op_uid))
+    con.commit()
+    return cur.lastrowid
+
+
+def ops_history(con: sqlite3.Connection, limit: int = 100) -> list:
+    """Historique des opérations (prix / codes-barres / BDR), appliquées tout de
+    suite ou mises en file, les plus récentes d'abord."""
+    rows = con.execute(
+        "SELECT id, store_id, op_type, payload, created_at, applied_at, status, "
+        "       error_msg FROM pending_ops ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            payload = json.loads(d.pop("payload") or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if d["op_type"] == "price_update":
+            changes = payload.get("changes") or []
+            refs = ", ".join(str(c.get("ref0")) for c in changes[:3])
+            if len(changes) > 3:
+                refs += "…"
+            d["detail"] = "%d article(s) : %s" % (len(changes), refs)
+        elif d["op_type"] == "barcode_ops":
+            ops = payload.get("ops") or []
+            d["detail"] = "%d code(s)-barres" % len(ops)
+        elif d["op_type"] == "bdr_import":
+            lines = payload.get("lines") or []
+            d["detail"] = "Bon : %d ligne(s)" % len(lines)
+        else:
+            d["detail"] = ""
+        out.append(d)
+    return out
+
+
 def completed_op_result(con: sqlite3.Connection, op_uid: str) -> dict | None:
     """Résultat enregistré d'une op déjà appliquée directement (par op_uid)."""
     row = con.execute("SELECT result FROM completed_ops WHERE op_uid=?",
