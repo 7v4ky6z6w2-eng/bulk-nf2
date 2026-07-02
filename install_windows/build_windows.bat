@@ -1,7 +1,23 @@
 @echo off
 REM ── PrimeNF Hub — construction des exécutables Windows ──────────────────────
 REM Prérequis : Python 3.11+ avec pyinstaller, fdb, requests, PySide6, openpyxl
-REM Lancer depuis la racine du projet : install_windows\build_windows.bat
+REM Peut être lancé de n'importe où (double-clic depuis install_windows\, ou
+REM depuis la racine) : ce script se place TOUJOURS lui-même dans le dossier
+REM racine du projet avant de continuer, ci-dessous.
+
+REM %~dp0 = dossier de CE script (install_windows\) ; ".." = racine du projet
+REM (là où se trouvent sync_agent.py, prime_hub.py, src\, templates\…).
+cd /d "%~dp0.."
+
+if not exist "sync_agent.py" (
+  echo ERREUR : sync_agent.py introuvable dans %cd%
+  echo Ce script doit se trouver dans le dossier install_windows\ A L'INTERIEUR
+  echo du projet ^(a cote de sync_agent.py, prime_hub.py, etc.^). Verifiez que
+  echo vous n'avez pas deplace/copie ce fichier seul en dehors du projet.
+  pause
+  exit /b 1
+)
+echo Dossier de travail : %cd%
 
 REM Détection automatique de la commande Python : certains PC n'ont que le
 REM lanceur "py" sur le PATH (pas "python" directement) — on essaie plusieurs
