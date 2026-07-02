@@ -1,13 +1,20 @@
-# PrimeNF Agent — enregistrement de la tâche planifiée Windows (PowerShell)
-# Alternative à install_agent.bat, plus facile à personnaliser.
+# PrimeNF Agent - enregistrement de la tache planifiee Windows (PowerShell)
+# Alternative a install_agent.bat, plus facile a personnaliser.
 #
 # Lancer en tant qu'Administrateur :
 #   powershell -ExecutionPolicy Bypass -File setup_task.ps1 -StoreId 2
 #
-# Paramètres :
+# Parametres :
 #   -StoreId  : identifiant du magasin (obligatoire)
-#   -Interval : intervalle en minutes (défaut : 15)
-#   -ExePath  : chemin complet vers PrimeNFAgent.exe (défaut : C:\PrimeNFAgent\PrimeNFAgent.exe)
+#   -Interval : intervalle en minutes (defaut : 15)
+#   -ExePath  : chemin complet vers PrimeNFAgent.exe (defaut : C:\PrimeNFAgent\PrimeNFAgent.exe)
+#
+# NOTE ENCODAGE : ce fichier ne doit contenir AUCUN caractere accentue. Sur les
+# PC dont la page de code active n'est pas UTF-8 (courant sur Windows en
+# configuration arabe/algerienne), PowerShell 5.1 lit les fichiers .ps1 sans
+# BOM avec la page de code ANSI du systeme : un accent encode en UTF-8 se
+# retrouve alors mal decode et peut casser une chaine de caracteres, faisant
+# planter TOUT le script avec une erreur de parsing (deja vu en pratique).
 
 param(
     [Parameter(Mandatory=$true)][int]$StoreId,
@@ -18,7 +25,7 @@ param(
 $TaskName = "PrimeNFAgent"
 $WorkDir  = Split-Path $ExePath
 
-# Supprimer l'ancienne tâche
+# Supprimer l'ancienne tache
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
 # Action
@@ -27,11 +34,11 @@ $Action = New-ScheduledTaskAction `
     -Argument "--store-id $StoreId --once" `
     -WorkingDirectory $WorkDir
 
-# Déclencheur : toutes les N minutes, départ 1 min après démarrage système
+# Declencheur : toutes les N minutes, depart 1 min apres demarrage systeme
 $Trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes $Interval) `
     -Once -At (Get-Date).AddMinutes(1)
 
-# Paramètres
+# Parametres
 $Settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -RunOnlyIfNetworkAvailable:$false `
@@ -48,6 +55,6 @@ Register-ScheduledTask `
     -RunLevel Highest `
     -Force | Out-Null
 
-Write-Host "✔ Tâche planifiée '$TaskName' créée (magasin $StoreId, toutes les $Interval min)."
-Write-Host "  Exécutable : $ExePath"
-Write-Host "  Démarrage avec disponibilité réseau : activé (-StartWhenAvailable)"
+Write-Host "OK - Tache planifiee '$TaskName' creee (magasin $StoreId, toutes les $Interval min)."
+Write-Host "  Executable : $ExePath"
+Write-Host "  Demarrage rattrape si le poste etait eteint : active (-StartWhenAvailable)"

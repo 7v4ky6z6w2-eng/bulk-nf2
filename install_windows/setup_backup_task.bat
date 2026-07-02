@@ -1,6 +1,6 @@
 @echo off
-REM ── Planifie la sauvegarde nocturne du hub (tous les jours à 02:00) ─────────
-REM À lancer en Administrateur sur le poste du magasin 1.
+REM ── Planifie la sauvegarde nocturne du hub (tous les jours a 02:00) ─────────
+REM A lancer en Administrateur sur le poste du magasin 1.
 
 setlocal
 set SCRIPT=%~dp0backup_hub.bat

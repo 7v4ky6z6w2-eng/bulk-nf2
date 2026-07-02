@@ -1,25 +1,25 @@
 @echo off
 REM ── Sauvegarde nocturne du hub (magasin 1) ──────────────────────────────────
-REM  1. central.db  -> snapshot cohérent via l'API backup de sqlite3 (Python),
-REM                    sûr même pendant que le hub tourne (mode WAL).
-REM  2. DIFA2.FDB   -> gbak -b -g (sauvegarde à chaud officielle Firebird,
-REM                    sûre sur une base en cours d'utilisation).
-REM  3. Rétention   -> suppression des sauvegardes de plus de 14 jours.
+REM  1. central.db  -> snapshot coherent via l'API backup de sqlite3 (Python),
+REM                    sur meme pendant que le hub tourne (mode WAL).
+REM  2. DIFA2.FDB   -> gbak -b -g (sauvegarde a chaud officielle Firebird,
+REM                    sure sur une base en cours d'utilisation).
+REM  3. Retention   -> suppression des sauvegardes de plus de 14 jours.
 REM
-REM À personnaliser ci-dessous puis planifier via setup_backup_task.bat.
+REM A personnaliser ci-dessous puis planifier via setup_backup_task.bat.
 
 setlocal
 
-REM Ce script tourne AUSSI seul chaque nuit via la tâche planifiée (sans
-REM personne devant l'écran) : pas de "pause" sans condition, sinon la
-REM sauvegarde nocturne resterait bloquée pour toujours en attendant une
+REM Ce script tourne AUSSI seul chaque nuit via la tache planifiee (sans
+REM personne devant l'ecran) : pas de "pause" sans condition, sinon la
+REM sauvegarde nocturne resterait bloquee pour toujours en attendant une
 REM touche que personne n'appuiera. setup_backup_task.bat passe le mot
 REM "scheduled" en argument ; un lancement manuel (double-clic, ou depuis ce
 REM guide) n'a pas cet argument et affiche donc "Appuyez sur une touche..."
-REM à la fin pour qu'on puisse lire le résultat.
+REM a la fin pour qu'on puisse lire le resultat.
 set MODE=%1
 
-REM ======== PARAMÈTRES À ADAPTER ==============================================
+REM ======== PARAMETRES A ADAPTER ==============================================
 set ROOT=%~dp0..
 set CENTRAL_DB=%ROOT%\central.db
 set BACKUP_DIR=%ROOT%\backups
@@ -30,7 +30,7 @@ set FB_PASSWORD=masterkey
 set RETENTION_DAYS=14
 REM ============================================================================
 
-REM Détection automatique de la commande Python (voir build_windows.bat).
+REM Detection automatique de la commande Python (voir build_windows.bat).
 set PYCMD=
 python --version >nul 2>&1 && set PYCMD=python
 if not defined PYCMD (py -3.11 --version >nul 2>&1 && set PYCMD=py -3.11)
@@ -61,11 +61,11 @@ if exist "%GBAK%" (
   echo   gbak.exe introuvable (%GBAK%) - adaptez la variable GBAK en tete de script.
 )
 
-echo [3/3] Rétention : suppression des sauvegardes de plus de %RETENTION_DAYS% jours...
+echo [3/3] Retention : suppression des sauvegardes de plus de %RETENTION_DAYS% jours...
 forfiles /p "%BACKUP_DIR%" /m *.db  /d -%RETENTION_DAYS% /c "cmd /c del @path" 2>nul
 forfiles /p "%BACKUP_DIR%" /m *.fbk /d -%RETENTION_DAYS% /c "cmd /c del @path" 2>nul
 
-echo Terminé.
+echo Termine.
 if /I not "%MODE%"=="scheduled" (
   echo.
   pause

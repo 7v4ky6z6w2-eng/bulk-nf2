@@ -97,7 +97,12 @@ notepad stores.json
 ```
 
 Remplissez :
-- **`host`** de chaque magasin = son adresse Tailscale `100.x.y.z` (le magasin 1 reste `localhost`).
+- **`host`** de **chaque** magasin, y compris le magasin 1 (hub) = son adresse
+  Tailscale `100.x.y.z` (visible dans https://login.tailscale.com/admin/machines).
+  Ne mettez **jamais** `localhost` pour le magasin 1 : le même `stores.json`
+  est copié tel quel sur les 3 postes, et les magasins 2/3 ont besoin de la
+  vraie adresse réseau du hub pour le joindre — `localhost` ne voudrait dire
+  quelque chose que pour le poste du hub lui-même.
 - **`database`** = chemin de la base sur **ce** poste (ex. `C:\\Netfact\\Data\\DIFA2.FDB`).
 - **`password`** = mot de passe SYSDBA (souvent `masterkey`).
 - **`hub_api_key`** = une longue chaîne aléatoire que vous inventez (utilisée par les agents).

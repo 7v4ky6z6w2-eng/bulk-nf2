@@ -101,8 +101,14 @@ class StoreRegistry:
         return cls(stores=stores, hub_api_key=code, access_code=code)
 
     def hub_url(self) -> str:
-        """URL du serveur hub vue depuis CE poste (le host du magasin hub dans
-        stores.json est localhost sur le hub, IP Tailscale sur les autres)."""
+        """URL HTTP du serveur hub (Flask, port hub_port).
+
+        Le MÊME stores.json est copié tel quel sur les 3 postes (install_agent.bat) :
+        le champ "host" du magasin hub doit donc être son adresse Tailscale
+        (100.x.y.z), PAS "localhost" — sinon les magasins 2/3 essaieraient de
+        joindre un hub sur leur propre poste, où rien n'écoute. hub_server.py
+        écoute sur 0.0.0.0 par défaut, donc le hub lui-même peut aussi se
+        joindre via sa propre adresse Tailscale sans problème."""
         return "http://%s:%d" % (self.hub().host or "localhost", self.hub_port)
 
     # --- chargement -------------------------------------------------------

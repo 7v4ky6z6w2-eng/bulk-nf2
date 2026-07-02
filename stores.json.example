@@ -1,5 +1,5 @@
 {
-  "_comment": "Copiez ce fichier en stores.json et remplissez les valeurs. Les IP 100.x.y.z sont les adresses Tailscale de chaque poste. La base du hub (magasin 1) reste en localhost.",
+  "_comment": "Copiez ce fichier en stores.json et remplissez les valeurs. Les IP 100.x.y.z sont les adresses Tailscale de CHAQUE poste, y compris le magasin 1 (hub) : ce host sert aussi aux autres magasins pour joindre le hub par le reseau, 'localhost' ne marcherait que depuis le poste du hub lui-meme.",
 
   "telegram": {
     "bot_token": "",
@@ -16,7 +16,7 @@
       "id": 1,
       "name": "Difa El Biar",
       "is_hub": true,
-      "host": "localhost",
+      "host": "100.100.1.1",
       "port": 3050,
       "database": "C:\\Netfact\\Data\\DIFA2.FDB",
       "user": "SYSDBA",

@@ -1,12 +1,12 @@
 @echo off
-REM ── PrimeNF Hub — construction des exécutables Windows ──────────────────────
-REM Prérequis : Python 3.11+ avec pyinstaller, fdb, requests, PySide6, openpyxl
-REM Peut être lancé de n'importe où (double-clic depuis install_windows\, ou
-REM depuis la racine) : ce script se place TOUJOURS lui-même dans le dossier
+REM ── PrimeNF Hub - construction des executables Windows ──────────────────────
+REM Prerequis : Python 3.11+ avec pyinstaller, fdb, requests, PySide6, openpyxl
+REM Peut etre lance de n'importe ou (double-clic depuis install_windows\, ou
+REM depuis la racine) : ce script se place TOUJOURS lui-meme dans le dossier
 REM racine du projet avant de continuer, ci-dessous.
 
 REM %~dp0 = dossier de CE script (install_windows\) ; ".." = racine du projet
-REM (là où se trouvent sync_agent.py, prime_hub.py, src\, templates\…).
+REM (la ou se trouvent sync_agent.py, prime_hub.py, src\, templates\...).
 cd /d "%~dp0.."
 
 if not exist "sync_agent.py" (
@@ -19,9 +19,9 @@ if not exist "sync_agent.py" (
 )
 echo Dossier de travail : %cd%
 
-REM Détection automatique de la commande Python : certains PC n'ont que le
-REM lanceur "py" sur le PATH (pas "python" directement) — on essaie plusieurs
-REM commandes et on garde la première qui répond.
+REM Detection automatique de la commande Python : certains PC n'ont que le
+REM lanceur "py" sur le PATH (pas "python" directement) - on essaie plusieurs
+REM commandes et on garde la premiere qui repond.
 set PYCMD=
 python --version >nul 2>&1 && set PYCMD=python
 if not defined PYCMD (py -3.11 --version >nul 2>&1 && set PYCMD=py -3.11)
