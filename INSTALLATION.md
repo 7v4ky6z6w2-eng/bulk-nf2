@@ -69,8 +69,25 @@ cd bulk-nf2
 ### 2.3 — Installer les dépendances du hub
 
 ```bat
-pip install -r requirements_hub.txt
+python -m pip install -r requirements_hub.txt
 ```
+
+> Utilisez toujours `python -m pip install ...` (et non `pip install ...` tout court).
+> Si plusieurs Python sont installés sur le PC, `pip` tout seul peut installer
+> dans le mauvais Python — `python -m pip` installe garanti dans celui que
+> `python` utilisera pour lancer les scripts.
+>
+> **Si la commande `python` seule ne fonctionne pas** (ou installe/exécute dans
+> le mauvais Python), utilisez le **lanceur Windows `py`** à la place, en
+> remplaçant `python` par `py -3.11` **partout** dans ce guide (adaptez `3.11`
+> à votre version si différente — `py -0` liste les versions installées) :
+> ```bat
+> py -3.11 -m pip install -r requirements_hub.txt
+> py -3.11 backfill_store1.py --stores stores.json --db central.db
+> py -3.11 hub_server.py --db central.db --port 5000
+> ```
+> C'est **la même règle** pour toutes les commandes `python ...` et
+> `pip install ...` du reste de ce document.
 
 ### 2.4 — Créer et remplir `stores.json`
 
@@ -130,8 +147,8 @@ Pour qu'il tourne **en permanence** comme service Windows (recommandé) :
 Les magasins 2 & 3 n'ont pas Python : on leur livre un `.exe` autonome.
 
 ```bat
-pip install pyinstaller
-pip install -r requirements_desktop.txt
+python -m pip install pyinstaller
+python -m pip install -r requirements_desktop.txt
 install_windows\build_windows.bat
 ```
 
@@ -173,7 +190,7 @@ C:\PrimeNFAgent\PrimeNFAgent.exe --store-id 2 --once
 
 - **Poste avec Python** :
   ```bat
-  pip install -r requirements_desktop.txt
+  python -m pip install -r requirements_desktop.txt
   python prime_hub.py
   ```
 - **Poste sans Python** : copiez `PrimeNFHub.exe` + `stores.json` côte à côte et double-cliquez `PrimeNFHub.exe`.
@@ -226,7 +243,7 @@ côte à côte et double-cliquez — l'app se configure toute seule.
 
 > Variante développeur (PC avec Python) :
 > ```bat
-> pip install -r requirements_desktop.txt
+> python -m pip install -r requirements_desktop.txt
 > python prime_hub.py
 > ```
 > Le paquet `fdb` y figure mais **aucune installation de Firebird n'est requise** :
@@ -332,7 +349,9 @@ Scénarios à valider une fois :
 | `verify.py` : Firebird échoue | mauvais chemin/mot de passe `DIFA2.FDB` | corrigez `database`/`password` dans `stores.json` |
 | `verify.py` : hub injoignable | hub éteint ou mauvaise IP Tailscale | démarrez `hub_server.py` ; vérifiez `host` du hub |
 | Magasin reste « hors-ligne » dans l'app | poste éteint, ou port 3050 bloqué | vérifiez Tailscale (`ping 100.x.y.z`) |
-| Import PDF : « module pikepdf manquant » | dépendances PDF absentes | `pip install pikepdf pdfplumber fonttools` (déjà dans l'exe) |
+| Import PDF : « module pikepdf manquant » | dépendances PDF absentes | `python -m pip install pikepdf pdfplumber fonttools` (déjà dans l'exe) |
+| `pip install X` dit que c'est installé, mais Python dit toujours que X est manquant | plusieurs Python sur le PC, `pip` et `python` ne pointent pas vers le même | utilisez **toujours** `python -m pip install X` (jamais `pip install X` seul) |
+| `python` seul ne marche pas / installe dans le mauvais Python | plusieurs versions de Python installées | remplacez `python` par `py -3.11` **partout** (`py -0` liste vos versions) |
 | Pas de notification téléphone | token/chat_id vides ou erronés | refaites l'étape 2.7 ; testez ntfy en secours |
 | Tableau de bord vide | backfill non lancé / agents pas encore passés | `python backfill_store1.py` ; lancez un agent `--once` |
 
