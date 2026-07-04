@@ -1,8 +1,13 @@
-"""Fenêtre principale du kiosque prix (plein écran, sans barre de titre).
+"""Fenêtre principale du kiosque prix (plein écran, Tkinter).
+
+Réécrit en Tkinter (au lieu de Qt/PySide2) pour fonctionner sur du matériel
+32 bits ancien (Intel Atom, Windows 10 32 bits) où la couche de liaison C++
+de Qt (shiboken2) refuse de se charger. Tkinter est fourni avec Python : aucune
+DLL Qt, aucun runtime Visual C++ supplémentaire, aucun shiboken2.
 
 Fonctionnement :
-  - Écran de repos  : invite bilingue FR/AR, icône code-barres animée.
-  - Après scan      : affichage plein-écran du nom + PRIX géant animé.
+  - Écran de repos  : logo Prime Office + invite bilingue FR/AR, halo animé.
+  - Après scan      : nom de l'article + PRIX géant.
   - Retour au repos : automatique après cfg.ui.idle_reset_seconds secondes.
   - Quitter         : raccourci cfg.ui.exit_hotkey (par défaut Ctrl+Alt+Q).
   - Réglages        : raccourci Ctrl+Alt+S pour rouvrir l'assistant.
@@ -11,894 +16,411 @@ Fonctionnement :
 from __future__ import annotations
 
 import math
-import os
+import queue
+import threading
 import uuid
 from typing import Optional
 
-from PySide2.QtCore import (
-    QEasingCurve,
-    QEvent,
-    QObject,
-    QPropertyAnimation,
-    QRectF,
-    Qt,
-    QThread,
-    QTimer,
-    Signal,
-)
-from PySide2.QtGui import (
-    QBrush,
-    QColor,
-    QFont,
-    QKeySequence,
-    QLinearGradient,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-    QRadialGradient,
-)
-try:
-    from PySide2.QtSvg import QSvgRenderer
-    from PySide2.QtCore import QByteArray as _QByteArray
-    _HAS_SVG = True
-except ImportError:
-    _HAS_SVG = False
-from PySide2.QtWidgets import (
-    QFrame,
-    QGraphicsDropShadowEffect,
-    QGraphicsOpacityEffect,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QShortcut,
-    QSizePolicy,
-    QStackedWidget,
-    QVBoxLayout,
-    QWidget,
-)
+import tkinter as tk
+import tkinter.font as tkfont
 
 import i18n
 from config import AppConfig
-from database import Database, DatabaseError
+from database import Database
 from woocommerce import WooClient
 
 # ---------------------------------------------------------------------------
-# Assets
+# Palette Prime Office (thème sombre)
 # ---------------------------------------------------------------------------
 
-_ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "assets")
-_PLACEHOLDER_PATH = os.path.join(_ASSETS_DIR, "placeholder.png")
+_C_BG        = "#0A0618"   # fond quasi-noir
+_C_BG_TOP    = "#221058"   # haut du dégradé (violet profond)
+_C_BG2       = "#170D38"   # violet foncé
+_C_TEXT      = "#F1EDFB"   # texte principal
+_C_MUTED     = "#8A80B4"   # texte discret
+_C_LIME      = "#C6F432"   # accent — prix
+_C_LIME_DARK = "#9CCB14"   # lime foncé
+_C_VIOLET    = "#5B2EE5"   # violet accent
+_C_LINE      = "#3A2A6E"   # séparateurs
+_C_DANGER    = "#FF3355"   # erreur / introuvable
+_C_LOGO_INK  = "#160B2E"   # encre du logo (sur badge lime)
 
-# ---------------------------------------------------------------------------
-# Design tokens — Prime Office dark theme
-# ---------------------------------------------------------------------------
-
-_C_BG         = "#0A0618"   # near-black base
-_C_BG2        = "#170D38"   # brand bg
-_C_SURFACE    = "#1A0F40"   # card surface
-_C_SURFACE2   = "#241655"   # surface variant
-_C_TEXT       = "#F1EDFB"   # primary text
-_C_MUTED      = "#8A80B4"   # muted text
-_C_LIME       = "#C6F432"   # accent — price
-_C_LIME_DARK  = "#9CCB14"   # darker lime
-_C_LIME_GLOW  = "#D4FF3A"   # brightest lime for glow
-_C_VIOLET     = "#5B2EE5"   # violet accent
-_C_PURPLE     = "#7A4FFF"   # bright purple
-_C_LINE       = "#261850"   # borders
-_C_DANGER     = "#FF3355"   # not-found / error red
-
-# Fonts
-_FONT_HEADING = "Unbounded, Segoe UI Black, Arial Black, sans-serif"
-_FONT_BODY    = "Rubik, Segoe UI, Arial, sans-serif"
-_FONT_ARABIC  = "Noto Naskh Arabic, Noto Sans Arabic, Arabic Typesetting, Arial"
-
-# Font sizes (px)
-_SZ_BRAND     = 15
-_SZ_PROMPT_FR = 42
-_SZ_PROMPT_AR = 50
-_SZ_DESG      = 38
-_SZ_PRICE_NUM = 160   # the big hero number
-_SZ_PRICE_DA  = 52    # "DA" currency tag
-_SZ_ERROR     = 44
-_SZ_REF       = 14
-
-# ---------------------------------------------------------------------------
-# Prime Office logo SVG
-# ---------------------------------------------------------------------------
-
-_LOGO_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="53 16 100 116">
-  <g transform="scale(1,-1) translate(0,-148)">
-    <path fill="#160B2E" d="M 54.695,16.887 C 54.391,17.047 54.031,17.431 53.863,17.743
-      C 53.567,18.295 53.567,20.375 53.567,73.999 C 53.551,125.031 53.583,129.719
-      53.831,130.247 C 53.983,130.559 54.327,130.975 54.607,131.175
-      C 55.103,131.535 55.287,131.551 59.695,131.607 C 65.303,131.671 65.815,131.623
-      66.607,130.879 L 67.223,130.327 L 67.255,74.279
-      C 67.287,23.871 67.271,18.175 67.039,17.727 C 66.911,17.447 66.559,17.087
-      66.295,16.903 C 65.831,16.607 65.487,16.567 60.519,16.567
-      C 55.687,16.567 55.175,16.607 54.695,16.887 Z"/>
-    <path fill="#160B2E" fill-rule="evenodd" d="M 107.735,16.903
-      C 100.663,17.679 94.751,19.767 89.239,23.439 C 79.983,29.599 73.991,39.335
-      72.519,50.575 C 72.191,53.087 72.191,57.711 72.519,60.223
-      C 74.007,71.559 80.119,81.399 89.551,87.639 C 95.615,91.639 102.631,93.895
-      109.935,94.159 C 122.215,94.623 134.287,89.127 141.831,79.655
-      C 144.231,76.647 146.735,72.207 147.959,68.799 C 150.591,61.431 151.023,53.223
-      149.151,45.935 C 148.071,41.679 146.271,37.623 143.871,34.055
-      C 142.263,31.631 141.503,30.711 139.479,28.607 C 133.655,22.543 125.607,18.455
-      116.999,17.167 C 114.847,16.839 109.631,16.703 107.735,16.903 Z
-      M 108.591,30.807 C 106.671,31.055 103.975,31.751 102.151,32.479
-      C 98.623,33.903 96.063,35.607 93.359,38.335 C 90.015,41.719 87.847,45.807
-      86.807,50.751 C 86.295,53.175 86.295,57.311 86.807,59.911
-      C 88.591,68.911 94.783,76.063 103.231,78.879 C 106.255,79.887 107.367,80.055
-      111.255,80.055 C 114.303,80.055 114.935,80.023 116.439,79.671
-      C 127.079,77.287 134.695,68.863 135.991,58.039 C 136.687,52.111 134.943,45.687
-      131.303,40.823 C 127.559,35.807 122.167,32.399 116.007,31.151
-      C 114.007,30.759 110.367,30.575 108.591,30.807 Z"/>
-    <path fill="#160B2E" d="M 146.383,81.759 C 143.567,85.135 139.303,89.191
-      136.567,91.063 L 135.727,91.623 L 135.527,94.023
-      C 135.231,97.767 134.247,101.527 132.895,104.223
-      C 130.807,108.415 126.783,112.183 122.087,114.391
-      C 119.207,115.743 115.711,116.719 112.615,117.055
-      C 111.591,117.167 104.007,117.215 91.639,117.215 H 72.271 V 123.927 V 130.631
-      H 92.751 C 112.103,130.631 113.359,130.615 115.399,130.311
-      C 121.751,129.367 128.191,126.983 132.943,123.791
-      C 141.599,117.983 146.799,109.783 148.671,99.007
-      C 149.463,94.375 149.415,88.199 148.551,83.383
-      C 148.143,80.999 147.959,80.303 147.759,80.303
-      C 147.663,80.303 147.047,80.967 146.383,81.759 Z"/>
-  </g>
-</svg>"""
-
-
-def _make_logo_pixmap(size: int = 44) -> QPixmap:
-    rs = size * 6
-    pm = QPixmap(rs, rs)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setRenderHint(QPainter.SmoothPixmapTransform)
-    radius = rs * 0.22
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, rs, rs), radius, radius)
-    bg = QLinearGradient(0, 0, 0, rs)
-    bg.setColorAt(0, QColor(_C_LIME))
-    bg.setColorAt(1, QColor(_C_LIME_DARK))
-    p.fillPath(path, QBrush(bg))
-    if _HAS_SVG:
-        rdr = QSvgRenderer(_QByteArray(_LOGO_SVG))
-        pad = rs * 0.11
-        rdr.render(p, QRectF(pad, pad, rs - 2 * pad, rs - 2 * pad))
-    else:
-        p.setPen(QColor("#160B2E"))
-        f = QFont(_FONT_HEADING)
-        f.setPixelSize(int(rs * 0.36))
-        f.setWeight(QFont.Bold)
-        p.setFont(f)
-        p.drawText(QRectF(0, 0, rs, rs), Qt.AlignCenter, "PO")
-    p.end()
-    return pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+_FONT_FAMILY = "Segoe UI"
 
 
 # ---------------------------------------------------------------------------
-# Global stylesheet (minimal — most styling done via QPainter / QFont)
+# Utilitaires couleur / dessin
 # ---------------------------------------------------------------------------
 
-_STYLESHEET = f"""
-QMainWindow, QWidget {{
-    background-color: transparent;
-    color: {_C_TEXT};
-}}
-QLabel#brand {{
-    color: {_C_TEXT};
-    font-size: {_SZ_BRAND}px;
-    font-weight: 700;
-    letter-spacing: 3px;
-}}
-QLabel#brandSub {{
-    color: {_C_LIME};
-    font-size: 10px;
-    letter-spacing: 3px;
-}}
-QLabel#appTag {{
-    color: {_C_MUTED};
-    font-size: 10px;
-    letter-spacing: 2px;
-    border: 1px solid {_C_LINE};
-    border-radius: 12px;
-    padding: 5px 14px;
-}}
-QLabel#promptFr {{
-    color: {_C_TEXT};
-    font-size: {_SZ_PROMPT_FR}px;
-    font-weight: 500;
-}}
-QLabel#promptAr {{
-    color: {_C_TEXT};
-    font-size: {_SZ_PROMPT_AR}px;
-}}
-QLabel#scanHint {{
-    color: {_C_MUTED};
-    font-size: 12px;
-    letter-spacing: 4px;
-}}
-QLabel#designation {{
-    color: {_C_TEXT};
-    font-size: {_SZ_DESG}px;
-    font-weight: 600;
-}}
-QLabel#priceNum {{
-    color: {_C_LIME};
-    font-size: {_SZ_PRICE_NUM}px;
-    font-weight: 700;
-}}
-QLabel#priceCur {{
-    color: {_C_LIME_DARK};
-    font-size: {_SZ_PRICE_DA}px;
-    font-weight: 600;
-}}
-QLabel#ref {{
-    color: {_C_MUTED};
-    font-size: {_SZ_REF}px;
-    letter-spacing: 2px;
-}}
-QLabel#notFound {{
-    color: {_C_DANGER};
-    font-size: {_SZ_ERROR}px;
-    font-weight: 700;
-}}
-QLabel#error {{
-    color: {_C_DANGER};
-    font-size: {_SZ_ERROR}px;
-    font-weight: 600;
-}}
-QFrame#divider {{
-    background-color: {_C_LINE};
-    max-height: 1px;
-    min-height: 1px;
-}}
-"""
+def _lerp(c1: str, c2: str, t: float) -> str:
+    """Interpole deux couleurs hexadécimales (#rrggbb)."""
+    t = max(0.0, min(1.0, t))
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    r = int(r1 + (r2 - r1) * t)
+    g = int(g1 + (g2 - g1) * t)
+    b = int(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
-# ---------------------------------------------------------------------------
-# Animated logo mark — gentle rock + breathing lime aura (50 fps)
-# ---------------------------------------------------------------------------
 
-class _PulsingIcon(QWidget):
-    """Prime Office logo mark that slowly rocks ±7° with a breathing lime glow."""
-
-    _LOGO_SIZE = 190   # rendered logo square (px)
-    _PAD       = 70    # extra space around it for the glow
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        side = self._LOGO_SIZE + self._PAD
-        self.setFixedSize(side, side)
-        # Pre-render crisp logo once — reused every frame
-        self._logo = _make_logo_pixmap(self._LOGO_SIZE)
-        self._phase = 0.0
-        t = QTimer(self)
-        t.timeout.connect(self._tick)
-        t.start(20)  # 50 fps
-
-    def _tick(self) -> None:
-        self._phase += 0.022   # full cycle ≈ 4.7 s
-        self.update()
-
-    def paintEvent(self, event):  # type: ignore[override]
-        pulse = 0.5 + 0.5 * math.sin(self._phase)          # 0 → 1, smooth
-        rock  = math.sin(self._phase * 0.38) * 7.0          # ±7° gentle sway
-
-        w = h = self.width()
-        cx = cy = w / 2.0
-        ls = self._LOGO_SIZE
-
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-
-        # ── outer ambient halo (large, soft, breathes) ─────────────────────
-        g_out = QRadialGradient(cx, cy, w * 0.50)
-        g_out.setColorAt(0.25, QColor(198, 244, 50, int(10 + pulse * 20)))
-        g_out.setColorAt(1.00, QColor(198, 244, 50, 0))
-        outer = QPainterPath()
-        outer.addEllipse(QRectF(0, 0, w, h))
-        p.fillPath(outer, g_out)
-
-        # ── inner glow (tighter, brighter, breathes more) ──────────────────
-        r_in = ls * 0.64
-        g_in = QRadialGradient(cx, cy, r_in)
-        g_in.setColorAt(0.0, QColor(198, 244, 50, int(60 + pulse * 100)))
-        g_in.setColorAt(1.0, QColor(198, 244, 50, 0))
-        inner = QPainterPath()
-        inner.addEllipse(QRectF(cx - r_in, cy - r_in, r_in * 2, r_in * 2))
-        p.fillPath(inner, g_in)
-
-        # ── logo mark, rotated around its own centre ────────────────────────
-        p.save()
-        p.translate(cx, cy)
-        p.rotate(rock)
-        p.drawPixmap(int(-ls / 2), int(-ls / 2), self._logo)
-        p.restore()
-
-        p.end()
+def _round_rect_points(x1, y1, x2, y2, r):
+    """Points d'un rectangle à coins arrondis (pour create_polygon smooth)."""
+    return [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
 
 
 # ---------------------------------------------------------------------------
-# Shared brand bar — horizontal, lime underline
+# Fenêtre kiosque
 # ---------------------------------------------------------------------------
 
-class _BrandBar(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setFixedHeight(72)
-
-        hl = QHBoxLayout(self)
-        hl.setContentsMargins(28, 0, 28, 2)
-        hl.setSpacing(12)
-        hl.setAlignment(Qt.AlignVCenter)
-
-        logo_lbl = QLabel()
-        logo_lbl.setAlignment(Qt.AlignCenter)
-        logo_lbl.setFixedSize(44, 44)
-        logo_lbl.setPixmap(_make_logo_pixmap(44))
-        hl.addWidget(logo_lbl)
-
-        text_col = QWidget()
-        tl = QVBoxLayout(text_col)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(2)
-
-        name_lbl = QLabel("PRIME OFFICE")
-        name_lbl.setObjectName("brand")
-        f_name = QFont(_FONT_HEADING)
-        f_name.setPixelSize(_SZ_BRAND)
-        f_name.setWeight(QFont.Bold)
-        name_lbl.setFont(f_name)
-
-        city_lbl = QLabel("ORAN  ·  ALGÉRIE")
-        city_lbl.setObjectName("brandSub")
-        f_city = QFont(_FONT_BODY)
-        f_city.setPixelSize(10)
-        f_city.setWeight(QFont.Medium)
-        city_lbl.setFont(f_city)
-
-        tl.addWidget(name_lbl)
-        tl.addWidget(city_lbl)
-        hl.addWidget(text_col)
-        hl.addStretch()
-
-        app_lbl = QLabel("VÉRIFICATEUR DE PRIX")
-        app_lbl.setObjectName("appTag")
-        f_app = QFont(_FONT_BODY)
-        f_app.setPixelSize(10)
-        app_lbl.setFont(f_app)
-        hl.addWidget(app_lbl)
-
-    def paintEvent(self, event):  # type: ignore[override]
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        grad = QLinearGradient(0, 0, 0, self.height())
-        grad.setColorAt(0, QColor("#1A1048"))
-        grad.setColorAt(1, QColor("#120D35"))
-        p.fillRect(self.rect(), grad)
-        pen = QPen(QColor(_C_LIME))
-        pen.setWidth(2)
-        p.setPen(pen)
-        p.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
-        p.end()
-        super().paintEvent(event)
-
-
-# ---------------------------------------------------------------------------
-# Idle screen
-# ---------------------------------------------------------------------------
-
-class _IdleScreen(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        outer.addWidget(_BrandBar())
-
-        center = QWidget()
-        vl = QVBoxLayout(center)
-        vl.setAlignment(Qt.AlignCenter)
-        vl.setSpacing(0)
-        vl.setContentsMargins(80, 0, 80, 0)
-
-        vl.addStretch(2)
-
-        self._icon = _PulsingIcon()
-        vl.addWidget(self._icon, alignment=Qt.AlignCenter)
-
-        vl.addSpacing(52)
-
-        lbl_fr = QLabel(i18n.SCAN_PROMPT_FR)
-        lbl_fr.setObjectName("promptFr")
-        lbl_fr.setAlignment(Qt.AlignCenter)
-        lbl_fr.setWordWrap(True)
-        f_fr = QFont(_FONT_BODY)
-        f_fr.setPixelSize(_SZ_PROMPT_FR)
-        f_fr.setWeight(QFont.Medium)
-        lbl_fr.setFont(f_fr)
-        vl.addWidget(lbl_fr)
-
-        vl.addSpacing(16)
-
-        lbl_ar = QLabel(i18n.SCAN_PROMPT_AR)
-        lbl_ar.setObjectName("promptAr")
-        lbl_ar.setAlignment(Qt.AlignCenter)
-        lbl_ar.setLayoutDirection(Qt.RightToLeft)
-        lbl_ar.setWordWrap(True)
-        f_ar = QFont(_FONT_ARABIC)
-        f_ar.setPixelSize(_SZ_PROMPT_AR)
-        lbl_ar.setFont(f_ar)
-        vl.addWidget(lbl_ar)
-
-        vl.addSpacing(44)
-
-        hint = QLabel("━━  SCANNER UN ARTICLE  ━━")
-        hint.setObjectName("scanHint")
-        hint.setAlignment(Qt.AlignCenter)
-        f_hint = QFont(_FONT_BODY)
-        f_hint.setPixelSize(12)
-        hint.setFont(f_hint)
-        vl.addWidget(hint)
-
-        vl.addStretch(3)
-        outer.addWidget(center, stretch=1)
-
-    def paintEvent(self, event):  # type: ignore[override]
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
-
-        p.fillRect(self.rect(), QColor(_C_BG))
-
-        # Hero gradient: vivid purple top → deep dark
-        hero = QLinearGradient(w / 2, 0, w / 2, h * 0.8)
-        hero.setColorAt(0.0, QColor("#26145E"))
-        hero.setColorAt(0.5, QColor(_C_BG2))
-        hero.setColorAt(1.0, QColor(_C_BG))
-        p.fillRect(self.rect(), hero)
-
-        # Violet radial — top-right
-        g1 = QRadialGradient(w * 0.92, 0, w * 0.75)
-        g1.setColorAt(0.0, QColor(91, 46, 229, 110))
-        g1.setColorAt(1.0, QColor(0, 0, 0, 0))
-        p.fillRect(self.rect(), g1)
-
-        # Purple radial — top-left
-        g2 = QRadialGradient(0, 0, w * 0.60)
-        g2.setColorAt(0.0, QColor(60, 30, 140, 75))
-        g2.setColorAt(1.0, QColor(0, 0, 0, 0))
-        p.fillRect(self.rect(), g2)
-
-        # Lime radial — bottom center (very subtle)
-        g3 = QRadialGradient(w / 2, h, w * 0.45)
-        g3.setColorAt(0.0, QColor(198, 244, 50, 22))
-        g3.setColorAt(1.0, QColor(0, 0, 0, 0))
-        p.fillRect(self.rect(), g3)
-
-        p.end()
-        super().paintEvent(event)
-
-
-# ---------------------------------------------------------------------------
-# Result screen — full-screen, no card box, giant price
-# ---------------------------------------------------------------------------
-
-class _ResultScreen(QWidget):
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        outer.addWidget(_BrandBar())
-
-        # Content area — we animate its opacity for the pop-in effect
-        self._content = QWidget()
-        content_vl = QVBoxLayout(self._content)
-        content_vl.setAlignment(Qt.AlignCenter)
-        content_vl.setSpacing(0)
-        content_vl.setContentsMargins(100, 0, 100, 0)
-
-        content_vl.addStretch(1)
-
-        # ── Designation ────────────────────────────────────────────────────
-        self._designation = QLabel()
-        self._designation.setObjectName("designation")
-        self._designation.setAlignment(Qt.AlignCenter)
-        self._designation.setWordWrap(True)
-        f_d = QFont(_FONT_BODY)
-        f_d.setPixelSize(_SZ_DESG)
-        f_d.setWeight(QFont.DemiBold)
-        self._designation.setFont(f_d)
-        content_vl.addWidget(self._designation)
-
-        content_vl.addSpacing(36)
-
-        # ── Thin lime divider ───────────────────────────────────────────────
-        self._divider = QFrame()
-        self._divider.setObjectName("divider")
-        self._divider.setFrameShape(QFrame.HLine)
-        content_vl.addWidget(self._divider)
-
-        content_vl.addSpacing(36)
-
-        # ── Price row: [BIG NUMBER]  [DA] ──────────────────────────────────
-        price_row = QWidget()
-        price_hl = QHBoxLayout(price_row)
-        price_hl.setAlignment(Qt.AlignCenter)
-        price_hl.setSpacing(12)
-
-        self._price_num = QLabel()
-        self._price_num.setObjectName("priceNum")
-        self._price_num.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
-        f_pn = QFont(_FONT_HEADING)
-        f_pn.setPixelSize(_SZ_PRICE_NUM)
-        f_pn.setWeight(QFont.Bold)
-        self._price_num.setFont(f_pn)
-        price_hl.addWidget(self._price_num)
-
-        self._price_cur = QLabel()
-        self._price_cur.setObjectName("priceCur")
-        self._price_cur.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
-        f_pc = QFont(_FONT_BODY)
-        f_pc.setPixelSize(_SZ_PRICE_DA)
-        f_pc.setWeight(QFont.DemiBold)
-        self._price_cur.setFont(f_pc)
-        # Extra bottom padding to align baseline with number
-        self._price_cur.setContentsMargins(0, 0, 0, int(_SZ_PRICE_NUM * 0.12))
-        price_hl.addWidget(self._price_cur)
-
-        content_vl.addWidget(price_row)
-
-        content_vl.addSpacing(20)
-
-        # ── Ref ─────────────────────────────────────────────────────────────
-        self._ref = QLabel()
-        self._ref.setObjectName("ref")
-        self._ref.setAlignment(Qt.AlignCenter)
-        f_r = QFont(_FONT_BODY)
-        f_r.setPixelSize(_SZ_REF)
-        self._ref.setFont(f_r)
-        content_vl.addWidget(self._ref)
-
-        # ── Error labels (not-found / db-error) ─────────────────────────────
-        self._error_fr = QLabel()
-        self._error_fr.setObjectName("error")
-        self._error_fr.setAlignment(Qt.AlignCenter)
-        self._error_fr.setWordWrap(True)
-        f_e = QFont(_FONT_BODY)
-        f_e.setPixelSize(_SZ_ERROR)
-        f_e.setWeight(QFont.DemiBold)
-        self._error_fr.setFont(f_e)
-
-        self._error_ar = QLabel()
-        self._error_ar.setObjectName("error")
-        self._error_ar.setAlignment(Qt.AlignCenter)
-        self._error_ar.setLayoutDirection(Qt.RightToLeft)
-        self._error_ar.setWordWrap(True)
-        f_ar = QFont(_FONT_ARABIC)
-        f_ar.setPixelSize(_SZ_ERROR)
-        self._error_ar.setFont(f_ar)
-
-        content_vl.addWidget(self._error_fr)
-        content_vl.addSpacing(6)
-        content_vl.addWidget(self._error_ar)
-
-        content_vl.addStretch(2)
-        outer.addWidget(self._content, stretch=1)
-
-        # ── Lime glow on price number ───────────────────────────────────────
-        price_glow = QGraphicsDropShadowEffect()
-        price_glow.setBlurRadius(80)
-        price_glow.setColor(QColor(198, 244, 50, 220))
-        price_glow.setOffset(0, 0)
-        self._price_num.setGraphicsEffect(price_glow)
-
-        # ── Opacity effect for pop-in animation ─────────────────────────────
-        self._opacity_fx = QGraphicsOpacityEffect()
-        self._opacity_fx.setOpacity(1.0)
-        self._content.setGraphicsEffect(self._opacity_fx)
-
-        self._fade_in = QPropertyAnimation(self._opacity_fx, b"opacity", self)
-        self._fade_in.setDuration(380)
-        self._fade_in.setStartValue(0.0)
-        self._fade_in.setEndValue(1.0)
-        self._fade_in.setEasingCurve(QEasingCurve.OutCubic)
-
-    def _animate_in(self) -> None:
-        self._fade_in.stop()
-        self._opacity_fx.setOpacity(0.0)
-        self._fade_in.start()
-
-    def paintEvent(self, event):  # type: ignore[override]
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
-
-        p.fillRect(self.rect(), QColor(_C_BG))
-
-        hero = QLinearGradient(w / 2, 0, w / 2, h)
-        hero.setColorAt(0.0, QColor("#221058"))
-        hero.setColorAt(0.4, QColor(_C_BG2))
-        hero.setColorAt(1.0, QColor(_C_BG))
-        p.fillRect(self.rect(), hero)
-
-        g1 = QRadialGradient(w, 0, w * 0.80)
-        g1.setColorAt(0.0, QColor(91, 46, 229, 95))
-        g1.setColorAt(1.0, QColor(0, 0, 0, 0))
-        p.fillRect(self.rect(), g1)
-
-        g2 = QRadialGradient(0, h, w * 0.55)
-        g2.setColorAt(0.0, QColor(198, 244, 50, 28))
-        g2.setColorAt(1.0, QColor(0, 0, 0, 0))
-        p.fillRect(self.rect(), g2)
-
-        p.end()
-        super().paintEvent(event)
-
-    # --- public API called by KioskWindow ----------------------------------
-
-    def show_article(self, designation: str, prix: float, ref_art: str = "") -> None:
-        # Split "12 500,00 DA" → num part + currency part
-        formatted = i18n.format_price(prix)
-        parts = formatted.rsplit(" ", 1)
-        price_num = parts[0]
-        price_cur = parts[1] if len(parts) > 1 else i18n.CURRENCY
-
-        self._designation.setText(designation.upper())
-        self._price_num.setText(price_num)
-        self._price_cur.setText(price_cur)
-        self._ref.setText(f"RÉF : {ref_art.upper()}" if ref_art else "")
-
-        self._designation.show()
-        self._divider.show()
-        self._price_num.show()
-        self._price_cur.show()
-        self._ref.show()
-        self._error_fr.hide()
-        self._error_ar.hide()
-        self._animate_in()
-
-    def show_not_found(self) -> None:
-        self._designation.hide()
-        self._divider.hide()
-        self._price_num.hide()
-        self._price_cur.hide()
-        self._ref.hide()
-        self._error_fr.setObjectName("notFound")
-        self._error_ar.setObjectName("notFound")
-        self._error_fr.setText(i18n.NOT_FOUND_FR)
-        self._error_ar.setText(i18n.NOT_FOUND_AR)
-        self._error_fr.show()
-        self._error_ar.show()
-        self._animate_in()
-
-    def show_db_error(self) -> None:
-        self._designation.hide()
-        self._divider.hide()
-        self._price_num.hide()
-        self._price_cur.hide()
-        self._ref.hide()
-        self._error_fr.setObjectName("error")
-        self._error_ar.setObjectName("error")
-        self._error_fr.setText(i18n.DB_ERROR_FR)
-        self._error_ar.setText(i18n.DB_ERROR_AR)
-        self._error_fr.show()
-        self._error_ar.show()
-        self._animate_in()
-
-    def set_image(self, path: Optional[str]) -> None:
-        # Image display removed from main layout — no-op (WooCommerce not displayed)
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Async workers
-# ---------------------------------------------------------------------------
-
-class _LookupWorker(QObject):
-    finished = Signal(str, object, object)  # scan_id, article|None, error|None
-
-    def __init__(self, cfg, code: str, scan_id: str):
-        super().__init__()
+class KioskWindow:
+    """Kiosque plein écran de vérification de prix (Tkinter)."""
+
+    def __init__(self, root: tk.Tk, cfg: AppConfig, db: Database, woo: WooClient):
+        self.root = root
         self._cfg = cfg
-        self._code = code
-        self._scan_id = scan_id
+        self._db = db      # conservé pour compat ; les recherches ouvrent leur
+        self._woo = woo    # propre connexion (sécurité des threads).
 
-    def run(self) -> None:
-        from database import Database
-        db = Database(self._cfg)
-        try:
-            article = db.lookup_article(self._code)
-            self.finished.emit(self._scan_id, article, None)
-        except Exception as exc:
-            self.finished.emit(self._scan_id, None, exc)
-        finally:
-            db.close()
-
-
-class _ImageWorker(QObject):
-    finished = Signal(str, object)
-
-    def __init__(self, woo: WooClient, ref_art: str, scan_id: str):
-        super().__init__()
-        self._woo = woo
-        self._ref_art = ref_art
-        self._scan_id = scan_id
-
-    def run(self) -> None:
-        path = self._woo.get_image(self._ref_art)
-        self.finished.emit(self._scan_id, path)
-
-
-# ---------------------------------------------------------------------------
-# Main kiosk window
-# ---------------------------------------------------------------------------
-
-class KioskWindow(QMainWindow):
-    """Frameless fullscreen price-checker kiosk."""
-
-    def __init__(self, cfg: AppConfig, db: Database, woo: WooClient,
-                 parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self._cfg = cfg
-        self._db = db
-        self._woo = woo
-
+        self._state = "idle"          # "idle" | "result"
+        self._result: dict = {}
         self._current_scan_id: Optional[str] = None
-        self._lookup_thread: Optional[QThread] = None
-        self._img_thread: Optional[QThread] = None
+        self._idle_after: Optional[str] = None
+        self._phase = 0.0
+        self._glow_ids: list = []
+        self._queue: "queue.Queue" = queue.Queue()
 
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
-        self.setStyleSheet(_STYLESHEET)
+        # --- Fenêtre ---------------------------------------------------------
+        root.title("Affichage Prix Netfact")
+        root.configure(bg=_C_BG)
+        if cfg.ui.fullscreen:
+            root.attributes("-fullscreen", True)
+        else:
+            root.geometry("1024x720")
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        central.setAutoFillBackground(False)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(0, 0, 0, 0)
+        self.canvas = tk.Canvas(root, bg=_C_BG, highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
 
-        self._stack = QStackedWidget()
-        self._idle_screen = _IdleScreen()
-        self._result_screen = _ResultScreen()
-        self._stack.addWidget(self._idle_screen)    # index 0
-        self._stack.addWidget(self._result_screen)   # index 1
-        outer.addWidget(self._stack)
+        # Champ invisible qui capte les frappes du lecteur code-barres.
+        self._entry = tk.Entry(root, width=4)
+        self._entry.place(x=-500, y=-500, width=10, height=10)
+        self._entry.bind("<Return>", self._on_scan)
+        self._entry.bind("<FocusOut>", lambda e: self.root.after(50, self._refocus))
+        self._entry.focus_set()
 
-        # Invisible barcode input field
-        self._barcode_input = QLineEdit(central)
-        self._barcode_input.setFixedSize(1, 1)
-        self._barcode_input.move(-10, -10)
-        self._barcode_input.setStyleSheet(
-            "background: transparent; border: none; color: transparent;"
-        )
-        self._barcode_input.returnPressed.connect(self._on_barcode)
-        self._barcode_input.installEventFilter(self)
+        # Garder le focus sur le champ code-barres.
+        self.canvas.bind("<Button-1>", lambda e: self._refocus())
+        root.bind("<Button-1>", lambda e: self._refocus())
 
-        self._idle_timer = QTimer(self)
-        self._idle_timer.setSingleShot(True)
-        self._idle_timer.timeout.connect(self._show_idle)
+        # Redessiner lors du redimensionnement (plein écran : une seule fois).
+        self.canvas.bind("<Configure>", lambda e: self._render())
 
-        QShortcut(QKeySequence(cfg.ui.exit_hotkey), self).activated.connect(self.close)
-        QShortcut(QKeySequence("Ctrl+Alt+S"), self).activated.connect(self._open_setup)
+        # Raccourcis clavier.
+        self._bind_hotkey(cfg.ui.exit_hotkey, self._on_quit)
+        self._bind_hotkey("Ctrl+Alt+S", self._open_setup)
 
-        self._show_idle()
+        # Boucles.
+        self.root.after(40, self._tick)
+        self.root.after(30, self._poll_queue)
+        self._render()
 
-    def showEvent(self, event):  # type: ignore[override]
-        super().showEvent(event)
-        if self._cfg.ui.fullscreen:
-            self.showFullScreen()
-        self._focus_barcode()
+    # --- Raccourcis --------------------------------------------------------
 
-    def _focus_barcode(self) -> None:
-        self._barcode_input.setFocus(Qt.OtherFocusReason)
+    def _bind_hotkey(self, spec: str, handler) -> None:
+        """Convertit « Ctrl+Alt+Q » en séquence Tk et l'attache."""
+        parts = [p.strip() for p in spec.split("+") if p.strip()]
+        if not parts:
+            return
+        mods = {"ctrl": "Control", "control": "Control",
+                "alt": "Alt", "shift": "Shift"}
+        seq_mods = []
+        key = parts[-1]
+        for p in parts[:-1]:
+            m = mods.get(p.lower())
+            if m:
+                seq_mods.append(m)
+        key = key.lower() if len(key) == 1 else key
+        sequence = "<" + "-".join(seq_mods + [key]) + ">"
+        try:
+            self.root.bind_all(sequence, lambda e: handler())
+        except tk.TclError:
+            pass
 
-    def eventFilter(self, obj, event):  # type: ignore[override]
-        if obj is self._barcode_input and event.type() == QEvent.FocusOut:
-            QTimer.singleShot(50, self._focus_barcode)
-        return super().eventFilter(obj, event)
+    # --- Focus -------------------------------------------------------------
 
-    def mousePressEvent(self, event):  # type: ignore[override]
-        self._focus_barcode()
-        super().mousePressEvent(event)
+    def _refocus(self) -> None:
+        try:
+            self._entry.focus_set()
+        except tk.TclError:
+            pass
 
-    # --- Screen transitions ------------------------------------------------
+    # --- Scan code-barres --------------------------------------------------
 
-    def _show_idle(self) -> None:
-        self._idle_timer.stop()
-        self._current_scan_id = None
-        self._stack.setCurrentIndex(0)
-        self._focus_barcode()
-
-    def _show_result(self) -> None:
-        self._stack.setCurrentIndex(1)
-        self._idle_timer.start(self._cfg.ui.idle_reset_seconds * 1000)
-        self._focus_barcode()
-
-    # --- Barcode handling --------------------------------------------------
-
-    def _on_barcode(self) -> None:
-        code = self._barcode_input.text().strip()
-        self._barcode_input.clear()
+    def _on_scan(self, event=None) -> None:
+        code = self._entry.get().strip()
+        self._entry.delete(0, "end")
         if not code:
             return
 
-        self._idle_timer.stop()
-        if self._lookup_thread is not None and self._lookup_thread.isRunning():
-            self._lookup_thread.quit()
+        if self._idle_after is not None:
+            self.root.after_cancel(self._idle_after)
+            self._idle_after = None
 
         scan_id = str(uuid.uuid4())
         self._current_scan_id = scan_id
-        # Return to idle screen WITHOUT calling _show_idle() — that would reset scan_id
-        self._stack.setCurrentIndex(0)
-        self._focus_barcode()
 
-        thread = QThread(self)
-        worker = _LookupWorker(self._cfg.firebird, code, scan_id)
-        worker.moveToThread(thread)
-        worker.finished.connect(self._on_lookup_done)
-        thread.started.connect(worker.run)
-        thread.finished.connect(thread.deleteLater)
-        self._lookup_thread = thread
-        self._lookup_worker = worker  # type: ignore[attr-defined]
-        thread.start()
-
-    def _on_lookup_done(self, scan_id: str, article: object, error: object) -> None:
-        if scan_id != self._current_scan_id:
-            return
-
-        if error is not None:
-            self._result_screen.show_db_error()
-            self._show_result()
-            return
-
-        if article is None:
-            self._result_screen.show_not_found()
-            self._show_result()
-            return
-
-        from database import Article as _Article
-        art: _Article = article  # type: ignore[assignment]
-        self._result_screen.show_article(
-            art.designation,
-            art.prix_vente_ht,   # raw float — result screen handles formatting
-            art.ref_art,
+        cfg_fb = self._cfg.firebird
+        t = threading.Thread(
+            target=self._lookup_worker, args=(cfg_fb, code, scan_id), daemon=True
         )
-        self._show_result()
-        self._start_image_fetch(art.ref_art, scan_id)
+        t.start()
 
-    # --- Async image loading (kept for future WooCommerce integration) ------
+    def _lookup_worker(self, cfg_fb, code: str, scan_id: str) -> None:
+        """Exécuté dans un thread : connexion Firebird dédiée puis recherche."""
+        db = Database(cfg_fb)
+        try:
+            article = db.lookup_article(code)
+            self._queue.put((scan_id, article, None))
+        except Exception as exc:  # noqa: BLE001 — remonté à l'UI
+            self._queue.put((scan_id, None, exc))
+        finally:
+            db.close()
 
-    def _start_image_fetch(self, ref_art: str, scan_id: str) -> None:
-        if self._img_thread is not None and self._img_thread.isRunning():
-            self._img_thread.quit()
-        thread = QThread(self)
-        worker = _ImageWorker(self._woo, ref_art, scan_id)
-        worker.moveToThread(thread)
-        worker.finished.connect(self._on_image_ready)
-        thread.started.connect(worker.run)
-        thread.finished.connect(thread.deleteLater)
-        self._img_thread = thread
-        self._img_worker = worker  # type: ignore[attr-defined]
-        thread.start()
+    def _poll_queue(self) -> None:
+        try:
+            while True:
+                scan_id, article, error = self._queue.get_nowait()
+                if scan_id != self._current_scan_id:
+                    continue
+                if error is not None:
+                    self._show_error(i18n.DB_ERROR_FR, i18n.DB_ERROR_AR)
+                elif article is None:
+                    self._show_error(i18n.NOT_FOUND_FR, i18n.NOT_FOUND_AR)
+                else:
+                    self._show_article(article)
+        except queue.Empty:
+            pass
+        self.root.after(30, self._poll_queue)
 
-    def _on_image_ready(self, scan_id: str, path: Optional[str]) -> None:
-        if scan_id != self._current_scan_id:
+    # --- Transitions d'écran ----------------------------------------------
+
+    def show_idle(self) -> None:
+        if self._idle_after is not None:
+            self.root.after_cancel(self._idle_after)
+            self._idle_after = None
+        self._current_scan_id = None
+        self._state = "idle"
+        self._render()
+        self._refocus()
+
+    def _arm_idle_timer(self) -> None:
+        if self._idle_after is not None:
+            self.root.after_cancel(self._idle_after)
+        self._idle_after = self.root.after(
+            max(1, self._cfg.ui.idle_reset_seconds) * 1000, self.show_idle
+        )
+
+    def _show_article(self, article) -> None:
+        self._state = "result"
+        self._result = {
+            "designation": (article.designation or "").upper(),
+            "price": i18n.format_price(article.prix_vente_ht),
+            "ref": (article.ref_art or "").upper(),
+            "error": None,
+        }
+        self._render()
+        self._arm_idle_timer()
+        self._refocus()
+
+    def _show_error(self, fr: str, ar: str) -> None:
+        self._state = "result"
+        self._result = {"error": (fr, ar)}
+        self._render()
+        self._arm_idle_timer()
+        self._refocus()
+
+    # --- Animation du halo (repos uniquement) ------------------------------
+
+    def _tick(self) -> None:
+        self._phase += 0.05
+        if self._state == "idle" and self._glow_ids:
+            pulse = 0.5 + 0.5 * math.sin(self._phase)
+            for item_id, base in self._glow_ids:
+                col = _lerp(_C_BG2, _C_LIME, base * (0.35 + 0.65 * pulse))
+                try:
+                    self.canvas.itemconfigure(item_id, fill=col, outline=col)
+                except tk.TclError:
+                    pass
+        self.root.after(40, self._tick)
+
+    # --- Rendu -------------------------------------------------------------
+
+    def _render(self) -> None:
+        c = self.canvas
+        c.delete("all")
+        self._glow_ids = []
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w <= 1 or h <= 1:
             return
-        self._result_screen.set_image(path)
 
-    # --- Settings dialog ---------------------------------------------------
+        self._draw_gradient(w, h)
+        self._draw_brand_bar(w)
+
+        if self._state == "idle":
+            self._render_idle(w, h)
+        else:
+            self._render_result(w, h)
+
+    def _draw_gradient(self, w: int, h: int) -> None:
+        c = self.canvas
+        # Dégradé vertical violet → fond, en bandes de 3 px.
+        step = 3
+        for y in range(0, h, step):
+            t = y / max(1, h)
+            col = _lerp(_C_BG_TOP, _C_BG, min(1.0, t * 1.15))
+            c.create_line(0, y, w, y + step, fill=col, width=step)
+
+    def _draw_brand_bar(self, w: int) -> None:
+        c = self.canvas
+        pad = 30
+        badge = 40
+        self._draw_logo(pad, 16, badge)
+        c.create_text(
+            pad + badge + 14, 24, anchor="w", text="PRIME OFFICE",
+            fill=_C_TEXT, font=(_FONT_FAMILY, -18, "bold"),
+        )
+        c.create_text(
+            pad + badge + 14, 46, anchor="w", text="ORAN · ALGÉRIE",
+            fill=_C_LIME, font=(_FONT_FAMILY, -11),
+        )
+        c.create_text(
+            w - pad, 32, anchor="e", text="VÉRIFICATEUR DE PRIX",
+            fill=_C_MUTED, font=(_FONT_FAMILY, -12),
+        )
+        c.create_line(0, 72, w, 72, fill=_C_LIME, width=2)
+
+    def _draw_logo(self, x: int, y: int, size: int) -> None:
+        """Badge logo : carré lime arrondi avec le monogramme « PO »."""
+        c = self.canvas
+        r = size * 0.24
+        pts = _round_rect_points(x, y, x + size, y + size, r)
+        c.create_polygon(pts, smooth=True, fill=_C_LIME, outline=_C_LIME_DARK)
+        c.create_text(
+            x + size / 2, y + size / 2, text="PO",
+            fill=_C_LOGO_INK, font=(_FONT_FAMILY, -int(size * 0.44), "bold"),
+        )
+
+    def _render_idle(self, w: int, h: int) -> None:
+        c = self.canvas
+        cx = w / 2
+        cy_logo = h * 0.40
+        big = int(min(w, h) * 0.22)
+
+        # Halo animé : anneaux concentriques derrière le badge.
+        n = 8
+        for i in range(n):
+            frac = (n - i) / n            # 1.0 (grand) → petit
+            rad = big * (0.62 + frac * 0.9)
+            base = (i + 1) / n            # intérieur plus lumineux
+            oid = c.create_oval(
+                cx - rad, cy_logo - rad, cx + rad, cy_logo + rad,
+                fill=_C_BG2, outline=_C_BG2,
+            )
+            self._glow_ids.append((oid, base))
+
+        # Badge logo (au-dessus du halo).
+        self._draw_logo(int(cx - big / 2), int(cy_logo - big / 2), big)
+
+        # Invites.
+        y = h * 0.66
+        c.create_text(
+            cx, y, text=i18n.SCAN_PROMPT_FR, fill=_C_TEXT,
+            font=(_FONT_FAMILY, -38, "normal"), width=int(w * 0.8), justify="center",
+        )
+        c.create_text(
+            cx, y + 70, text=i18n.SCAN_PROMPT_AR, fill=_C_TEXT,
+            font=(_FONT_FAMILY, -42, "normal"), width=int(w * 0.8), justify="center",
+        )
+        c.create_text(
+            cx, y + 140, text="━━  SCANNER UN ARTICLE  ━━", fill=_C_MUTED,
+            font=(_FONT_FAMILY, -14),
+        )
+
+    def _render_result(self, w: int, h: int) -> None:
+        c = self.canvas
+        cx = w / 2
+        cy = h * 0.52
+
+        error = self._result.get("error")
+        if error:
+            fr, ar = error
+            c.create_text(
+                cx, cy - 40, text=fr, fill=_C_DANGER,
+                font=(_FONT_FAMILY, -52, "bold"),
+                width=int(w * 0.85), justify="center",
+            )
+            c.create_text(
+                cx, cy + 40, text=ar, fill=_C_DANGER,
+                font=(_FONT_FAMILY, -52, "normal"),
+                width=int(w * 0.85), justify="center",
+            )
+            return
+
+        # Désignation.
+        c.create_text(
+            cx, h * 0.30, text=self._result["designation"], fill=_C_TEXT,
+            font=(_FONT_FAMILY, -40, "bold"),
+            width=int(w * 0.85), justify="center",
+        )
+
+        # Séparateur fin.
+        c.create_line(cx - w * 0.18, h * 0.40, cx + w * 0.18, h * 0.40,
+                      fill=_C_LINE, width=1)
+
+        # Prix géant : nombre lime + « DA » plus petit.
+        price = self._result["price"]
+        parts = price.rsplit(" ", 1)
+        num = parts[0]
+        cur = parts[1] if len(parts) > 1 else i18n.CURRENCY
+
+        num_size = int(min(w * 0.18, h * 0.24))
+        cur_size = int(num_size * 0.34)
+        f_num = tkfont.Font(family=_FONT_FAMILY, size=-num_size, weight="bold")
+        f_cur = tkfont.Font(family=_FONT_FAMILY, size=-cur_size, weight="bold")
+        wn = f_num.measure(num)
+        wc = f_cur.measure(cur)
+        gap = int(num_size * 0.12)
+        total = wn + gap + wc
+        start_x = cx - total / 2
+        baseline_y = h * 0.60
+
+        c.create_text(start_x, baseline_y, anchor="sw", text=num,
+                      fill=_C_LIME, font=f_num)
+        c.create_text(start_x + wn + gap, baseline_y, anchor="sw", text=cur,
+                      fill=_C_LIME_DARK, font=f_cur)
+
+        # Référence.
+        ref = self._result.get("ref")
+        if ref:
+            c.create_text(cx, h * 0.72, text=f"RÉF : {ref}", fill=_C_MUTED,
+                          font=(_FONT_FAMILY, -16))
+
+    # --- Réglages / quitter ------------------------------------------------
 
     def _open_setup(self) -> None:
         from ui.setup_window import SetupDialog
         from config import load
-        cfg = load()
-        dlg = SetupDialog(cfg, parent=self)
-        if dlg.exec():
+        dlg = SetupDialog(self.root, load())
+        if dlg.result:
             self._cfg = load()
+        self._refocus()
+
+    def _on_quit(self) -> None:
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass

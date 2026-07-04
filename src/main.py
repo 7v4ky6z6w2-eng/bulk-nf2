@@ -92,13 +92,11 @@ def _selftest(code: str | None) -> int:
 # ---------------------------------------------------------------------------
 
 def _launch_gui(args: argparse.Namespace) -> int:
-    # Import Qt uniquement en mode GUI
-    from PySide2.QtWidgets import QApplication
-    from PySide2.QtCore import Qt
+    # Import Tkinter uniquement en mode GUI
+    import tkinter as tk
 
-    app = QApplication(sys.argv)
-    app.setApplicationName("Affichage Prix Netfact")
-    app.setOrganizationName("Netfact")
+    root = tk.Tk()
+    root.withdraw()  # cachée le temps de la configuration éventuelle
 
     # Chargement de la configuration
     cfg = _config_module.load()
@@ -107,9 +105,10 @@ def _launch_gui(args: argparse.Namespace) -> int:
     if not cfg.is_complete():
         from ui.setup_window import SetupDialog
 
-        dlg = SetupDialog(cfg)
-        if dlg.exec() == 0:
+        dlg = SetupDialog(root, cfg)
+        if not dlg.result:
             # L'utilisateur a annulé : on quitte proprement
+            root.destroy()
             return 0
 
         # Recharger après sauvegarde par l'assistant
@@ -117,6 +116,7 @@ def _launch_gui(args: argparse.Namespace) -> int:
 
         if not cfg.is_complete():
             # Toujours incomplet après l'assistant (ne devrait pas arriver)
+            root.destroy()
             return 1
 
     # --- Instanciation des services
@@ -127,15 +127,14 @@ def _launch_gui(args: argparse.Namespace) -> int:
     db = Database(cfg.firebird)
     woo = WooClient(cfg.woocommerce)
 
-    window = KioskWindow(cfg, db, woo)
-    window.show()
-
-    exit_code = app.exec()
+    root.deiconify()
+    KioskWindow(root, cfg, db, woo)
+    root.mainloop()
 
     # Nettoyage
     db.close()
 
-    return exit_code
+    return 0
 
 
 # ---------------------------------------------------------------------------

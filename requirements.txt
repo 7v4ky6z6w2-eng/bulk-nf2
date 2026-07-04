@@ -1,3 +1,2 @@
-PySide2>=5.15.0
 fdb>=2.0.2
 requests>=2.28.0
