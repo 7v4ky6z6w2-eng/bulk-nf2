@@ -15,8 +15,9 @@ import os
 import uuid
 from typing import Optional
 
-from PySide6.QtCore import (
+from PySide2.QtCore import (
     QEasingCurve,
+    QEvent,
     QObject,
     QPropertyAnimation,
     QRectF,
@@ -25,7 +26,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import (
+from PySide2.QtGui import (
     QBrush,
     QColor,
     QFont,
@@ -36,15 +37,14 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QRadialGradient,
-    QShortcut,
 )
 try:
-    from PySide6.QtSvg import QSvgRenderer
-    from PySide6.QtCore import QByteArray as _QByteArray
+    from PySide2.QtSvg import QSvgRenderer
+    from PySide2.QtCore import QByteArray as _QByteArray
     _HAS_SVG = True
 except ImportError:
     _HAS_SVG = False
-from PySide6.QtWidgets import (
+from PySide2.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QShortcut,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -799,7 +800,6 @@ class KioskWindow(QMainWindow):
         self._barcode_input.setFocus(Qt.OtherFocusReason)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
-        from PySide6.QtCore import QEvent
         if obj is self._barcode_input and event.type() == QEvent.FocusOut:
             QTimer.singleShot(50, self._focus_barcode)
         return super().eventFilter(obj, event)
