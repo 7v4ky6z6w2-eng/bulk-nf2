@@ -32,14 +32,23 @@ class SetupDialog:
         self.win.title(i18n.SETUP_TITLE)
         self.win.configure(padx=18, pady=18)
         self.win.resizable(False, False)
-        self.win.transient(root)
-        self.win.grab_set()
 
         self._build_ui()
         self._load_values()
 
-        # Centrer approximativement.
+        # S'assurer que la fenêtre est visible et au premier plan, même si le
+        # parent est masqué (withdraw). Sans cela elle peut rester invisible.
         self.win.update_idletasks()
+        self.win.deiconify()
+        self.win.lift()
+        self.win.attributes("-topmost", True)
+        self.win.after(300, lambda: self.win.attributes("-topmost", False))
+        self.win.focus_force()
+        try:
+            self.win.grab_set()
+        except tk.TclError:
+            pass
+
         self.win.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
         root.wait_window(self.win)

@@ -25,6 +25,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 
 import i18n
+import config as _cfgmod
 from config import AppConfig
 from database import Database
 from woocommerce import WooClient
@@ -91,13 +92,22 @@ class KioskWindow:
         self._idle_after: Optional[str] = None
         self._phase = 0.0
         self._glow_ids: list = []
+        self._rendered_once = False
+        self._alive = True
         self._queue: "queue.Queue" = queue.Queue()
+
+        # Capturer les erreurs de rappel Tkinter (sinon avalées en mode
+        # --windowed : fenêtre qui reste noire sans message d'erreur).
+        root.report_callback_exception = self._report_exc
 
         # --- Fenêtre ---------------------------------------------------------
         root.title("Affichage Prix Netfact")
         root.configure(bg=_C_BG)
         if cfg.ui.fullscreen:
-            root.attributes("-fullscreen", True)
+            try:
+                root.attributes("-fullscreen", True)
+            except tk.TclError:
+                root.state("zoomed")
         else:
             root.geometry("1024x720")
 
@@ -115,17 +125,38 @@ class KioskWindow:
         self.canvas.bind("<Button-1>", lambda e: self._refocus())
         root.bind("<Button-1>", lambda e: self._refocus())
 
-        # Redessiner lors du redimensionnement (plein écran : une seule fois).
+        # Redessiner lors du redimensionnement / affichage.
         self.canvas.bind("<Configure>", lambda e: self._render())
+        self.canvas.bind("<Map>", lambda e: self._render())
 
         # Raccourcis clavier.
         self._bind_hotkey(cfg.ui.exit_hotkey, self._on_quit)
         self._bind_hotkey("Ctrl+Alt+S", self._open_setup)
 
+        # Forcer l'affichage au premier plan (kiosque).
+        root.deiconify()
+        root.lift()
+        try:
+            root.attributes("-topmost", True)
+            root.after(400, lambda: root.attributes("-topmost", False))
+        except tk.TclError:
+            pass
+        root.focus_force()
+
         # Boucles.
         self.root.after(40, self._tick)
         self.root.after(30, self._poll_queue)
+        # Rendu initial + rendu différé (au cas où la taille n'est pas encore
+        # connue au moment de la construction).
         self._render()
+        self.root.after(120, self._render)
+        self.root.after(400, self._render)
+        _cfgmod.log("KioskWindow construite")
+
+    def _report_exc(self, exc, val, tb):
+        import traceback
+        _cfgmod.log("ERREUR DE RAPPEL Tkinter :\n"
+                    + "".join(traceback.format_exception(exc, val, tb)))
 
     # --- Raccourcis --------------------------------------------------------
 
@@ -190,6 +221,8 @@ class KioskWindow:
             db.close()
 
     def _poll_queue(self) -> None:
+        if not self._alive:
+            return
         try:
             while True:
                 scan_id, article, error = self._queue.get_nowait()
@@ -245,6 +278,8 @@ class KioskWindow:
     # --- Animation du halo (repos uniquement) ------------------------------
 
     def _tick(self) -> None:
+        if not self._alive:
+            return
         self._phase += 0.05
         if self._state == "idle" and self._glow_ids:
             pulse = 0.5 + 0.5 * math.sin(self._phase)
@@ -265,7 +300,15 @@ class KioskWindow:
         w = c.winfo_width()
         h = c.winfo_height()
         if w <= 1 or h <= 1:
+            # Taille pas encore connue : replier sur la taille de l'écran pour
+            # dessiner quelque chose immédiatement (corrigé au <Configure>).
+            w = self.root.winfo_screenwidth()
+            h = self.root.winfo_screenheight()
+        if w <= 1 or h <= 1:
             return
+        if not self._rendered_once:
+            self._rendered_once = True
+            _cfgmod.log(f"Premier rendu — {w}x{h}, état={self._state}")
 
         self._draw_gradient(w, h)
         self._draw_brand_bar(w)
@@ -277,12 +320,12 @@ class KioskWindow:
 
     def _draw_gradient(self, w: int, h: int) -> None:
         c = self.canvas
-        # Dégradé vertical violet → fond, en bandes de 3 px.
-        step = 3
+        # Dégradé vertical violet → fond, en bandes horizontales de 4 px.
+        step = 4
         for y in range(0, h, step):
             t = y / max(1, h)
             col = _lerp(_C_BG_TOP, _C_BG, min(1.0, t * 1.15))
-            c.create_line(0, y, w, y + step, fill=col, width=step)
+            c.create_rectangle(0, y, w, y + step, outline="", fill=col)
 
     def _draw_brand_bar(self, w: int) -> None:
         c = self.canvas
@@ -420,6 +463,7 @@ class KioskWindow:
         self._refocus()
 
     def _on_quit(self) -> None:
+        self._alive = False
         try:
             self.root.destroy()
         except tk.TclError:

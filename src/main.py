@@ -92,20 +92,49 @@ def _selftest(code: str | None) -> int:
 # ---------------------------------------------------------------------------
 
 def _launch_gui(args: argparse.Namespace) -> int:
+    log = _config_module.log
+    log("=== Démarrage de l'application ===")
+    try:
+        return _launch_gui_inner(args, log)
+    except Exception:  # noqa: BLE001 — dernier filet : on trace tout
+        import traceback
+        log("ERREUR FATALE au démarrage :\n" + traceback.format_exc())
+        # Tenter d'afficher une boîte d'erreur si Tkinter est disponible
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            r = tk.Tk()
+            r.withdraw()
+            messagebox.showerror(
+                "Erreur de démarrage",
+                "L'application n'a pas pu démarrer.\n"
+                "Consultez startup.log à côté de l'exe.",
+            )
+            r.destroy()
+        except Exception:
+            pass
+        return 1
+
+
+def _launch_gui_inner(args: argparse.Namespace, log) -> int:
     # Import Tkinter uniquement en mode GUI
     import tkinter as tk
 
     root = tk.Tk()
     root.withdraw()  # cachée le temps de la configuration éventuelle
+    log("Tk root créé")
 
     # Chargement de la configuration
     cfg = _config_module.load()
+    log(f"Config chargée — complète={cfg.is_complete()}")
 
     # Si la configuration est incomplète, ouvrir l'assistant de configuration
     if not cfg.is_complete():
         from ui.setup_window import SetupDialog
 
+        log("Ouverture de l'assistant de configuration")
         dlg = SetupDialog(root, cfg)
+        log(f"Assistant fermé — enregistré={dlg.result}")
         if not dlg.result:
             # L'utilisateur a annulé : on quitte proprement
             root.destroy()
@@ -127,9 +156,12 @@ def _launch_gui(args: argparse.Namespace) -> int:
     db = Database(cfg.firebird)
     woo = WooClient(cfg.woocommerce)
 
+    log("Construction de la fenêtre kiosque")
     root.deiconify()
     KioskWindow(root, cfg, db, woo)
+    log("Entrée dans la boucle principale")
     root.mainloop()
+    log("Sortie de la boucle principale")
 
     # Nettoyage
     db.close()

@@ -26,6 +26,20 @@ CONFIG_PATH = os.path.join(app_dir(), "config.ini")
 CACHE_DIR = os.path.join(app_dir(), "cache")
 
 
+# --- Journal de démarrage (diagnostic) ------------------------------------
+# Écrit à côté de l'exe. Permet de diagnostiquer un démarrage silencieux
+# (fenêtre qui ne s'affiche pas) même sans console.
+
+def log(msg: str) -> None:
+    try:
+        import datetime
+        path = os.path.join(app_dir(), "startup.log")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}  {msg}\n")
+    except Exception:
+        pass
+
+
 # --- Obfuscation simple du mot de passe -----------------------------------
 # Ce n'est PAS un chiffrement fort : cela évite seulement d'écrire le mot de
 # passe en clair dans config.ini. Le mot de passe SYSDBA reste sensible.
