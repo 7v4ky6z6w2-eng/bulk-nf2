@@ -5,16 +5,18 @@ REM  À lancer depuis la RACINE du projet (là où se trouve src/)
 REM ============================================================
 REM
 REM PRÉREQUIS :
-REM   pip install pyinstaller
-REM   (les autres dépendances doivent déjà être installées via requirements.txt)
+REM   py -3.8-32 -m pip install PySide2 fdb requests pyinstaller
 REM
-REM CLIENT FIREBIRD :
-REM   La DLL cliente Firebird 2.5 (fbclient.dll, version 32 bits si Python est
-REM   32 bits, 64 bits sinon) DOIT être disponible au moment de l'exécution.
-REM   Option A : installer le client Firebird 2.5 sur le poste kiosque.
-REM   Option B : copier fbclient.dll dans le même dossier que AffichagePrix.exe
-REM              (généralement C:\Program Files\Firebird\Firebird_2_5\bin\fbclient.dll
-REM               sur le serveur, à récupérer et placer dans dist\).
+REM CLIENT FIREBIRD (fbclient.dll 32 bits) :
+REM   Placez fbclient.dll dans le dossier racine du projet (là où
+REM   se trouve ce fichier build.bat) AVANT de lancer ce script.
+REM   La DLL sera automatiquement embarquée dans l'exe.
+REM
+REM   Où trouver fbclient.dll 32 bits ?
+REM     - Sur le serveur Netfact (si Firebird 32 bits) :
+REM         C:\Program Files\Firebird\Firebird_2_5\bin\fbclient.dll
+REM     - OU télécharger "Firebird 2.5 Windows 32-bit client" sur firebirdsql.org
+REM       et extraire fbclient.dll de l'archive.
 REM
 REM ICÔNE :
 REM   Placez votre icône dans assets\app.ico avant de lancer ce script.
@@ -27,6 +29,7 @@ set "SCRIPT=src\main.py"
 set "NAME=AffichagePrix"
 set "ASSETS=assets"
 set "ICON=assets\app.ico"
+set "FBCLIENT=fbclient.dll"
 
 REM Construire les options de l'icône seulement si le fichier existe
 set "ICON_OPT="
@@ -40,6 +43,18 @@ if exist "%ASSETS%" (
     set "ASSETS_OPT=--add-data %ASSETS%;assets"
 )
 
+REM Embarquer fbclient.dll dans l'exe si présente dans le dossier racine
+set "FBCLIENT_OPT="
+if exist "%FBCLIENT%" (
+    set "FBCLIENT_OPT=--add-binary %FBCLIENT%;."
+    echo fbclient.dll trouvee — sera embarquee dans l'exe.
+) else (
+    echo ATTENTION : fbclient.dll introuvable dans le dossier racine.
+    echo   L exe ne pourra pas se connecter a Firebird sur le poste kiosque.
+    echo   Placez fbclient.dll ici et relancez build.bat.
+    echo.
+)
+
 echo.
 echo === Compilation de %NAME% ===
 echo.
@@ -51,6 +66,7 @@ py -3.8-32 -m PyInstaller ^
     --noconsole ^
     %ICON_OPT% ^
     %ASSETS_OPT% ^
+    %FBCLIENT_OPT% ^
     --paths src ^
     "%SCRIPT%"
 
@@ -64,9 +80,6 @@ if errorlevel 1 (
 echo.
 echo === Compilation terminee ===
 echo Executable : dist\%NAME%.exe
-echo.
-echo N'oubliez pas de copier fbclient.dll dans dist\ si le client Firebird
-echo n'est pas installe sur le poste kiosque.
 echo.
 
 endlocal
