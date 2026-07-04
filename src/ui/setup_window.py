@@ -6,8 +6,8 @@ WooCommerce, de les tester, puis de les enregistrer dans config.ini.
 
 from __future__ import annotations
 
-from PySide2.QtCore import Qt
-from PySide2.QtWidgets import (
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
     QDialog,
     QFormLayout,
     QGroupBox,

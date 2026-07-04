@@ -93,8 +93,8 @@ def _selftest(code: str | None) -> int:
 
 def _launch_gui(args: argparse.Namespace) -> int:
     # Import Qt uniquement en mode GUI
-    from PySide2.QtWidgets import QApplication
-    from PySide2.QtCore import Qt
+    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtCore import Qt
 
     app = QApplication(sys.argv)
     app.setApplicationName("Affichage Prix Netfact")

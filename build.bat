@@ -5,7 +5,7 @@ REM  À lancer depuis la RACINE du projet (là où se trouve src/)
 REM ============================================================
 REM
 REM PRÉREQUIS :
-REM   py -3.8-32 -m pip install PySide2 fdb requests pyinstaller
+REM   py -3.8-32 -m pip install PyQt5 fdb requests pyinstaller
 REM
 REM CLIENT FIREBIRD (fbclient.dll 32 bits) :
 REM   Placez fbclient.dll dans le dossier racine du projet (là où
