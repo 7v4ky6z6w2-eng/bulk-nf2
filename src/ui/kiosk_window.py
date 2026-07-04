@@ -101,13 +101,16 @@ class KioskWindow:
         root.report_callback_exception = self._report_exc
 
         # --- Fenêtre ---------------------------------------------------------
+        # On mappe d'abord une fenêtre normale (taille écran) — le mode plein
+        # écran n'est appliqué qu'ENSUITE, une fois la fenêtre affichée. Sur du
+        # vieux matériel 32 bits (Intel), régler « -fullscreen » avant le
+        # premier affichage peut produire une fenêtre invisible en arrière-plan.
         root.title("Affichage Prix Netfact")
         root.configure(bg=_C_BG)
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
         if cfg.ui.fullscreen:
-            try:
-                root.attributes("-fullscreen", True)
-            except tk.TclError:
-                root.state("zoomed")
+            root.geometry(f"{sw}x{sh}+0+0")
         else:
             root.geometry("1024x720")
 
@@ -135,13 +138,19 @@ class KioskWindow:
 
         # Forcer l'affichage au premier plan (kiosque).
         root.deiconify()
+        root.update_idletasks()
         root.lift()
         try:
             root.attributes("-topmost", True)
-            root.after(400, lambda: root.attributes("-topmost", False))
         except tk.TclError:
             pass
         root.focus_force()
+        _cfgmod.log(f"Fenêtre affichée — mapped={root.winfo_ismapped()} "
+                    f"geo={root.winfo_geometry()} écran={sw}x{sh}")
+
+        # Passer en plein écran APRÈS le premier affichage.
+        if cfg.ui.fullscreen:
+            self.root.after(300, self._go_fullscreen)
 
         # Boucles.
         self.root.after(40, self._tick)
@@ -150,8 +159,22 @@ class KioskWindow:
         # connue au moment de la construction).
         self._render()
         self.root.after(120, self._render)
-        self.root.after(400, self._render)
+        self.root.after(500, self._render)
         _cfgmod.log("KioskWindow construite")
+
+    def _go_fullscreen(self) -> None:
+        try:
+            self.root.attributes("-fullscreen", True)
+        except tk.TclError:
+            try:
+                self.root.state("zoomed")
+            except tk.TclError:
+                pass
+        self.root.lift()
+        self.root.focus_force()
+        _cfgmod.log(f"Plein écran — mapped={self.root.winfo_ismapped()} "
+                    f"geo={self.root.winfo_geometry()}")
+        self._render()
 
     def _report_exc(self, exc, val, tb):
         import traceback
