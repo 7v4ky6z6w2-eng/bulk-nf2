@@ -24,6 +24,12 @@ from typing import Optional
 import tkinter as tk
 import tkinter.font as tkfont
 
+try:
+    from PIL import Image, ImageTk
+    _HAS_PIL = True
+except Exception:  # noqa: BLE001 — Pillow absent : on affiche sans photo
+    _HAS_PIL = False
+
 import i18n
 import config as _cfgmod
 from config import AppConfig
@@ -43,6 +49,7 @@ _C_LIME      = "#C6F432"   # accent — prix
 _C_LIME_DARK = "#9CCB14"   # lime foncé
 _C_VIOLET    = "#5B2EE5"   # violet accent
 _C_LINE      = "#3A2A6E"   # séparateurs
+_C_SURFACE   = "#1A0F40"   # cadre / surface (zone photo)
 _C_DANGER    = "#FF3355"   # erreur / introuvable
 _C_LOGO_INK  = "#160B2E"   # encre du logo (sur badge lime)
 
@@ -95,6 +102,8 @@ class KioskWindow:
         self._rendered_once = False
         self._alive = True
         self._queue: "queue.Queue" = queue.Queue()
+        self._photo = None            # ImageTk.PhotoImage courant
+        self._photo_state = "none"    # "none" | "loading" | "ok"
 
         # Capturer les erreurs de rappel Tkinter (sinon avalées en mode
         # --windowed : fenêtre qui reste noire sans message d'erreur).
@@ -237,29 +246,72 @@ class KioskWindow:
         db = Database(cfg_fb)
         try:
             article = db.lookup_article(code)
-            self._queue.put((scan_id, article, None))
+            self._queue.put(("lookup", scan_id, article, None))
         except Exception as exc:  # noqa: BLE001 — remonté à l'UI
-            self._queue.put((scan_id, None, exc))
+            self._queue.put(("lookup", scan_id, None, exc))
         finally:
             db.close()
+
+    def _start_image_fetch(self, ref_art: str, scan_id: str) -> None:
+        """Récupère la photo WooCommerce (par SKU) dans un thread."""
+        woo = self._woo
+        if woo is None or not getattr(woo, "configured", False):
+            return
+
+        def _work():
+            try:
+                path = woo.get_image(ref_art)
+            except Exception:  # noqa: BLE001 — jamais bruyant
+                path = None
+            self._queue.put(("image", scan_id, path))
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _poll_queue(self) -> None:
         if not self._alive:
             return
         try:
             while True:
-                scan_id, article, error = self._queue.get_nowait()
+                msg = self._queue.get_nowait()
+                kind = msg[0]
+                scan_id = msg[1]
                 if scan_id != self._current_scan_id:
                     continue
-                if error is not None:
-                    self._show_error(i18n.DB_ERROR_FR, i18n.DB_ERROR_AR)
-                elif article is None:
-                    self._show_error(i18n.NOT_FOUND_FR, i18n.NOT_FOUND_AR)
-                else:
-                    self._show_article(article)
+                if kind == "lookup":
+                    _, _, article, error = msg
+                    if error is not None:
+                        self._show_error(i18n.DB_ERROR_FR, i18n.DB_ERROR_AR)
+                    elif article is None:
+                        self._show_error(i18n.NOT_FOUND_FR, i18n.NOT_FOUND_AR)
+                    else:
+                        self._show_article(article)
+                elif kind == "image":
+                    _, _, path = msg
+                    self._load_photo(path)
         except queue.Empty:
             pass
         self.root.after(30, self._poll_queue)
+
+    def _load_photo(self, path: Optional[str]) -> None:
+        """Charge la photo téléchargée et déclenche un nouveau rendu."""
+        if not path or not _HAS_PIL:
+            self._photo = None
+            self._photo_state = "none"
+            self._render()
+            return
+        try:
+            w = self.canvas.winfo_width() or self.root.winfo_screenwidth()
+            h = self.canvas.winfo_height() or self.root.winfo_screenheight()
+            side = max(120, int(min(w * 0.34, h * 0.58)))
+            im = Image.open(path).convert("RGB")
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            im.thumbnail((side, side), resample)
+            self._photo = ImageTk.PhotoImage(im)
+            self._photo_state = "ok"
+        except Exception:  # noqa: BLE001 — photo illisible : on continue sans
+            self._photo = None
+            self._photo_state = "none"
+        self._render()
 
     # --- Transitions d'écran ----------------------------------------------
 
@@ -269,6 +321,8 @@ class KioskWindow:
             self._idle_after = None
         self._current_scan_id = None
         self._state = "idle"
+        self._photo = None
+        self._photo_state = "none"
         self._render()
         self._refocus()
 
@@ -287,13 +341,21 @@ class KioskWindow:
             "ref": (article.ref_art or "").upper(),
             "error": None,
         }
+        # Réinitialiser la photo et lancer sa récupération.
+        self._photo = None
+        configured = self._woo is not None and getattr(self._woo, "configured", False)
+        self._photo_state = "loading" if (configured and _HAS_PIL) else "none"
         self._render()
+        if configured and _HAS_PIL:
+            self._start_image_fetch(article.ref_art, self._current_scan_id)
         self._arm_idle_timer()
         self._refocus()
 
     def _show_error(self, fr: str, ar: str) -> None:
         self._state = "result"
         self._result = {"error": (fr, ar)}
+        self._photo = None
+        self._photo_state = "none"
         self._render()
         self._arm_idle_timer()
         self._refocus()
@@ -436,44 +498,87 @@ class KioskWindow:
             )
             return
 
-        # Désignation.
+        # Deux dispositions : avec photo (deux colonnes) ou centrée.
+        if self._photo is not None or self._photo_state != "none":
+            self._render_result_photo(w, h)
+        else:
+            self._render_result_centered(w, h)
+
+    def _render_result_centered(self, w: int, h: int) -> None:
+        c = self.canvas
+        cx = w / 2
         c.create_text(
             cx, h * 0.30, text=self._result["designation"], fill=_C_TEXT,
             font=(_FONT_FAMILY, -40, "bold"),
             width=int(w * 0.85), justify="center",
         )
-
-        # Séparateur fin.
         c.create_line(cx - w * 0.18, h * 0.40, cx + w * 0.18, h * 0.40,
                       fill=_C_LINE, width=1)
-
-        # Prix géant : nombre lime + « DA » plus petit.
-        price = self._result["price"]
-        parts = price.rsplit(" ", 1)
-        num = parts[0]
-        cur = parts[1] if len(parts) > 1 else i18n.CURRENCY
-
-        num_size = int(min(w * 0.18, h * 0.24))
-        cur_size = int(num_size * 0.34)
-        f_num = tkfont.Font(family=_FONT_FAMILY, size=-num_size, weight="bold")
-        f_cur = tkfont.Font(family=_FONT_FAMILY, size=-cur_size, weight="bold")
-        wn = f_num.measure(num)
-        wc = f_cur.measure(cur)
-        gap = int(num_size * 0.12)
-        total = wn + gap + wc
-        start_x = cx - total / 2
-        baseline_y = h * 0.60
-
-        c.create_text(start_x, baseline_y, anchor="sw", text=num,
-                      fill=_C_LIME, font=f_num)
-        c.create_text(start_x + wn + gap, baseline_y, anchor="sw", text=cur,
-                      fill=_C_LIME_DARK, font=f_cur)
-
-        # Référence.
+        self._draw_price(cx, h * 0.60, int(min(w * 0.18, h * 0.24)),
+                         max_width=w * 0.85)
         ref = self._result.get("ref")
         if ref:
             c.create_text(cx, h * 0.72, text=f"RÉF : {ref}", fill=_C_MUTED,
                           font=(_FONT_FAMILY, -16))
+
+    def _render_result_photo(self, w: int, h: int) -> None:
+        c = self.canvas
+        # ── Colonne photo (gauche) ──────────────────────────────────────────
+        photo_cx = w * 0.30
+        photo_cy = h * 0.55
+        side = max(120, int(min(w * 0.34, h * 0.58)))
+        x1, y1 = photo_cx - side / 2, photo_cy - side / 2
+        x2, y2 = photo_cx + side / 2, photo_cy + side / 2
+        pts = _round_rect_points(x1, y1, x2, y2, side * 0.06)
+        c.create_polygon(pts, smooth=True, fill=_C_SURFACE, outline=_C_LINE)
+        if self._photo is not None:
+            c.create_image(photo_cx, photo_cy, image=self._photo)
+        else:
+            msg = ("Chargement…" if self._photo_state == "loading"
+                   else "Photo indisponible")
+            c.create_text(photo_cx, photo_cy, text=msg, fill=_C_MUTED,
+                          font=(_FONT_FAMILY, -18))
+
+        # ── Colonne texte (droite) ──────────────────────────────────────────
+        tcx = w * 0.66
+        c.create_text(
+            tcx, h * 0.32, text=self._result["designation"], fill=_C_TEXT,
+            font=(_FONT_FAMILY, -34, "bold"),
+            width=int(w * 0.52), justify="center",
+        )
+        c.create_line(tcx - w * 0.14, h * 0.43, tcx + w * 0.14, h * 0.43,
+                      fill=_C_LINE, width=1)
+        self._draw_price(tcx, h * 0.62, int(min(w * 0.13, h * 0.22)),
+                         max_width=w * 0.52)
+        ref = self._result.get("ref")
+        if ref:
+            c.create_text(tcx, h * 0.72, text=f"RÉF : {ref}", fill=_C_MUTED,
+                          font=(_FONT_FAMILY, -15))
+
+    def _draw_price(self, center_x: float, baseline_y: float,
+                    num_size: int, max_width: Optional[float] = None) -> None:
+        """Dessine « nombre » (lime) + « DA », en réduisant pour tenir dans
+        max_width si nécessaire."""
+        price = self._result["price"]
+        parts = price.rsplit(" ", 1)
+        num = parts[0]
+        cur = parts[1] if len(parts) > 1 else i18n.CURRENCY
+        while True:
+            cur_size = max(12, int(num_size * 0.34))
+            f_num = tkfont.Font(family=_FONT_FAMILY, size=-num_size, weight="bold")
+            f_cur = tkfont.Font(family=_FONT_FAMILY, size=-cur_size, weight="bold")
+            wn = f_num.measure(num)
+            wc = f_cur.measure(cur)
+            gap = int(num_size * 0.12)
+            total = wn + gap + wc
+            if max_width is None or total <= max_width or num_size <= 24:
+                break
+            num_size = int(num_size * 0.9)
+        start_x = center_x - total / 2
+        self.canvas.create_text(start_x, baseline_y, anchor="sw", text=num,
+                                fill=_C_LIME, font=f_num)
+        self.canvas.create_text(start_x + wn + gap, baseline_y, anchor="sw",
+                                text=cur, fill=_C_LIME_DARK, font=f_cur)
 
     # --- Réglages / quitter ------------------------------------------------
 

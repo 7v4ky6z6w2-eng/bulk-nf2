@@ -5,8 +5,9 @@ REM  À lancer depuis la RACINE du projet (là où se trouve src/)
 REM ============================================================
 REM
 REM PRÉREQUIS :
-REM   py -3.8-32 -m pip install fdb requests pyinstaller
+REM   py -3.8-32 -m pip install fdb requests Pillow pyinstaller
 REM   (l'interface utilise Tkinter, fourni avec Python — aucune dépendance Qt)
+REM   (Pillow sert à afficher les photos produits WooCommerce)
 REM
 REM CLIENT FIREBIRD (fbclient.dll 32 bits) :
 REM   Placez fbclient.dll dans le dossier racine du projet (là où
