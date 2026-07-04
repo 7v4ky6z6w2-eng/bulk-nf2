@@ -15,7 +15,7 @@ import os
 import uuid
 from typing import Optional
 
-from PyQt5.QtCore import (
+from PySide2.QtCore import (
     QEasingCurve,
     QEvent,
     QObject,
@@ -24,9 +24,9 @@ from PyQt5.QtCore import (
     Qt,
     QThread,
     QTimer,
-    pyqtSignal as Signal,
+    Signal,
 )
-from PyQt5.QtGui import (
+from PySide2.QtGui import (
     QBrush,
     QColor,
     QFont,
@@ -39,12 +39,12 @@ from PyQt5.QtGui import (
     QRadialGradient,
 )
 try:
-    from PyQt5.QtSvg import QSvgRenderer
-    from PyQt5.QtCore import QByteArray as _QByteArray
+    from PySide2.QtSvg import QSvgRenderer
+    from PySide2.QtCore import QByteArray as _QByteArray
     _HAS_SVG = True
 except ImportError:
     _HAS_SVG = False
-from PyQt5.QtWidgets import (
+from PySide2.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
