@@ -16,7 +16,9 @@ Fonctionnement :
 from __future__ import annotations
 
 import math
+import os
 import queue
+import sys
 import threading
 import uuid
 from typing import Optional
@@ -80,6 +82,25 @@ def _round_rect_points(x1, y1, x2, y2, r):
     ]
 
 
+def _hex_rgb(c: str):
+    return (int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16))
+
+
+def _find_asset(name: str) -> Optional[str]:
+    """Localise un fichier d'assets en dev comme une fois packagé (PyInstaller)."""
+    candidates = []
+    base = getattr(sys, "_MEIPASS", None)          # onefile
+    if base:
+        candidates.append(os.path.join(base, "assets", name))
+    candidates.append(os.path.join(_cfgmod.app_dir(), "assets", name))  # onedir
+    candidates.append(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", name))
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Fenêtre kiosque
 # ---------------------------------------------------------------------------
@@ -104,6 +125,17 @@ class KioskWindow:
         self._queue: "queue.Queue" = queue.Queue()
         self._photo = None            # ImageTk.PhotoImage courant
         self._photo_state = "none"    # "none" | "loading" | "ok"
+
+        # Logo Prime Office (PNG rendu depuis le SVG). Repli « PO » si absent.
+        self._logo_src = None
+        self._badge_cache: dict = {}
+        if _HAS_PIL:
+            lp = _find_asset("logo.png")
+            if lp:
+                try:
+                    self._logo_src = Image.open(lp).convert("RGBA")
+                except Exception:  # noqa: BLE001
+                    self._logo_src = None
 
         # Capturer les erreurs de rappel Tkinter (sinon avalées en mode
         # --windowed : fenêtre qui reste noire sans message d'erreur).
@@ -431,9 +463,51 @@ class KioskWindow:
         )
         c.create_line(0, 72, w, 72, fill=_C_LIME, width=2)
 
+    def _make_badge(self, size: int):
+        """Construit un badge lime arrondi avec le vrai logo composité (Pillow)."""
+        try:
+            from PIL import ImageDraw
+            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            # Dégradé lime vertical.
+            top, bot = _hex_rgb(_C_LIME), _hex_rgb(_C_LIME_DARK)
+            grad = Image.new("RGB", (1, size))
+            for yy in range(size):
+                t = yy / max(1, size - 1)
+                grad.putpixel((0, yy),
+                              tuple(int(top[i] + (bot[i] - top[i]) * t) for i in range(3)))
+            grad = grad.resize((size, size))
+            # Masque arrondi.
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                [0, 0, size - 1, size - 1], radius=int(size * 0.24), fill=255)
+            img.paste(grad, (0, 0), mask)
+            # Logo centré avec marge.
+            if self._logo_src is not None:
+                pad = int(size * 0.17)
+                inner = max(1, size - 2 * pad)
+                lw, lh = self._logo_src.size
+                scale = min(inner / lw, inner / lh)
+                nw, nh = max(1, int(lw * scale)), max(1, int(lh * scale))
+                resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+                logo = self._logo_src.resize((nw, nh), resample)
+                img.paste(logo, ((size - nw) // 2, (size - nh) // 2), logo)
+            return ImageTk.PhotoImage(img)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _draw_logo(self, x: int, y: int, size: int) -> None:
-        """Badge logo : carré lime arrondi avec le monogramme « PO »."""
+        """Badge logo Prime Office (image) ou repli « PO »."""
         c = self.canvas
+        size = int(size)
+        if _HAS_PIL and self._logo_src is not None:
+            photo = self._badge_cache.get(size)
+            if photo is None:
+                photo = self._make_badge(size)
+                self._badge_cache[size] = photo
+            if photo is not None:
+                c.create_image(x + size / 2, y + size / 2, image=photo)
+                return
+        # Repli : carré lime arrondi + « PO ».
         r = size * 0.24
         pts = _round_rect_points(x, y, x + size, y + size, r)
         c.create_polygon(pts, smooth=True, fill=_C_LIME, outline=_C_LIME_DARK)
