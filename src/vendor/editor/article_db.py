@@ -196,6 +196,7 @@ class ArticleRepository:
                 self.maxlen[real] = dflt
         self._introspect_familles()
         self._introspect_tarifs()
+        self._introspect_equiv()
 
     def _introspect_familles(self):
         """Detecte la table des familles et ses colonnes (code / nom / tva)."""
@@ -278,24 +279,33 @@ class ArticleRepository:
     def load(self, search="", limit=5000):
         """Charge les articles (eventuellement filtres) sous forme de dicts.
 
-        Le filtre `search` est applique sur REF_ART, CODE_BARRES, CODE_BARRE
-        et DESIGNATION (LIKE, insensible a la casse).
+        Le filtre `search` est applique sur REF_ART, DESIGNATION et sur les
+        CODES EQUIVALENTS (table EQUIV_CBARRES) — LIKE, insensible a la casse.
         Chaque dict contient les colonnes logiques presentes + "__ref0__"
         (valeur d'origine de la reference, qui sert de cle de mise a jour).
         """
         cols = self.display_columns()
-        reals = [self.real(c) for c in cols]
+        extra = [c for c in Cols.EXTRA_LOAD
+                 if c in self.colmap and c not in cols]
+        all_cols = cols + extra
+        reals = [self.real(c) for c in all_cols]
         select = ", ".join(reals)
         sql = f"SELECT {select} FROM {self.table}"
         params = []
         if search:
             like = "%" + search.strip().upper() + "%"
-            search_cols = [self.real(c) for c in
-                           (Cols.REF, Cols.CODE_BARRES, Cols.CODE_BARRE, Cols.DESIGNATION)
+            search_cols = [self.real(c) for c in (Cols.REF, Cols.DESIGNATION)
                            if self.has(c)]
-            clause = " OR ".join("UPPER(%s) LIKE ?" % c for c in search_cols)
-            sql += " WHERE " + clause
+            clauses = ["UPPER(%s) LIKE ?" % c for c in search_cols]
             params = [like] * len(search_cols)
+            if self.has_equiv():
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM %s e WHERE e.%s = %s.%s "
+                    "AND UPPER(e.%s) LIKE ?)"
+                    % (self.equiv_table, self.equiv_ref, self.table,
+                       self.real(Cols.REF), self.equiv_code))
+                params.append(like)
+            sql += " WHERE " + " OR ".join(clauses)
         ref_real = self.real(Cols.REF)
         sql += f" ORDER BY {ref_real}"
         cur = self.con.cursor()
@@ -307,7 +317,7 @@ class ArticleRepository:
         out = []
         for row in rows:
             rec = {}
-            for logical, value in zip(cols, row):
+            for logical, value in zip(all_cols, row):
                 rec[logical] = value
             rec["__ref0__"] = rec.get(Cols.REF)
             out.append(rec)
@@ -335,7 +345,7 @@ class ArticleRepository:
         Leve DBError en cas d'echec (et laisse la transaction telle quelle pour
         un rollback par l'appelant).
         """
-        from editor_logic import parse_number, fit_text
+        from editor_logic import parse_number, fit_text, parse_bool, parse_date
 
         cur = self.con.cursor()
         # 1) creer les familles manquantes (avant les articles -> FK satisfaite)
@@ -357,7 +367,16 @@ class ArticleRepository:
                 real = self.real(logical)
                 if real is None:
                     continue
-                if logical in Cols.NUMERIC:
+                if logical in Cols.INT_FIELDS:
+                    b = parse_bool(val) if logical in Cols.BOOL_FIELDS else None
+                    if b is not None:
+                        params.append(b)
+                    else:
+                        num = parse_number(val)
+                        params.append(int(num) if num is not None else None)
+                elif logical in Cols.DATE_FIELDS:
+                    params.append(parse_date(val))
+                elif logical in Cols.NUMERIC:
                     params.append(parse_number(val))
                 else:
                     maxb = self.maxlen.get(real, Cols.DEFAULT_MAX_LEN.get(logical, 255))
@@ -578,6 +597,125 @@ class ArticleRepository:
                 ) from exc
         self._pending = True
 
+    # -- codes equivalents (plusieurs codes-barres par article) -----------
+    def _introspect_equiv(self):
+        """Detecte la table des codes equivalents (EQUIV_CBARRES dans PRIME).
+
+        Schema attendu : NOEQUIV_CBARRES (PK, generateur NEXTEQUIV_CBARRES),
+        REF_ART (FK vers ARTICLE), CODE_BARRES (le code equivalent, 60 c.).
+        """
+        self.equiv_table = None
+        self.equiv_pk = None
+        self.equiv_ref = None
+        self.equiv_code = None
+        self.equiv_gen = None
+        self.equiv_code_max = Cols.EQUIV_CODE_LEN
+        cur = self.con.cursor()
+        try:
+            cur.execute(
+                "SELECT TRIM(rf.RDB$FIELD_NAME), f.RDB$FIELD_TYPE, f.RDB$FIELD_LENGTH "
+                "FROM RDB$RELATION_FIELDS rf "
+                "JOIN RDB$FIELDS f ON f.RDB$FIELD_NAME = rf.RDB$FIELD_SOURCE "
+                "WHERE rf.RDB$RELATION_NAME = ? ORDER BY rf.RDB$FIELD_POSITION",
+                (Cols.EQUIV_TABLE,))
+            rows = cur.fetchall()
+        except Exception:                              # noqa: BLE001
+            rows = []
+        if not rows:
+            return
+        names = [r[0] for r in rows]
+        if Cols.EQUIV_REF not in names or Cols.EQUIV_CODE not in names:
+            return
+        self.equiv_table = Cols.EQUIV_TABLE
+        self.equiv_ref = Cols.EQUIV_REF
+        self.equiv_code = Cols.EQUIV_CODE
+        self.equiv_pk = Cols.EQUIV_PK if Cols.EQUIV_PK in names else None
+        for name, ftype, flen in rows:
+            if name == self.equiv_code and ftype in (14, 37) and flen:
+                self.equiv_code_max = int(flen)
+        try:
+            cur.execute("SELECT TRIM(RDB$GENERATOR_NAME) FROM RDB$GENERATORS "
+                        "WHERE RDB$GENERATOR_NAME CONTAINING 'EQUIV'")
+            gens = [r[0] for r in cur.fetchall()]
+            self.equiv_gen = (Cols.EQUIV_GEN if Cols.EQUIV_GEN in gens
+                              else (gens[0] if gens else None))
+        except Exception:                              # noqa: BLE001
+            self.equiv_gen = None
+
+    def has_equiv(self):
+        return getattr(self, "equiv_table", None) is not None
+
+    def load_equiv(self, refs):
+        """Renvoie {ref: [code, ...]} depuis la table EQUIV_CBARRES."""
+        if not self.has_equiv() or not refs:
+            return {}
+        refs = [r for r in refs if r is not None]
+        order = self.equiv_pk or self.equiv_code
+        cur = self.con.cursor()
+        result = {}
+        CHUNK = 200
+        for i in range(0, len(refs), CHUNK):
+            chunk = refs[i:i + CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cur.execute(
+                "SELECT %s, %s FROM %s WHERE %s IN (%s) ORDER BY %s"
+                % (self.equiv_ref, self.equiv_code, self.equiv_table,
+                   self.equiv_ref, placeholders, order),
+                chunk)
+            for ref, code in cur.fetchall():
+                # NE PAS nettoyer 'ref' : il doit rester identique a REF_ART
+                # de la ligne article (__ref0__).
+                if code is None:
+                    continue
+                code = self._clean(code)
+                if code:
+                    result.setdefault(ref, []).append(code)
+        return result
+
+    def _next_equiv_id(self, cur):
+        """Nouvel identifiant (NOEQUIV_CBARRES). VARCHAR -> renvoie une chaine."""
+        if self.equiv_gen:
+            cur.execute("SELECT GEN_ID(%s, 1) FROM RDB$DATABASE" % self.equiv_gen)
+            return str(cur.fetchone()[0])
+        cur.execute("SELECT MAX(CAST(%s AS BIGINT)) FROM %s"
+                    % (self.equiv_pk, self.equiv_table))
+        row = cur.fetchone()
+        return str((row[0] or 0) + 1)
+
+    def update_equiv(self, equiv_changes):
+        """Remplace les codes equivalents d'articles (sans committer).
+
+        equiv_changes : liste de (ref0, [codes]). La liste fournie REMPLACE
+        integralement les codes existants de l'article (liste vide = tout
+        supprimer). Codes tronques a la taille de la colonne.
+        """
+        from editor_logic import fit_text
+        if not self.has_equiv():
+            raise DBError("Table des codes equivalents (EQUIV_CBARRES) "
+                          "introuvable dans la base.")
+        cur = self.con.cursor()
+        for ref, codes in equiv_changes:
+            try:
+                cur.execute("DELETE FROM %s WHERE %s = ?"
+                            % (self.equiv_table, self.equiv_ref), (ref,))
+                for code in (codes or []):
+                    code, _ = fit_text(code, self.equiv_code_max, self.codec)
+                    if not code:
+                        continue
+                    cols_ins = [self.equiv_ref, self.equiv_code]
+                    vals = [ref, code]
+                    if self.equiv_pk:
+                        cols_ins.insert(0, self.equiv_pk)
+                        vals.insert(0, self._next_equiv_id(cur))
+                    placeholders = ",".join("?" for _ in cols_ins)
+                    cur.execute("INSERT INTO %s (%s) VALUES (%s)"
+                                % (self.equiv_table, ",".join(cols_ins),
+                                   placeholders), vals)
+            except Exception as exc:                   # noqa: BLE001
+                raise DBError(
+                    "Echec codes equivalents ref '%s' : %s" % (ref, exc)
+                ) from exc
+        self._pending = True
 
 
 # --------------------------------------------------------------------------- #
@@ -595,9 +733,12 @@ class DemoRepository:
         self.table = "ARTICLE (demo)"
         self.codec = "cp1252"
         self.columns = list(Cols.DISPLAY)
+        # colonnes "possedees" : celles affichees + les colonnes promo non
+        # affichees (HT promo, dates) pour coller au schema PRIME reel.
         self.colmap = {c: c for c in Cols.DISPLAY}
-        self.maxlen = {Cols.REF: 35, Cols.CODE_BARRES: 60,
-                       Cols.CODE_BARRE: 35, Cols.DESIGNATION: 100}
+        for c in (Cols.PV_HT_PROMO, Cols.PROMO_START, Cols.PROMO_END):
+            self.colmap[c] = c
+        self.maxlen = {Cols.REF: 35, Cols.DESIGNATION: 100}
         self.famille_table = "FAMILLE (demo)"
         self.fam_code = Cols.FAMILLE_CODE
         self.fam_name = Cols.FAMILLE_NAME
@@ -613,18 +754,28 @@ class DemoRepository:
             "A002": {"6": 2.80, "7": 3.00},
             "A004": {"6": 7.00, "7": 7.50, "8": 8.20},
         }
+        # codes equivalents : ref -> [codes] (plusieurs codes par article)
+        self._equiv = {
+            "A001": ["3001234500017", "3001234500918"],
+            "A002": ["3001234500024"],
+            "A004": ["3001234500048"],
+            "A005": ["3001234500055"],
+            "B011": ["3001234500079"],
+        }
         self._rows = self._sample()
         self._staged = None
 
     def _sample(self):
+        # colonnes : REF, DESIGNATION, PV_HT, PV_TTC, PV_TTC_PROMO,
+        #            PROMO_ACTIVE, TVA, PA_HT, QTE_CARTON, FAMILLE
         data = [
-            ("A001", "Cafe moulu 250g", "3001234500017", "", 2.50, 2.98, 19, 1.40, 12, "BOISSON"),
-            ("A002", "The vert bio 100g", "3001234500024", "", 3.10, 3.69, 19, 1.80, 12, "BOISSON"),
-            ("A003", "Sucre blanc 1kg", "", "", 1.05, 1.25, 19, 0.70, 10, "EPICERIE"),
-            ("A004", "Huile olive 1L", "3001234500048", "", 7.90, 9.40, 19, 5.20, 6, "EPICERIE"),
-            ("A005", "Savon de Marseille", "3001234500055", "", 1.80, 2.14, 19, 0.95, 24, "HYGIENE"),
-            ("B010", "Stylo bille bleu", "", "", 0.50, 0.60, 19, 0.20, 50, "PAPETERIE"),
-            ("B011", "Cahier 96 pages", "3001234500079", "", 1.20, 1.43, 19, 0.65, 25, "PAPETERIE"),
+            ("A001", "Cafe moulu 250g", 2.50, 2.98, 2.50, 1, 19, 1.40, 12, "BOISSON"),
+            ("A002", "The vert bio 100g", 3.10, 3.69, None, 0, 19, 1.80, 12, "BOISSON"),
+            ("A003", "Sucre blanc 1kg", 1.05, 1.25, None, 0, 19, 0.70, 10, "EPICERIE"),
+            ("A004", "Huile olive 1L", 7.90, 9.40, 6.90, 1, 19, 5.20, 6, "EPICERIE"),
+            ("A005", "Savon de Marseille", 1.80, 2.14, None, 0, 19, 0.95, 24, "HYGIENE"),
+            ("B010", "Stylo bille bleu", 0.50, 0.60, None, 0, 19, 0.20, 50, "PAPETERIE"),
+            ("B011", "Cahier 96 pages", 1.20, 1.43, None, 0, 19, 0.65, 25, "PAPETERIE"),
         ]
         rows = []
         for rec in data:
@@ -655,9 +806,11 @@ class DemoRepository:
         rows = [dict(r) for r in self._rows]
         if search:
             s = search.strip().lower()
-            rows = [r for r in rows if any(
-                s in str(r.get(c, "")).lower()
-                for c in (Cols.REF, Cols.CODE_BARRES, Cols.CODE_BARRE, Cols.DESIGNATION))]
+            rows = [r for r in rows
+                    if any(s in str(r.get(c, "")).lower()
+                           for c in (Cols.REF, Cols.DESIGNATION))
+                    or any(s in code.lower()
+                           for code in self._equiv.get(r.get(Cols.REF), []))]
         return rows[:limit]
 
     def ref_exists(self, ref):
@@ -673,7 +826,7 @@ class DemoRepository:
         return code in self._familles
 
     def update_rows(self, changes, new_familles=None):
-        from editor_logic import parse_number
+        from editor_logic import parse_number, parse_bool, parse_date
         for code, intitule, _tva in (new_familles or []):
             if code and code not in self._familles:
                 self._familles[code] = intitule or code
@@ -684,7 +837,16 @@ class DemoRepository:
             if not row:
                 continue
             for logical, val in (change.get("values") or {}).items():
-                row[logical] = parse_number(val) if logical in Cols.NUMERIC else (val or None)
+                if logical in Cols.INT_FIELDS:
+                    b = parse_bool(val) if logical in Cols.BOOL_FIELDS else None
+                    row[logical] = b if b is not None else (
+                        int(parse_number(val)) if parse_number(val) is not None else None)
+                elif logical in Cols.DATE_FIELDS:
+                    row[logical] = parse_date(val)
+                elif logical in Cols.NUMERIC:
+                    row[logical] = parse_number(val)
+                else:
+                    row[logical] = val or None
             n += 1
         self._staged = list(staged.values())
         return n
@@ -718,3 +880,18 @@ class DemoRepository:
                 slot.pop(type_code, None)
             else:
                 slot[type_code] = pv
+
+    def has_equiv(self):
+        return True
+
+    def load_equiv(self, refs):
+        refs = set(refs or [])
+        return {r: list(v) for r, v in self._equiv.items() if r in refs}
+
+    def update_equiv(self, equiv_changes):
+        for ref, codes in equiv_changes:
+            codes = [c for c in (codes or []) if c]
+            if codes:
+                self._equiv[ref] = list(codes)
+            else:
+                self._equiv.pop(ref, None)

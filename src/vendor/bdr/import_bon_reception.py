@@ -441,17 +441,27 @@ def _pdf_clean(s):
     return " ".join(s.split())
 
 
+_PDF_NUM_RE = re.compile(r"-?\d[\d\s]*(?:[.,]\d+)?")
+
+
 def _pdf_amount(s):
-    """Convertit '2 100.00 DA' -> 2100.0 ; '1 234,50' -> 1234.5."""
+    """Extrait le NOMBRE d'un montant type '2 100.00 DA', '2 600.00 D.A',
+    '1 234,50 DZD'. On EXTRAIT le motif numerique plutot que de retirer les
+    lettres caractere par caractere : un sigle monetaire avec un point
+    ('D.A') laisserait sinon un point residuel ('2600.00.') qui invalide
+    tout le nombre -> silencieusement 0 (bug observe sur un vrai bon)."""
     if not s:
         return 0.0
-    s = re.sub(r"[^0-9,.\-]", "", str(s).replace(" ", ""))
-    if "," in s and "." not in s:
-        s = s.replace(",", ".")
+    m = _PDF_NUM_RE.search(str(s))
+    if not m:
+        return 0.0
+    num = m.group(0).replace(" ", "")
+    if "," in num and "." not in num:
+        num = num.replace(",", ".")
     else:
-        s = s.replace(",", "")
+        num = num.replace(",", "")
     try:
-        return float(s)
+        return float(num)
     except ValueError:
         return 0.0
 
