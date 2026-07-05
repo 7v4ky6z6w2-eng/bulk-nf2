@@ -111,3 +111,55 @@ class Database:
         cur.execute("SELECT 1 FROM RDB$DATABASE")
         cur.fetchone()
         cur.close()
+
+    # --- Introspection (diagnostic schéma) ---------------------------------
+    _SCHEMA_KEYWORDS = ("TARIF", "QTE", "QUANT", "GROS", "PRIX",
+                        "REMISE", "PALIER", "PACK")
+
+    def dump_schema(self) -> str:
+        """Retourne un rapport texte : liste des tables, colonnes d'ARTICLE et
+        des tables liées aux tarifs/quantités, avec quelques lignes d'exemple.
+
+        Sert à découvrir la structure « tarif par quantité » sans la deviner.
+        """
+        con = self._ensure()
+        cur = con.cursor()
+        out = []
+
+        cur.execute(
+            "SELECT TRIM(RDB$RELATION_NAME) FROM RDB$RELATIONS "
+            "WHERE RDB$SYSTEM_FLAG = 0 AND RDB$VIEW_BLR IS NULL "
+            "ORDER BY RDB$RELATION_NAME"
+        )
+        tables = [r[0].strip() for r in cur.fetchall()]
+        out.append("=== TABLES (%d) ===" % len(tables))
+        out.append(", ".join(tables))
+
+        def _columns(table: str):
+            cur.execute(
+                "SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS "
+                "WHERE RDB$RELATION_NAME = ? ORDER BY RDB$FIELD_POSITION",
+                (table,),
+            )
+            return [r[0].strip() for r in cur.fetchall()]
+
+        targets = [t for t in tables
+                   if t == "ARTICLE" or any(k in t for k in self._SCHEMA_KEYWORDS)]
+        for t in targets:
+            out.append("\n=== %s ===" % t)
+            cols = _columns(t)
+            out.append("colonnes : " + ", ".join(cols))
+            # Quelques lignes d'exemple (uniquement tables de tarifs, non ARTICLE).
+            if t != "ARTICLE":
+                try:
+                    cur.execute("SELECT FIRST 3 * FROM %s" % t)
+                    rows = cur.fetchall()
+                    for row in rows:
+                        vals = ", ".join(
+                            f"{c}={v!r}" for c, v in zip(cols, row))
+                        out.append("  ex: " + vals)
+                except Exception as exc:  # noqa: BLE001
+                    out.append("  (exemple indisponible : %s)" % exc)
+
+        cur.close()
+        return "\n".join(out)

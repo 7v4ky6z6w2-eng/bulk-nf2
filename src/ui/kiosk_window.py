@@ -176,6 +176,7 @@ class KioskWindow:
         # Raccourcis clavier.
         self._bind_hotkey(cfg.ui.exit_hotkey, self._on_quit)
         self._bind_hotkey("Ctrl+Alt+S", self._open_setup)
+        self._bind_hotkey("Ctrl+Alt+D", self._dump_schema)   # diagnostic schéma
 
         # Forcer l'affichage au premier plan (kiosque).
         root.deiconify()
@@ -306,6 +307,15 @@ class KioskWindow:
             while True:
                 msg = self._queue.get_nowait()
                 kind = msg[0]
+                if kind in ("schema", "schema_err"):
+                    from tkinter import messagebox
+                    if kind == "schema":
+                        messagebox.showinfo("Diagnostic schéma",
+                                            f"Fichier créé :\n{msg[1]}")
+                    else:
+                        messagebox.showerror("Diagnostic schéma", msg[1])
+                    self._refocus()
+                    continue
                 scan_id = msg[1]
                 if scan_id != self._current_scan_id:
                     continue
@@ -663,6 +673,26 @@ class KioskWindow:
         if dlg.result:
             self._cfg = load()
         self._refocus()
+
+    def _dump_schema(self) -> None:
+        """Ctrl+Alt+D : écrit schema.txt à côté de l'exe (thread DB dédié)."""
+        cfg_fb = self._cfg.firebird
+
+        def work():
+            try:
+                db = Database(cfg_fb)
+                try:
+                    text = db.dump_schema()
+                finally:
+                    db.close()
+                path = os.path.join(_cfgmod.app_dir(), "schema.txt")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                self._queue.put(("schema", path))
+            except Exception as exc:  # noqa: BLE001
+                self._queue.put(("schema_err", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_quit(self) -> None:
         self._alive = False
