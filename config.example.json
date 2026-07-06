@@ -1,0 +1,31 @@
+{
+  "firebird": {
+    "host": "",
+    "port": 3050,
+    "database": "C:\\PRIME\\DIFA2.FDB",
+    "user": "SYSDBA",
+    "password": "masterkey",
+    "charset": "WIN1256",
+    "fb_client_library": ""
+  },
+  "sync": {
+    "filter_boutique_visible": true,
+    "price_field": "PRIXVENTETTC",
+    "promo_price_field": "PRIXTTCPROMO",
+    "sync_images": true
+  },
+  "woocommerce": {
+    "site_url": "https://example.com",
+    "consumer_key": "ck_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "consumer_secret": "cs_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "wordpress": {
+    "username": "",
+    "app_password": ""
+  },
+  "state_db_path": "sync_state.sqlite3",
+  "schedule": {
+    "enabled": false,
+    "interval_hours": 6
+  }
+}
