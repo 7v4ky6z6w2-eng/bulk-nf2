@@ -71,6 +71,19 @@ def test_fetch_articles_respects_boutique_visible_filter():
     assert len(queries.fetch_articles(con, familles, filter_boutique_visible=False)) == 1
 
 
+def test_fetch_familles_treats_null_boutiq_visible_as_visible():
+    # Real DIFA2.FDB data: some families never had BOUTIQ_VISIBLE set at
+    # all (NULL). That must NOT be treated the same as an explicit 0, or
+    # every article in those families silently vanishes from the sync.
+    con = _make_con(
+        [_article_row("REF1", "Stylo bleu", prestation=False, codefamille="FAM_UNSET")],
+        famille_rows=[("FAM_UNSET", "Non classee", None)],
+    )
+    familles = queries.fetch_familles(con)
+    assert familles["FAM_UNSET"]["boutiq_visible"] is True
+    assert len(queries.fetch_articles(con, familles, filter_boutique_visible=True)) == 1
+
+
 def test_fetch_stock_quantities_empty_when_no_stock_table():
     # Matches the real DIFA2.FDB install: schema_discovery.py confirmed
     # neither STOCK nor FICHE_STOCK exists there.

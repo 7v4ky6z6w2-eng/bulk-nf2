@@ -31,13 +31,22 @@ STOCK_TABLE_CANDIDATES = [
 
 
 def fetch_familles(con):
-    """Returns {codefamille: {"intitule": str, "boutiq_visible": bool}}."""
+    """Returns {codefamille: {"intitule": str, "boutiq_visible": bool}}.
+
+    BOUTIQ_VISIBLE is opt-out, not opt-in: a family where it was never set
+    (NULL) is treated as visible, same as an explicit 1. Only an explicit 0
+    hides it. Confirmed against the real DIFA2.FDB that some families never
+    had this flag set at all -- treating NULL as "hidden" would silently
+    drop every article in those families, which is not what "sync my
+    catalog" means by default.
+    """
     cur = con.cursor()
     try:
         cur.execute("SELECT CODEFAMILLE, INTITULE, BOUTIQ_VISIBLE FROM FAMILLE")
         rows = cur.fetchall()
         return {
-            code: {"intitule": intitule or code, "boutiq_visible": bool(visible)}
+            code: {"intitule": intitule or code,
+                   "boutiq_visible": True if visible is None else bool(visible)}
             for code, intitule, visible in rows
         }
     except Exception:
