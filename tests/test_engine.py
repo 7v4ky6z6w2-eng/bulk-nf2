@@ -96,17 +96,26 @@ def test_build_core_fields_barcodes():
     assert meta["_alt_barcodes"] == "2222222222,3333333333"
 
 
-@pytest.mark.parametrize("designation,expected", [
-    ("stylo bille bleu", "Stylo"),
-    ("STYLO BILLE BLEU", "Stylo"),
+@pytest.mark.parametrize("name,expected", [
     ("Stylo Bille Bleu", "Stylo"),
-    ("  cahier   96 pages", "Cahier"),
+    ("Cahier 96 Pages", "Cahier"),
     ("", None),
     ("   ", None),
     (None, None),
 ])
-def test_category_from_designation(designation, expected):
-    assert engine._category_from_designation(designation) == expected
+def test_category_from_cleaned_name(name, expected):
+    assert engine._category_from_cleaned_name(name) == expected
+
+
+def test_build_core_fields_category_survives_abbreviation_expansion():
+    # Raw DESIGNATION uses the abbreviations from the user's real
+    # sync_config.ini -- category must be derived AFTER expansion, so
+    # "STYL" (abbreviation) still lands in category "Stylo", not "Styl".
+    article = _article(designation="STYL BIL BLU")
+    cfg = _cfg("unused.sqlite3")
+    core = engine.build_core_fields(article, cfg)
+    assert core["name"] == "Stylo Bille Bleu"
+    assert core["_category_name"] == "Stylo"
 
 
 def test_build_core_fields_uses_designation_first_word_for_category():

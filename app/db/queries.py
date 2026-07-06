@@ -17,17 +17,6 @@ ARTICLE_COLUMNS = [
     "TAUX_TVA", "CTRLSTOCK", "PHOTO", "ART_PRESTATION",
 ]
 
-# Candidate (table, ref-column, qty-column) triples to try for stock levels.
-# Confirmed via db/schema_discovery.py that neither STOCK nor FICHE_STOCK
-# exists in the reference install this tool was built against -- this list
-# is kept for other installs that might have one of these tables, but here
-# it will always fall through to the "no stock table" warning below.
-STOCK_TABLE_CANDIDATES = [
-    ("STOCK", "REF_ART", "QTE_STOCK"),
-    ("STOCK", "REF_ART", "QTE"),
-    ("FICHE_STOCK", "REF_ART", "QTE_STOCK"),
-    ("FICHE_STOCK", "REF_ART", "QTE"),
-]
 
 
 def fetch_familles(con):
@@ -74,22 +63,19 @@ def fetch_barcodes(con):
 
 
 def fetch_stock_quantities(con):
-    """Best-effort stock-quantity lookup. Returns {ref_art: qty}, or {} if
-    none of the candidate table/column combinations exist -- run
-    db/schema_discovery.py to find the real one and update
-    STOCK_TABLE_CANDIDATES above."""
-    for table, ref_col, qty_col in STOCK_TABLE_CANDIDATES:
-        try:
-            cur = con.cursor()
-            cur.execute(f"SELECT {ref_col}, SUM({qty_col}) FROM {table} GROUP BY {ref_col}")
-            rows = cur.fetchall()
-            log.info("Using stock quantities from %s.%s", table, qty_col)
-            return {ref: qty or 0 for ref, qty in rows}
-        except Exception:
-            continue
-    log.warning("No known stock table/column combination worked; "
-                "stock quantities will be omitted. Run schema_discovery.py.")
-    return {}
+    """Returns {ref_art: qty}, computed live from the ITEM ledger.
+
+    There is no STOCK/FICHE_STOCK table in this install (confirmed via
+    schema_discovery.py) -- stock is derived the same way the user's own
+    already-working stock-sync tool computes it: each ITEM row's QTE is
+    signed by its document type's COEFF (receptions positive, sales
+    negative, etc.), so summing per article gives the current quantity on
+    hand. Negative sums (data artifacts) are clamped to 0 -- not meaningful
+    to show as stock.
+    """
+    cur = con.cursor()
+    cur.execute("SELECT REF_ART, SUM(QTE * COEFF) FROM ITEM GROUP BY REF_ART")
+    return {ref: max(0, int(qty or 0)) for ref, qty in cur.fetchall()}
 
 
 def fetch_articles(con, familles, filter_boutique_visible=True):

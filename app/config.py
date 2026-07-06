@@ -33,6 +33,29 @@ DEFAULT_CONFIG = {
         "price_field": "PRIXVENTETTC",
         "promo_price_field": "PRIXTTCPROMO",
         "sync_images": True,
+        # Abbreviation -> full word, applied (case-insensitively) before
+        # Title-casing the product name. Seeded from the user's own
+        # real-world list (sync_config.ini's [replacements] section).
+        "name_replacements": {
+            "GM": "Grand Modèle",
+            "PM": "Petit Modèle",
+            "MM": "Moyen Modèle",
+            "STYL": "Stylo",
+            "CAH": "Cahier",
+            "ARB": "Ardoise",
+            "PQT": "Paquet",
+            "RECH": "Recharge",
+            "CLAS": "Classeur",
+            "BIL": "Bille",
+            "PCH": "Pochette",
+            "BTE": "Boîte",
+            "FT": "Format",
+            "COUL": "Couleur",
+            "NR": "Noir",
+            "BLC": "Blanc",
+            "ROU": "Rouge",
+            "BLU": "Bleu",
+        },
     },
 
     # --- WooCommerce REST API -----------------------------------------------

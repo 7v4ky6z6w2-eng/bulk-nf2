@@ -37,15 +37,13 @@ def _article_row(ref, designation, prestation, codefamille="FAM1"):
     )
 
 
-def _make_con(article_rows, famille_rows=None, barcode_rows=None, stock_rows=None,
-               stock_table="STOCK"):
+def _make_con(article_rows, famille_rows=None, barcode_rows=None, item_rows=None):
     tables = {
         "ARTICLE": article_rows,
         "FAMILLE": famille_rows or [("FAM1", "Stylos", 1)],
         "EQUIV_CBARRES": barcode_rows or [],
+        "ITEM": item_rows if item_rows is not None else [],
     }
-    if stock_rows is not None:
-        tables[stock_table] = stock_rows
     return FakeConnection(tables)
 
 
@@ -84,42 +82,40 @@ def test_fetch_familles_treats_null_boutiq_visible_as_visible():
     assert len(queries.fetch_articles(con, familles, filter_boutique_visible=True)) == 1
 
 
-def test_fetch_stock_quantities_empty_when_no_stock_table():
-    # Matches the real DIFA2.FDB install: schema_discovery.py confirmed
-    # neither STOCK nor FICHE_STOCK exists there.
-    con = _make_con([_article_row("REF1", "Stylo bleu", prestation=False)])
-    assert queries.fetch_stock_quantities(con) == {}
-
-
-def test_fetch_stock_quantities_reads_first_matching_candidate_table():
+def test_fetch_stock_quantities_computes_from_item_ledger():
+    # Matches the real DIFA2.FDB install: no STOCK/FICHE_STOCK table, but
+    # the old tool's proven query shows stock = SUM(QTE * COEFF) per article.
     con = _make_con(
         [_article_row("REF1", "Stylo bleu", prestation=False)],
-        stock_rows=[("REF1", 42), ("REF2", 7)],
-        stock_table="STOCK",
+        item_rows=[("REF1", 42), ("REF2", 7)],
     )
     assert queries.fetch_stock_quantities(con) == {"REF1": 42, "REF2": 7}
 
 
-def test_fetch_stock_quantities_falls_back_to_fiche_stock():
+def test_fetch_stock_quantities_clamps_negative_to_zero():
     con = _make_con(
         [_article_row("REF1", "Stylo bleu", prestation=False)],
-        stock_rows=[("REF1", 5)],
-        stock_table="FICHE_STOCK",
+        item_rows=[("REF1", -5)],
     )
-    assert queries.fetch_stock_quantities(con) == {"REF1": 5}
+    assert queries.fetch_stock_quantities(con) == {"REF1": 0}
 
 
-def test_fetch_articles_stock_qty_none_when_no_stock_table():
+def test_fetch_stock_quantities_empty_when_no_item_rows():
+    con = _make_con([_article_row("REF1", "Stylo bleu", prestation=False)])
+    assert queries.fetch_stock_quantities(con) == {}
+
+
+def test_fetch_articles_stock_qty_none_when_article_has_no_item_rows():
     con = _make_con([_article_row("REF1", "Stylo bleu", prestation=False)])
     familles = queries.fetch_familles(con)
     articles = queries.fetch_articles(con, familles, filter_boutique_visible=True)
     assert articles[0]["stock_qty"] is None
 
 
-def test_fetch_articles_wires_stock_qty_when_stock_table_present():
+def test_fetch_articles_wires_stock_qty_from_item_ledger():
     con = _make_con(
         [_article_row("REF1", "Stylo bleu", prestation=False)],
-        stock_rows=[("REF1", 42)],
+        item_rows=[("REF1", 42)],
     )
     familles = queries.fetch_familles(con)
     articles = queries.fetch_articles(con, familles, filter_boutique_visible=True)

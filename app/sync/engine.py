@@ -12,6 +12,7 @@ import logging
 from app.db import queries
 from app.db.firebird_client import connect as connect_firebird
 from app.images.blob_extractor import extract_image
+from app.sync.name_cleaner import clean_name
 from app.sync.state_store import StateStore
 from app.sync.woocommerce_client import WooCommerceClient, WooCommerceError
 
@@ -39,9 +40,11 @@ def build_core_fields(article, cfg):
     price_field = "prix_vente_ttc" if sync_cfg["price_field"] == "PRIXVENTETTC" else "prix_vente_ht"
     promo_field = "prix_ttc_promo" if sync_cfg["promo_price_field"] == "PRIXTTCPROMO" else "prix_ht_promo"
 
+    name = clean_name(article["designation"], sync_cfg.get("name_replacements"))
+
     fields = {
         "sku": article["ref_art"],
-        "name": article["designation"],
+        "name": name,
         "regular_price": _price_str(article[price_field]),
     }
 
@@ -68,21 +71,22 @@ def build_core_fields(article, cfg):
     if meta_data:
         fields["meta_data"] = meta_data
 
-    fields["_category_name"] = _category_from_designation(article["designation"])
+    fields["_category_name"] = _category_from_cleaned_name(name)
     return fields
 
 
-def _category_from_designation(designation):
-    """WooCommerce category name: the first word of the article's
-    DESIGNATION, Title-cased, so "stylo bille bleu" / "STYLO ..." / "Stylo
-    ..." all land in the same "Stylo" category instead of near-duplicates
-    piling up from inconsistent data-entry casing."""
-    if not designation:
+def _category_from_cleaned_name(name):
+    """WooCommerce category name: the first word of the already-cleaned
+    product name (Title-cased, abbreviations expanded -- see name_cleaner),
+    so "stylo bille bleu" / "STYLO ..." / "STYL BIL BLU" all land in the
+    same "Stylo" category instead of near-duplicates piling up from
+    inconsistent data-entry casing or abbreviations."""
+    if not name:
         return None
-    first_word = designation.strip().split()
-    if not first_word:
+    words = name.strip().split()
+    if not words:
         return None
-    return first_word[0].capitalize()
+    return words[0]
 
 
 def content_hash(core_fields, has_image, image_bytes=None):
