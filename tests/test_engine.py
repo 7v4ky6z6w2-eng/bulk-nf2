@@ -67,6 +67,24 @@ def test_build_core_fields_active_promo_uses_dates():
     assert core["date_on_sale_to"] == "2026-01-31"
 
 
+def test_build_core_fields_no_stock_qty_omits_manage_stock():
+    # Matches the real DIFA2.FDB install: no STOCK/FICHE_STOCK table exists,
+    # so queries.fetch_stock_quantities() always leaves stock_qty as None.
+    article = _article(stock_qty=None)
+    cfg = _cfg("unused.sqlite3")
+    core = engine.build_core_fields(article, cfg)
+    assert core["manage_stock"] is False
+    assert "stock_quantity" not in core
+
+
+def test_build_core_fields_with_stock_qty_sets_manage_stock():
+    article = _article(stock_qty=15)
+    cfg = _cfg("unused.sqlite3")
+    core = engine.build_core_fields(article, cfg)
+    assert core["manage_stock"] is True
+    assert core["stock_quantity"] == 15
+
+
 def test_build_core_fields_barcodes():
     article = _article(barcodes=["1111111111", "2222222222", "3333333333"])
     cfg = _cfg("unused.sqlite3")
