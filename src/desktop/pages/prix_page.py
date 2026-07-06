@@ -60,9 +60,13 @@ class PrixPage(QWidget):
         search_btn = QPushButton("Chercher")
         search_btn.clicked.connect(self._do_search)
 
-        self._results = QTableWidget(0, 5)
+        # Colonnes de prix generees dynamiquement (une par magasin connu de
+        # stores.json) : pas de limite fixe, un magasin ajoute plus tard
+        # apparait sans recompiler l'application.
+        self._store_ids_ordered = [s.id for s in registry.stores]
+        self._results = QTableWidget(0, 2 + len(self._store_ids_ordered))
         self._results.setHorizontalHeaderLabels(
-            ["Référence", "Désignation", "M1 Prix", "M2 Prix", "M3 Prix"])
+            ["Référence", "Désignation"] + ["%s Prix" % s.name for s in registry.stores])
         self._results.setEditTriggers(QTableWidget.NoEditTriggers)
         self._results.setSelectionBehavior(QTableWidget.SelectRows)
         self._results.setMaximumHeight(220)
@@ -123,7 +127,7 @@ class PrixPage(QWidget):
         except Exception as exc:  # noqa: BLE001
             self._log_msg("Hub injoignable : %s" % exc)
             return
-        store_ids = [s.id for s in self._registry.stores][:3]
+        store_ids = self._store_ids_ordered
 
         by_ref: dict[str, dict] = {}
         for r in rows:
