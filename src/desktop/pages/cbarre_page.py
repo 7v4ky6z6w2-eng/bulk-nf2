@@ -88,8 +88,8 @@ class CbarrePage(QWidget):
             scope_layout.addWidget(cb)
         scope_box = QGroupBox("Appliquer sur :"); scope_box.setLayout(scope_layout)
 
-        apply_btn = QPushButton("Enregistrer les changements")
-        apply_btn.clicked.connect(self._do_apply)
+        self._apply_btn = QPushButton("Enregistrer les changements")
+        self._apply_btn.clicked.connect(self._do_apply)
 
         self._log = QLabel(""); self._log.setWordWrap(True)
 
@@ -101,7 +101,7 @@ class CbarrePage(QWidget):
         bc_row.addWidget(self._new_bc, 1); bc_row.addWidget(add_bc_btn); bc_row.addWidget(del_bc_btn)
 
         action_row = QHBoxLayout()
-        action_row.addStretch(); action_row.addWidget(apply_btn)
+        action_row.addStretch(); action_row.addWidget(self._apply_btn)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<h3>Codes-barres (équivalents)</h3>"))
@@ -166,6 +166,12 @@ class CbarrePage(QWidget):
 
     # -- application --------------------------------------------------------
     def _do_apply(self) -> None:
+        # Cf. prix_page.py : un clic pendant qu'un envoi precedent tourne
+        # encore remplacerait self._thread par un nouveau QThread pendant que
+        # l'ancien tourne toujours -> crash PySide (thread C++ actif detruit).
+        # Le bouton desactive tant que le thread n'a pas fini l'empeche.
+        if self._thread is not None and self._thread.isRunning():
+            return
         if not self._ref:
             QMessageBox.warning(self, "Aucun article", "Sélectionnez d'abord un article.")
             return
@@ -200,10 +206,15 @@ class CbarrePage(QWidget):
 
         self._log.setText("Envoi : +%d / -%d code(s) sur %d magasin(s)…" % (
             len(to_add), len(to_remove), len(selected)))
+        self._apply_btn.setEnabled(False)
         self._thread = _OpThread(self._data, selected, ops)
         self._thread.progress.connect(self._on_progress)
-        self._thread.finished_all.connect(lambda: self._on_pick_article())
+        self._thread.finished_all.connect(self._on_apply_done)
         self._thread.start()
+
+    def _on_apply_done(self) -> None:
+        self._apply_btn.setEnabled(True)
+        self._on_pick_article()
 
     def _on_progress(self, store_id: int, status: str, msg: str) -> None:
         prev = self._log.text()

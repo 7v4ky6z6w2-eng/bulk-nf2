@@ -86,8 +86,8 @@ class PrixPage(QWidget):
             self._store_checks[s.id] = cb
             scope_layout.addWidget(cb)
 
-        apply_btn = QPushButton("Appliquer le prix")
-        apply_btn.clicked.connect(self._do_apply)
+        self._apply_btn = QPushButton("Appliquer le prix")
+        self._apply_btn.clicked.connect(self._do_apply)
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
@@ -106,7 +106,7 @@ class PrixPage(QWidget):
 
         action_row = QHBoxLayout()
         action_row.addStretch()
-        action_row.addWidget(apply_btn)
+        action_row.addWidget(self._apply_btn)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<h3>Éditeur de prix</h3>"))
@@ -148,6 +148,14 @@ class PrixPage(QWidget):
                 self._results.setItem(i, col, cell)
 
     def _do_apply(self) -> None:
+        # Un clic pendant qu'un envoi precedent tourne encore remplacerait
+        # self._thread par un nouveau QThread pendant que l'ancien tourne
+        # toujours -> PySide detruit l'ancien objet Python alors que le
+        # thread C++ sous-jacent est actif -> crash. Le bouton desactive
+        # tant que _on_all_done n'a pas confirme la fin evite ce cas,
+        # meme en cliquant tres vite plusieurs fois de suite.
+        if self._thread is not None and self._thread.isRunning():
+            return
         if not self._results.selectedItems():
             QMessageBox.warning(self, "Aucune sélection", "Sélectionnez un article dans la liste.")
             return
@@ -176,6 +184,7 @@ class PrixPage(QWidget):
         self._log_msg("Prix %.2f DA pour %s → %d magasin(s)…" % (new_ht, ref_art, len(selected)))
         changes = [{"ref0": ref_art, "values": {"PRIXVENTEHT": new_ht, "PRIXVENTETTC": new_ht}}]
 
+        self._apply_btn.setEnabled(False)
         self._thread = _PriceThread(self._data, selected, changes)
         self._thread.progress.connect(self._on_progress)
         self._thread.finished_all.connect(self._on_all_done)
@@ -187,3 +196,4 @@ class PrixPage(QWidget):
 
     def _on_all_done(self) -> None:
         self._log_msg("Terminé.")
+        self._apply_btn.setEnabled(True)
