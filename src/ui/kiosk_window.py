@@ -381,6 +381,7 @@ class KioskWindow:
             "designation": (article.designation or "").upper(),
             "price": i18n.format_price(article.prix_vente_ht),
             "ref": (article.ref_art or "").upper(),
+            "tiers": list(getattr(article, "tiers", []) or []),
             "error": None,
         }
         # Réinitialiser la photo et lancer sa récupération.
@@ -591,19 +592,28 @@ class KioskWindow:
     def _render_result_centered(self, w: int, h: int) -> None:
         c = self.canvas
         cx = w / 2
+        tiers = self._result.get("tiers") or []
+        # On remonte le bloc si des offres quantité doivent s'afficher.
+        y_desig = 0.24 if tiers else 0.30
+        y_div = 0.335 if tiers else 0.40
+        y_price = 0.52 if tiers else 0.60
+        y_ref = 0.60 if tiers else 0.72
+
         c.create_text(
-            cx, h * 0.30, text=self._result["designation"], fill=_C_TEXT,
+            cx, h * y_desig, text=self._result["designation"], fill=_C_TEXT,
             font=(_FONT_FAMILY, -40, "bold"),
             width=int(w * 0.85), justify="center",
         )
-        c.create_line(cx - w * 0.18, h * 0.40, cx + w * 0.18, h * 0.40,
+        c.create_line(cx - w * 0.18, h * y_div, cx + w * 0.18, h * y_div,
                       fill=_C_LINE, width=1)
-        self._draw_price(cx, h * 0.60, int(min(w * 0.18, h * 0.24)),
+        self._draw_price(cx, h * y_price, int(min(w * 0.18, h * 0.24)),
                          max_width=w * 0.85)
         ref = self._result.get("ref")
         if ref:
-            c.create_text(cx, h * 0.72, text=f"RÉF : {ref}", fill=_C_MUTED,
+            c.create_text(cx, h * y_ref, text=f"RÉF : {ref}", fill=_C_MUTED,
                           font=(_FONT_FAMILY, -16))
+        if tiers:
+            self._draw_tiers(cx, h * 0.69, heading_size=20, line_size=30)
 
     def _render_result_photo(self, w: int, h: int) -> None:
         c = self.canvas
@@ -625,19 +635,48 @@ class KioskWindow:
 
         # ── Colonne texte (droite) ──────────────────────────────────────────
         tcx = w * 0.66
+        tiers = self._result.get("tiers") or []
+        y_desig = 0.26 if tiers else 0.32
+        y_div = 0.37 if tiers else 0.43
+        y_price = 0.55 if tiers else 0.62
+        y_ref = 0.63 if tiers else 0.72
+
         c.create_text(
-            tcx, h * 0.32, text=self._result["designation"], fill=_C_TEXT,
+            tcx, h * y_desig, text=self._result["designation"], fill=_C_TEXT,
             font=(_FONT_FAMILY, -34, "bold"),
             width=int(w * 0.52), justify="center",
         )
-        c.create_line(tcx - w * 0.14, h * 0.43, tcx + w * 0.14, h * 0.43,
+        c.create_line(tcx - w * 0.14, h * y_div, tcx + w * 0.14, h * y_div,
                       fill=_C_LINE, width=1)
-        self._draw_price(tcx, h * 0.62, int(min(w * 0.13, h * 0.22)),
+        self._draw_price(tcx, h * y_price, int(min(w * 0.13, h * 0.22)),
                          max_width=w * 0.52)
         ref = self._result.get("ref")
         if ref:
-            c.create_text(tcx, h * 0.72, text=f"RÉF : {ref}", fill=_C_MUTED,
+            c.create_text(tcx, h * y_ref, text=f"RÉF : {ref}", fill=_C_MUTED,
                           font=(_FONT_FAMILY, -15))
+        if tiers:
+            self._draw_tiers(tcx, h * 0.71, heading_size=17, line_size=24,
+                             max_width=w * 0.52, max_lines=2)
+
+    def _draw_tiers(self, center_x: float, y0: float, heading_size: int = 20,
+                    line_size: int = 30, max_width: Optional[float] = None,
+                    max_lines: int = 3) -> None:
+        """Affiche les offres quantité : « qté × prix unitaire = total »."""
+        tiers = self._result.get("tiers") or []
+        if not tiers:
+            return
+        c = self.canvas
+        c.create_text(center_x, y0, text="OFFRE QUANTITÉ", fill=_C_LIME,
+                      font=(_FONT_FAMILY, -heading_size, "bold"))
+        y = y0 + int(heading_size * 1.9)
+        for (qmin, qmax, prix) in tiers[:max_lines]:
+            total = qmin * prix
+            qn = int(qmin) if float(qmin).is_integer() else qmin
+            unit = i18n.format_price(prix).rsplit(" ", 1)[0]   # sans « DA »
+            line = f"{qn} × {unit} = {i18n.format_price(total)}"
+            c.create_text(center_x, y, text=line, fill=_C_TEXT,
+                          font=(_FONT_FAMILY, -line_size))
+            y += int(line_size * 1.35)
 
     def _draw_price(self, center_x: float, baseline_y: float,
                     num_size: int, max_width: Optional[float] = None) -> None:

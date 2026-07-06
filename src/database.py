@@ -6,12 +6,16 @@ réseau (TCP/3050). Un client Firebird récent peut dialoguer avec un serveur 2.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 import fdb
 
 from config import FirebirdConfig
+
+
+# Un palier de tarif par quantité : (qté min, qté max, prix unitaire HT).
+QtyTier = Tuple[float, Optional[float], float]
 
 
 @dataclass
@@ -19,6 +23,7 @@ class Article:
     ref_art: str
     designation: str
     prix_vente_ht: float
+    tiers: List[QtyTier] = field(default_factory=list)
 
 
 # Recherche d'un article à partir du code scanné :
@@ -33,6 +38,19 @@ FROM ARTICLE A
 WHERE (A.EN_SOMMEIL = 0 OR A.EN_SOMMEIL IS NULL)
   AND ( A.REF_ART = ?
      OR A.REF_ART IN (SELECT E.REF_ART FROM EQUIV_CBARRES E WHERE E.CODE_BARRES = ?) )
+"""
+
+
+# Paliers de tarif par quantité (table TARIF de Netfact) pour un article.
+# On ne garde que les vrais paliers « quantité » (qté min > 1) avec un prix
+# renseigné. Ordonnés par quantité croissante.
+_TIERS_SQL = """
+SELECT T.QTEMIN, T.QTEMAX, T.PRIXHT
+FROM TARIF T
+WHERE T.REF_ART = ?
+  AND T.PRIXHT > 0
+  AND T.QTEMIN > 1
+ORDER BY T.QTEMIN
 """
 
 
@@ -92,7 +110,10 @@ class Database:
             designation = (row[0] or "").strip()
             prix = float(row[1] or 0.0)
             ref_art = (row[2] or "").strip()
-            return Article(ref_art=ref_art, designation=designation, prix_vente_ht=prix)
+            article = Article(ref_art=ref_art, designation=designation,
+                              prix_vente_ht=prix)
+            article.tiers = self._qty_tiers(con, ref_art)
+            return article
 
         try:
             return _run()
@@ -103,6 +124,29 @@ class Database:
                 return _run()
             except Exception as exc:
                 raise DatabaseError(str(exc)) from exc
+
+    def _qty_tiers(self, con, ref_art: str) -> List[QtyTier]:
+        """Retourne les paliers de tarif par quantité de l'article.
+
+        Ne lève jamais : si la table TARIF est absente ou en erreur, on
+        renvoie une liste vide (l'affichage prix/nom continue normalement).
+        """
+        if not ref_art:
+            return []
+        try:
+            cur = con.cursor()
+            cur.execute(_TIERS_SQL, (ref_art,))
+            tiers: List[QtyTier] = []
+            for row in cur.fetchall():
+                qmin = float(row[0] or 0)
+                qmax = float(row[1]) if row[1] is not None else None
+                prix = float(row[2] or 0)
+                if qmin > 1 and prix > 0:
+                    tiers.append((qmin, qmax, prix))
+            cur.close()
+            return tiers
+        except Exception:  # noqa: BLE001 — table absente / autre : on ignore
+            return []
 
     def test_connection(self) -> None:
         """Vérifie que la connexion fonctionne (lève DatabaseError sinon)."""
