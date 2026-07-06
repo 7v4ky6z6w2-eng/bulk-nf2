@@ -161,6 +161,36 @@ Résultat dans `dist\` :
 - **`PrimeNFAgent.exe`** → à copier sur les magasins 2 & 3.
 - **`PrimeNFHub.exe`** → l'application bureau (n'importe quel poste).
 
+### ⚠️ Le magasin 1 (hub) a AUSSI besoin de son propre agent qui tourne en continu
+
+Le backfill de l'étape 2.5 ne charge les données du magasin 1 **qu'une seule
+fois**, à l'instant où vous l'avez lancé. Sans agent qui tourne en continu
+sur le hub lui-même, **Stock et Trésorerie du magasin 1 ne se mettront plus
+jamais à jour** après ce premier chargement — c'est le symptôme classique
+« la Trésorerie ne bouge pas / le Stock n'apparaît pas pour mon magasin
+principal » alors que les magasins 2/3 fonctionnent bien.
+
+Sur le magasin 1, juste après avoir construit les exécutables ci-dessus,
+lancez la **même** installation d'agent planifié que pour les autres
+magasins, avec `1` comme numéro :
+
+```bat
+install_windows\install_agent.bat 1
+```
+
+Cela installe une tâche planifiée qui lance `PrimeNFAgent.exe --store-id 1`
+toutes les 15 minutes **sur le poste du hub lui-même** (l'agent se connecte
+alors à sa base Firebird en local, exactement comme pour les magasins 2/3
+sur leur propre poste). Test immédiat :
+
+```bat
+dist\PrimeNFAgent.exe --store-id 1 --once
+```
+
+> Si vous avez déjà un hub en production sans cet agent : lancez la commande
+> ci-dessus maintenant, Stock/Trésorerie du magasin 1 se remettront à jour
+> dès le prochain cycle (jusqu'à 15 min, ou tout de suite avec `--once`).
+
 ---
 
 ## Étape 4 — Magasins 2 & 3 (sans Python)
