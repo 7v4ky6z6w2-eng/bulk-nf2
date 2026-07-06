@@ -86,6 +86,12 @@ def _hex_rgb(c: str):
     return (int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16))
 
 
+def _format_dinars(v: float) -> str:
+    """Montant arrondi au dinar entier : 999.90 -> « 1 000 DA »."""
+    n = int(round(v))
+    return f"{n:,}".replace(",", " ") + f" {i18n.CURRENCY}"
+
+
 def _find_asset(name: str) -> Optional[str]:
     """Localise un fichier d'assets en dev comme une fois packagé (PyInstaller)."""
     candidates = []
@@ -613,7 +619,7 @@ class KioskWindow:
             c.create_text(cx, h * y_ref, text=f"RÉF : {ref}", fill=_C_MUTED,
                           font=(_FONT_FAMILY, -16))
         if tiers:
-            self._draw_tiers(cx, h * 0.69, heading_size=20, line_size=30)
+            self._draw_tiers(cx, h * 0.68, heading_size=24, line_size=46)
 
     def _render_result_photo(self, w: int, h: int) -> None:
         c = self.canvas
@@ -655,7 +661,7 @@ class KioskWindow:
             c.create_text(tcx, h * y_ref, text=f"RÉF : {ref}", fill=_C_MUTED,
                           font=(_FONT_FAMILY, -15))
         if tiers:
-            self._draw_tiers(tcx, h * 0.71, heading_size=17, line_size=24,
+            self._draw_tiers(tcx, h * 0.70, heading_size=19, line_size=34,
                              max_width=w * 0.52, max_lines=2)
 
     def _draw_tiers(self, center_x: float, y0: float, heading_size: int = 20,
@@ -668,15 +674,15 @@ class KioskWindow:
         c = self.canvas
         c.create_text(center_x, y0, text="OFFRE QUANTITÉ", fill=_C_LIME,
                       font=(_FONT_FAMILY, -heading_size, "bold"))
-        y = y0 + int(heading_size * 1.9)
+        y = y0 + int(heading_size * 2.1)
         for (qmin, qmax, prix) in tiers[:max_lines]:
             total = qmin * prix
             qn = int(qmin) if float(qmin).is_integer() else qmin
             unit = i18n.format_price(prix).rsplit(" ", 1)[0]   # sans « DA »
-            line = f"{qn} × {unit} = {i18n.format_price(total)}"
-            c.create_text(center_x, y, text=line, fill=_C_TEXT,
-                          font=(_FONT_FAMILY, -line_size))
-            y += int(line_size * 1.35)
+            line = f"{qn} × {unit} = {_format_dinars(total)}"
+            c.create_text(center_x, y, text=line, fill=_C_LIME,
+                          font=(_FONT_FAMILY, -line_size, "bold"))
+            y += int(line_size * 1.4)
 
     def _draw_price(self, center_x: float, baseline_y: float,
                     num_size: int, max_width: Optional[float] = None) -> None:

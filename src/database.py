@@ -42,12 +42,14 @@ WHERE (A.EN_SOMMEIL = 0 OR A.EN_SOMMEIL IS NULL)
 
 
 # Paliers de tarif par quantité (table TARIF de Netfact) pour un article.
-# On ne garde que les vrais paliers « quantité » (qté min > 1) avec un prix
-# renseigné. Ordonnés par quantité croissante.
+# Le type de tarif « QTE » correspond au tarif par quantité (le type « COND »,
+# conditionnement, est ignoré). On ne garde que les vrais paliers (qté min > 1)
+# avec un prix renseigné, ordonnés par quantité croissante.
 _TIERS_SQL = """
 SELECT T.QTEMIN, T.QTEMAX, T.PRIXHT
 FROM TARIF T
 WHERE T.REF_ART = ?
+  AND T.CODE_TYPE_TARIF = 'QTE'
   AND T.PRIXHT > 0
   AND T.QTEMIN > 1
 ORDER BY T.QTEMIN
