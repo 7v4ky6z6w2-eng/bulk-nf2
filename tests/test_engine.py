@@ -77,6 +77,26 @@ def test_build_core_fields_barcodes():
     assert meta["_alt_barcodes"] == "2222222222,3333333333"
 
 
+@pytest.mark.parametrize("designation,expected", [
+    ("stylo bille bleu", "Stylo"),
+    ("STYLO BILLE BLEU", "Stylo"),
+    ("Stylo Bille Bleu", "Stylo"),
+    ("  cahier   96 pages", "Cahier"),
+    ("", None),
+    ("   ", None),
+    (None, None),
+])
+def test_category_from_designation(designation, expected):
+    assert engine._category_from_designation(designation) == expected
+
+
+def test_build_core_fields_uses_designation_first_word_for_category():
+    article = _article(designation="trousse scolaire rose", famille_intitule="Some Family Name")
+    cfg = _cfg("unused.sqlite3")
+    core = engine.build_core_fields(article, cfg)
+    assert core["_category_name"] == "Trousse"
+
+
 def test_content_hash_changes_when_price_changes():
     cfg = _cfg("unused.sqlite3")
     a1 = engine.build_core_fields(_article(prix_vente_ttc=24.0), cfg)

@@ -68,8 +68,21 @@ def build_core_fields(article, cfg):
     if meta_data:
         fields["meta_data"] = meta_data
 
-    fields["_category_name"] = article["famille_intitule"]  # resolved to an id later
+    fields["_category_name"] = _category_from_designation(article["designation"])
     return fields
+
+
+def _category_from_designation(designation):
+    """WooCommerce category name: the first word of the article's
+    DESIGNATION, Title-cased, so "stylo bille bleu" / "STYLO ..." / "Stylo
+    ..." all land in the same "Stylo" category instead of near-duplicates
+    piling up from inconsistent data-entry casing."""
+    if not designation:
+        return None
+    first_word = designation.strip().split()
+    if not first_word:
+        return None
+    return first_word[0].capitalize()
 
 
 def content_hash(core_fields, has_image, image_bytes=None):

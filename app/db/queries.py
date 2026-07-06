@@ -14,12 +14,14 @@ ARTICLE_COLUMNS = [
     "REF_ART", "CODEFAMILLE", "DESIGNATION",
     "PRIXACHATHT", "PRIXACHATTTC", "PRIXVENTEHT", "PRIXVENTETTC",
     "PRIXHTPROMO", "PRIXTTCPROMO", "ACTIVEPROMO", "DATEDEBPROMO", "DATEFINPROMO",
-    "TAUX_TVA", "CTRLSTOCK", "PHOTO",
+    "TAUX_TVA", "CTRLSTOCK", "PHOTO", "ART_PRESTATION",
 ]
 
-# Candidate (table, ref-column, qty-column) triples to try for stock levels,
-# since the exact schema wasn't exercised by the existing import script.
-# Confirm the real one with db/schema_discovery.py and trim this list.
+# Candidate (table, ref-column, qty-column) triples to try for stock levels.
+# Confirmed via db/schema_discovery.py that neither STOCK nor FICHE_STOCK
+# exists in the reference install this tool was built against -- this list
+# is kept for other installs that might have one of these tables, but here
+# it will always fall through to the "no stock table" warning below.
 STOCK_TABLE_CANDIDATES = [
     ("STOCK", "REF_ART", "QTE_STOCK"),
     ("STOCK", "REF_ART", "QTE"),
@@ -83,7 +85,9 @@ def fetch_stock_quantities(con):
 
 def fetch_articles(con, familles, filter_boutique_visible=True):
     """Returns a list of article dicts, one per ARTICLE row (optionally
-    restricted to families flagged BOUTIQ_VISIBLE)."""
+    restricted to families flagged BOUTIQ_VISIBLE). ART_PRESTATION rows
+    (non-physical service line items) are always excluded -- they aren't
+    sellable WooCommerce products."""
     cur = con.cursor()
     cur.execute(f"SELECT {', '.join(ARTICLE_COLUMNS)} FROM ARTICLE")
     barcodes = fetch_barcodes(con)
@@ -92,6 +96,10 @@ def fetch_articles(con, familles, filter_boutique_visible=True):
     articles = []
     for row in cur.fetchall():
         values = dict(zip(ARTICLE_COLUMNS, row))
+
+        if values["ART_PRESTATION"]:
+            continue
+
         codefamille = values["CODEFAMILLE"]
         famille = familles.get(codefamille, {"intitule": None, "boutiq_visible": True})
 
