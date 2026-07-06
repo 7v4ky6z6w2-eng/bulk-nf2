@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import load_config, save_config
-from app.sync.engine import run_sync
+from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
 
 try:
     from app.scheduler import windows_task
@@ -187,19 +187,20 @@ class MainWindow(QMainWindow):
         self.worker.finished_error.connect(self._sync_failed)
         self.worker.start()
 
+    # Catalogs can run into the thousands of articles -- capped so the log
+    # view (and Qt) stay responsive; the full list still goes to disk.
+    PAYLOAD_PREVIEW_LIMIT = 200
+
     def _sync_done(self, report):
         self.dry_run_btn.setEnabled(True)
         self.sync_btn.setEnabled(True)
-        if report.get("payloads"):
-            self.log_view.appendPlainText("\n--- Dry-run payloads ---")
-            for item in report["payloads"]:
-                self.log_view.appendPlainText(f"[{item['action']}] {item['payload']}")
-        if report.get("orphans"):
+        for line in render_report_lines(report, payload_limit=self.PAYLOAD_PREVIEW_LIMIT):
+            self.log_view.appendPlainText(line)
+        written_path = write_dry_run_payloads(report)
+        if written_path:
             self.log_view.appendPlainText(
-                f"\nOrphaned (previously synced, no longer found): {report['orphans']}"
+                f"\nFull list of {len(report['payloads'])} payload(s) written to {written_path}"
             )
-        if report.get("errors"):
-            self.log_view.appendPlainText(f"\nErrors: {report['errors']}")
 
     def _sync_failed(self, message):
         self.dry_run_btn.setEnabled(True)

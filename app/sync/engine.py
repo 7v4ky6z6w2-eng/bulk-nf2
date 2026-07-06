@@ -216,3 +216,46 @@ def run_sync(cfg, dry_run=False, log_fn=None):
          f"unchanged={report['unchanged']} orphans={len(report['orphans'])} "
          f"errors={len(report['errors'])}")
     return report
+
+
+DRY_RUN_OUTPUT_PATH = "dry_run_payloads.json"
+
+
+def write_dry_run_payloads(report, path=DRY_RUN_OUTPUT_PATH):
+    """Writes the full dry-run payload list to a JSON file for review --
+    catalogs can run into the thousands of articles, too many to usefully
+    print to a terminal or a GUI log view in full. Returns 'path' if
+    something was written, else None (nothing to write)."""
+    payloads = report.get("payloads")
+    if not payloads:
+        return None
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payloads, fh, ensure_ascii=False, indent=2, default=str)
+    return path
+
+
+def render_report_lines(report, payload_limit=None):
+    """Human-readable detail lines for a run_sync() report -- the actual
+    dry-run payloads, orphans, and errors. Used by both the CLI (--sync
+    --dry-run, where this is the only way to see what would be sent) and
+    the GUI's log view, so neither surface silently drops this detail.
+
+    'payload_limit' caps how many payloads are rendered (catalogs can run
+    into the thousands of articles, and dumping all of them to a terminal
+    isn't useful) -- pass None to render every one (e.g. into a scrollable
+    GUI log view)."""
+    lines = []
+    payloads = report.get("payloads") or []
+    if payloads:
+        shown = payloads if payload_limit is None else payloads[:payload_limit]
+        lines.append(f"--- Dry-run payloads ({len(payloads)} total) ---")
+        for item in shown:
+            lines.append(f"[{item['action']}] {item['ref_art']}: {item['payload']}")
+        if payload_limit is not None and len(payloads) > payload_limit:
+            lines.append(f"... and {len(payloads) - payload_limit} more "
+                         f"(see the full JSON output for the rest)")
+    if report.get("orphans"):
+        lines.append(f"Orphaned (previously synced, no longer found): {report['orphans']}")
+    if report.get("errors"):
+        lines.append(f"Errors: {report['errors']}")
+    return lines

@@ -13,6 +13,7 @@ import sys
 from app.config import load_config
 
 DEFAULT_CONFIG_PATH = "config.json"
+DRY_RUN_PREVIEW_LIMIT = 15
 
 
 def main(argv=None):
@@ -24,9 +25,19 @@ def main(argv=None):
 
     if args.sync:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-        from app.sync.engine import run_sync
+        from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
         cfg = load_config(args.config)
         report = run_sync(cfg, dry_run=args.dry_run)
+
+        # A catalog can run into the thousands of articles -- printing every
+        # payload to the terminal isn't useful, so only a preview is shown
+        # there and the full list is written to a JSON file for review.
+        for line in render_report_lines(report, payload_limit=DRY_RUN_PREVIEW_LIMIT):
+            print(line)
+        written_path = write_dry_run_payloads(report)
+        if written_path:
+            print(f"\nFull list of {len(report['payloads'])} payload(s) written to {written_path}")
+
         if report["errors"]:
             return 1
         return 0

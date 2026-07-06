@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import tempfile
 
@@ -217,3 +218,39 @@ def test_run_sync_reports_orphans(monkeypatch):
                              lambda con, familles, filter_boutique_visible: [])
         report = engine.run_sync(cfg, dry_run=False)
         assert report["orphans"] == ["REF1"]
+
+
+def test_render_report_lines_truncates_large_payload_lists():
+    report = {
+        "payloads": [{"ref_art": f"R{i}", "action": "create", "payload": {}} for i in range(30)],
+        "orphans": [], "errors": [],
+    }
+    lines = engine.render_report_lines(report, payload_limit=5)
+    assert lines[0] == "--- Dry-run payloads (30 total) ---"
+    assert len(lines) == 1 + 5 + 1  # header + 5 shown + "... and N more"
+    assert "25 more" in lines[-1]
+
+
+def test_render_report_lines_no_limit_shows_everything():
+    report = {
+        "payloads": [{"ref_art": f"R{i}", "action": "create", "payload": {}} for i in range(3)],
+        "orphans": [], "errors": [],
+    }
+    lines = engine.render_report_lines(report, payload_limit=None)
+    assert len(lines) == 1 + 3  # header + all 3, no truncation note
+
+
+def test_write_dry_run_payloads_writes_file_and_returns_path():
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = os.path.join(tmp, "out.json")
+        report = {"payloads": [{"ref_art": "R1", "action": "create", "payload": {"sku": "R1"}}]}
+        result = engine.write_dry_run_payloads(report, path=out_path)
+        assert result == out_path
+        with open(out_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        assert data == report["payloads"]
+
+
+def test_write_dry_run_payloads_returns_none_when_nothing_to_write():
+    assert engine.write_dry_run_payloads({"payloads": []}) is None
+    assert engine.write_dry_run_payloads({}) is None
