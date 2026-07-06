@@ -441,23 +441,35 @@ def _pdf_clean(s):
     return " ".join(s.split())
 
 
-_PDF_NUM_RE = re.compile(r"-?\d[\d\s]*(?:[.,]\d+)?")
+_PDF_NUM_RE = re.compile(r"-?\d[\d\s.,]*")
 
 
 def _pdf_amount(s):
     """Extrait le NOMBRE d'un montant type '2 100.00 DA', '2 600.00 D.A',
-    '1 234,50 DZD'. On EXTRAIT le motif numerique plutot que de retirer les
-    lettres caractere par caractere : un sigle monetaire avec un point
-    ('D.A') laisserait sinon un point residuel ('2600.00.') qui invalide
-    tout le nombre -> silencieusement 0 (bug observe sur un vrai bon)."""
+    '1 234,50 DZD', '1.234,56 DA' (milliers en point + decimales en virgule).
+    On EXTRAIT le motif numerique plutot que de retirer les lettres
+    caractere par caractere : un sigle monetaire avec un point ('D.A')
+    laisserait sinon un point residuel ('2600.00.') qui invalide tout le
+    nombre -> silencieusement 0 (bug observe sur un vrai bon).
+
+    Le motif capture TOUS les groupes de separateurs (pas seulement le
+    dernier) : si une seule decimale finale est capturee ('1.234' au lieu
+    de '1.234,56'), le montant ressort ~1000x trop petit sans erreur -
+    aussi silencieux et trompeur que l'ancien bug. On tranche par le
+    separateur le PLUS A DROITE ('.' ou ',') : c'est la decimale (convention
+    FR '1.234,56' comme US '1,234.56') ; tout autre occurrence du meme type
+    est un separateur de milliers, supprimee."""
     if not s:
         return 0.0
     m = _PDF_NUM_RE.search(str(s))
     if not m:
         return 0.0
     num = m.group(0).replace(" ", "")
-    if "," in num and "." not in num:
-        num = num.replace(",", ".")
+    last_dot, last_comma = num.rfind("."), num.rfind(",")
+    if last_dot == -1 and last_comma == -1:
+        pass
+    elif last_comma > last_dot:
+        num = num.replace(".", "").replace(",", ".")
     else:
         num = num.replace(",", "")
     try:

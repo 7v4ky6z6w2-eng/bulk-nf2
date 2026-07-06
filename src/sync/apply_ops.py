@@ -52,22 +52,28 @@ def _apply_barcode(payload: dict, connect_kwargs: dict) -> None:
     """Applique des ajouts/suppressions de codes-barres (EQUIV_CBARRES)."""
     import import_bon_reception as bdr  # type: ignore
 
-    cfg = {
+    # load_config(None) donne la config par defaut complete (dont
+    # code_type_piece, lu par Importer.__init__ -> _load_type_coeffs) : un
+    # dict minimal host/port/database/user/password/charset ne suffit pas,
+    # Importer(con, cfg) leve un KeyError sinon.
+    cfg = bdr.load_config(None)
+    cfg.update({
         "host": "localhost",
         "port": connect_kwargs.get("port", 3050),
         "database": connect_kwargs["database"],
         "user": connect_kwargs.get("user", "SYSDBA"),
         "password": connect_kwargs.get("password", ""),
         "charset": connect_kwargs.get("charset", "WIN1256"),
-    }
+    })
     ops = payload.get("ops") or []
     if not ops:
         raise ApplyError("Aucune opération de code-barres.")
 
-    con = bdr.connect(cfg)
-    imp = bdr.Importer(con, cfg)
-    cur = con.cursor()
+    con = None
     try:
+        con = bdr.connect(cfg)
+        imp = bdr.Importer(con, cfg)
+        cur = con.cursor()
         for op in ops:
             ref = (op.get("ref_art") or "").strip()
             bc = (op.get("barcode") or "").strip()
@@ -80,8 +86,9 @@ def _apply_barcode(payload: dict, connect_kwargs: dict) -> None:
                 imp.add_barcode_equiv(ref, bc)
         con.commit()
     except Exception as exc:  # noqa: BLE001
-        with contextlib.suppress(Exception):
-            con.rollback()
+        if con is not None:
+            with contextlib.suppress(Exception):
+                con.rollback()
         raise ApplyError("Écriture code-barres échouée : %s" % exc) from exc
     finally:
         with contextlib.suppress(Exception):
