@@ -98,6 +98,24 @@ class OrderImportWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class AdoptWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            from app.sync.reconcile import run_adopt
+            report = run_adopt(self.cfg, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -110,6 +128,7 @@ class MainWindow(QMainWindow):
 
         self.stock_worker = None
         self.order_worker = None
+        self.adopt_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
@@ -274,6 +293,20 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
+        adopt_group = QGroupBox("First-time setup: adopt existing products")
+        adopt_layout = QVBoxLayout(adopt_group)
+        adopt_layout.addWidget(QLabel(
+            "Run this ONCE if your store already has products (e.g. made by an\n"
+            "older tool). It matches existing WooCommerce products to your\n"
+            "articles by SKU so stock sync knows their ids. If a plugin hides\n"
+            "products without images, disable it (or set it to frontend-only)\n"
+            "just while this runs, so every product is visible to the API."
+        ))
+        self.adopt_btn = QPushButton("Adopt existing products now")
+        self.adopt_btn.clicked.connect(self._start_adopt)
+        adopt_layout.addWidget(self.adopt_btn)
+        layout.addWidget(adopt_group)
+
         opts_group = QGroupBox("Options")
         opts_form = QFormLayout(opts_group)
         self.stock_zero_missing = QCheckBox(
@@ -324,6 +357,28 @@ class MainWindow(QMainWindow):
     def _stock_sync_failed(self, message):
         self.stock_dry_run_btn.setEnabled(True)
         self.stock_sync_btn.setEnabled(True)
+        self.stock_log_view.appendPlainText(f"FAILED: {message}")
+
+    def _start_adopt(self):
+        if self.adopt_worker and self.adopt_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.stock_log_view.clear()
+        self.adopt_btn.setEnabled(False)
+        self.adopt_worker = AdoptWorker(cfg)
+        self.adopt_worker.line.connect(self.stock_log_view.appendPlainText)
+        self.adopt_worker.finished_ok.connect(self._adopt_done)
+        self.adopt_worker.finished_error.connect(self._adopt_failed)
+        self.adopt_worker.start()
+
+    def _adopt_done(self, report):
+        self.adopt_btn.setEnabled(True)
+        self.stock_log_view.appendPlainText(
+            f"Adopted {report['adopted']} of {report['wc_total']} WooCommerce product(s)."
+        )
+
+    def _adopt_failed(self, message):
+        self.adopt_btn.setEnabled(True)
         self.stock_log_view.appendPlainText(f"FAILED: {message}")
 
     # -- Orders tab -------------------------------------------------------------

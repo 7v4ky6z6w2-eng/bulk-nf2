@@ -48,6 +48,14 @@ def fetch_familles(con):
         }
 
 
+def fetch_all_ref_arts(con):
+    """Every REF_ART in ARTICLE (unfiltered) -- used by adoption to match
+    existing WooCommerce SKUs back to real articles."""
+    cur = con.cursor()
+    cur.execute("SELECT REF_ART FROM ARTICLE")
+    return {str(r[0]).strip() for r in cur.fetchall() if r[0] is not None}
+
+
 def fetch_barcodes(con):
     """Returns {ref_art: [barcode, ...]} ordered by NOEQUIV_CBARRES (insertion
     order), from EQUIV_CBARRES -- the table actually used for barcodes in

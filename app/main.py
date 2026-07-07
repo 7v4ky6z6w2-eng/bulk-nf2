@@ -24,8 +24,18 @@ def main(argv=None):
     parser.add_argument("--sync", action="store_true", help="Run one full product sync pass headlessly and exit")
     parser.add_argument("--stock-sync", action="store_true", help="Run one stock-only sync pass headlessly and exit")
     parser.add_argument("--import-orders", action="store_true", help="Run one order-import pass headlessly and exit")
+    parser.add_argument("--adopt", action="store_true",
+                        help="One-time: match existing WooCommerce products to DB articles by SKU and "
+                             "record their ids (run with any 'hide products' plugin relaxed)")
     parser.add_argument("--dry-run", action="store_true", help="With --sync/--stock-sync/--import-orders: preview only, no writes")
     args = parser.parse_args(argv)
+
+    if args.adopt:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+        from app.sync.reconcile import run_adopt
+        cfg = load_config(args.config)
+        run_adopt(cfg)
+        return 0
 
     if args.sync:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
