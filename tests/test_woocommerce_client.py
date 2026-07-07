@@ -86,6 +86,38 @@ def test_upload_media_success():
     assert media_id == 777
 
 
+def test_fetch_all_products_requests_status_any():
+    # WooCommerce's REST API defaults an un-filtered /products list to
+    # published items only -- must explicitly ask for every status so
+    # draft/pending/private products aren't silently skipped.
+    client = WooCommerceClient("https://example.com", "ck", "cs")
+    calls = []
+
+    def fake_request(method, url, auth=None, timeout=None, **kwargs):
+        calls.append(kwargs.get("params"))
+        return _mock_response([])
+
+    with patch("requests.request", side_effect=fake_request):
+        result = client.fetch_all_products()
+
+    assert result == []
+    assert calls[0]["status"] == "any"
+
+
+def test_fetch_all_products_paginates():
+    client = WooCommerceClient("https://example.com", "ck", "cs")
+    pages = [[{"id": i} for i in range(100)], [{"id": 100}]]
+
+    def fake_request(method, url, auth=None, timeout=None, **kwargs):
+        page = kwargs["params"]["page"]
+        return _mock_response(pages[page - 1])
+
+    with patch("requests.request", side_effect=fake_request):
+        result = client.fetch_all_products()
+
+    assert len(result) == 101
+
+
 def test_request_raises_on_4xx():
     client = WooCommerceClient("https://example.com", "ck", "cs")
 
