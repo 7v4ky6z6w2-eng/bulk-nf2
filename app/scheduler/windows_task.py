@@ -1,15 +1,18 @@
-"""Register/remove a recurring sync via Windows Task Scheduler.
+"""Register/remove recurring jobs via Windows Task Scheduler.
 
 Preferred over an in-process timer: it survives the GUI being closed and
 the machine rebooting, and doesn't hold a process running between runs.
-The GUI's "auto-sync every N hours" toggle calls install()/remove(); the
-task itself just re-invokes this same executable with --sync.
+The GUI's schedule toggles call install()/remove(); each task just
+re-invokes this same executable with the mode's CLI flag (--sync,
+--stock-sync, or --import-orders), each on its own independent schedule.
 """
 
 import platform
 import subprocess
 
-TASK_NAME = "ERP-WooCommerce-Sync"
+TASK_NAME_SYNC = "ERP-WooCommerce-Sync"
+TASK_NAME_STOCK_SYNC = "ERP-WooCommerce-StockSync"
+TASK_NAME_ORDER_IMPORT = "ERP-WooCommerce-OrderImport"
 
 
 def _require_windows():
@@ -18,19 +21,19 @@ def _require_windows():
                             "(uses schtasks).")
 
 
-def install(exe_path, interval_hours, task_name=TASK_NAME):
+def install(exe_path, cli_flag, interval_minutes, task_name):
     """Creates/replaces a Task Scheduler entry that runs
-    '<exe_path> --sync' every 'interval_hours' hours."""
+    '<exe_path> <cli_flag>' every 'interval_minutes' minutes."""
     _require_windows()
-    command = f'"{exe_path}" --sync'
+    command = f'"{exe_path}" {cli_flag}'
     subprocess.run(
         ["schtasks", "/Create", "/TN", task_name, "/TR", command,
-         "/SC", "HOURLY", "/MO", str(int(interval_hours)), "/F"],
+         "/SC", "MINUTE", "/MO", str(int(interval_minutes)), "/F"],
         check=True, capture_output=True, text=True,
     )
 
 
-def remove(task_name=TASK_NAME):
+def remove(task_name):
     _require_windows()
     subprocess.run(
         ["schtasks", "/Delete", "/TN", task_name, "/F"],
@@ -38,7 +41,7 @@ def remove(task_name=TASK_NAME):
     )
 
 
-def is_installed(task_name=TASK_NAME):
+def is_installed(task_name):
     _require_windows()
     result = subprocess.run(
         ["schtasks", "/Query", "/TN", task_name],

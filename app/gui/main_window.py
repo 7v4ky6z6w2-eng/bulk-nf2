@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from app.config import load_config, save_config
 from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
+from app.sync.stock_sync import run_stock_sync
 
 try:
     from app.scheduler import windows_task
@@ -41,6 +42,24 @@ class SyncWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class StockSyncWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_stock_sync(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -51,9 +70,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ERP -> WooCommerce Product Sync")
         self.resize(720, 560)
 
+        self.stock_worker = None
+
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
         tabs.addTab(self._build_sync_tab(), "Sync")
+        tabs.addTab(self._build_stock_sync_tab(), "Stock Sync")
         tabs.addTab(self._build_schedule_tab(), "Schedule")
         self.setCentralWidget(tabs)
 
@@ -207,7 +229,79 @@ class MainWindow(QMainWindow):
         self.sync_btn.setEnabled(True)
         self.log_view.appendPlainText(f"FAILED: {message}")
 
+    # -- Stock Sync tab -------------------------------------------------------
+    def _build_stock_sync_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        opts_group = QGroupBox("Options")
+        opts_form = QFormLayout(opts_group)
+        self.stock_zero_missing = QCheckBox(
+            "Zero out WooCommerce products whose SKU isn't found in the DB at all"
+        )
+        self.stock_zero_missing.setChecked(self.cfg["stock_sync"]["zero_missing_in_db"])
+        opts_form.addRow(self.stock_zero_missing)
+        layout.addWidget(opts_group)
+
+        btn_row = QHBoxLayout()
+        self.stock_dry_run_btn = QPushButton("Dry run (preview only)")
+        self.stock_dry_run_btn.clicked.connect(lambda: self._start_stock_sync(dry_run=True))
+        self.stock_sync_btn = QPushButton("Sync stock now")
+        self.stock_sync_btn.clicked.connect(lambda: self._start_stock_sync(dry_run=False))
+        btn_row.addWidget(self.stock_dry_run_btn)
+        btn_row.addWidget(self.stock_sync_btn)
+        layout.addLayout(btn_row)
+
+        self.stock_log_view = QPlainTextEdit()
+        self.stock_log_view.setReadOnly(True)
+        layout.addWidget(self.stock_log_view)
+        return widget
+
+    def _start_stock_sync(self, dry_run):
+        if self.stock_worker and self.stock_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        cfg["stock_sync"]["zero_missing_in_db"] = self.stock_zero_missing.isChecked()
+        self.stock_log_view.clear()
+        self.stock_dry_run_btn.setEnabled(False)
+        self.stock_sync_btn.setEnabled(False)
+        self.stock_worker = StockSyncWorker(cfg, dry_run)
+        self.stock_worker.line.connect(self.stock_log_view.appendPlainText)
+        self.stock_worker.finished_ok.connect(self._stock_sync_done)
+        self.stock_worker.finished_error.connect(self._stock_sync_failed)
+        self.stock_worker.start()
+
+    def _stock_sync_done(self, report):
+        self.stock_dry_run_btn.setEnabled(True)
+        self.stock_sync_btn.setEnabled(True)
+        if report.get("updates_preview"):
+            self.stock_log_view.appendPlainText("--- Would update ---")
+            for u in report["updates_preview"][:self.PAYLOAD_PREVIEW_LIMIT]:
+                self.stock_log_view.appendPlainText(f"{u['sku']}: stock_quantity={u['stock_quantity']}")
+        if report.get("errors"):
+            self.stock_log_view.appendPlainText(f"Errors: {report['errors']}")
+
+    def _stock_sync_failed(self, message):
+        self.stock_dry_run_btn.setEnabled(True)
+        self.stock_sync_btn.setEnabled(True)
+        self.stock_log_view.appendPlainText(f"FAILED: {message}")
+
     # -- Schedule tab -------------------------------------------------------
+    # Each mode gets its own independent Task Scheduler entry, since they
+    # run at very different cadences (stock changes constantly; full
+    # product/order syncs don't need to run nearly as often).
+    _SCHEDULE_MODES = [
+        # (attr_prefix, group title, cli_flag, task_name, config_section, label)
+        ("schedule", "Product Sync", "--sync", windows_task.TASK_NAME_SYNC if windows_task else None,
+         "schedule", "Every N minutes:"),
+        ("stock_schedule", "Stock Sync", "--stock-sync",
+         windows_task.TASK_NAME_STOCK_SYNC if windows_task else None,
+         "stock_sync", "Every N minutes:"),
+        ("order_schedule", "Order Import", "--import-orders",
+         windows_task.TASK_NAME_ORDER_IMPORT if windows_task else None,
+         "order_import", "Every N minutes:"),
+    ]
+
     def _build_schedule_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -220,18 +314,25 @@ class MainWindow(QMainWindow):
             layout.addStretch()
             return widget
 
-        self.schedule_enabled = QCheckBox("Run sync automatically on a schedule")
-        self.schedule_enabled.setChecked(self.cfg["schedule"]["enabled"])
-        layout.addWidget(self.schedule_enabled)
+        for attr_prefix, title, cli_flag, task_name, section, label in self._SCHEDULE_MODES:
+            group = QGroupBox(title)
+            group_layout = QVBoxLayout(group)
 
-        form = QFormLayout()
-        self.schedule_interval = QSpinBox()
-        self.schedule_interval.setRange(1, 168)
-        self.schedule_interval.setValue(self.cfg["schedule"]["interval_hours"])
-        form.addRow("Every N hours:", self.schedule_interval)
-        layout.addLayout(form)
+            enabled_box = QCheckBox("Enabled")
+            enabled_box.setChecked(self.cfg[section]["enabled"])
+            setattr(self, f"{attr_prefix}_enabled", enabled_box)
+            group_layout.addWidget(enabled_box)
 
-        apply_btn = QPushButton("Apply schedule")
+            form = QFormLayout()
+            interval_box = QSpinBox()
+            interval_box.setRange(1, 10080)  # up to a week, in minutes
+            interval_box.setValue(self.cfg[section]["interval_minutes"])
+            setattr(self, f"{attr_prefix}_interval", interval_box)
+            form.addRow(label, interval_box)
+            group_layout.addLayout(form)
+            layout.addWidget(group)
+
+        apply_btn = QPushButton("Apply schedules")
         apply_btn.clicked.connect(self._apply_schedule)
         layout.addWidget(apply_btn)
         layout.addStretch()
@@ -239,18 +340,23 @@ class MainWindow(QMainWindow):
 
     def _apply_schedule(self):
         cfg = self._collect_config()
-        cfg["schedule"]["enabled"] = self.schedule_enabled.isChecked()
-        cfg["schedule"]["interval_hours"] = self.schedule_interval.value()
+        messages = []
+        for attr_prefix, title, cli_flag, task_name, section, _label in self._SCHEDULE_MODES:
+            enabled = getattr(self, f"{attr_prefix}_enabled").isChecked()
+            interval = getattr(self, f"{attr_prefix}_interval").value()
+            cfg[section]["enabled"] = enabled
+            cfg[section]["interval_minutes"] = interval
+            try:
+                if enabled:
+                    windows_task.install(sys.executable, cli_flag, interval, task_name)
+                    messages.append(f"{title}: scheduled every {interval} min")
+                else:
+                    windows_task.remove(task_name)
+                    messages.append(f"{title}: removed")
+            except Exception as exc:  # noqa: BLE001
+                messages.append(f"{title}: FAILED ({exc})")
         save_config(self.config_path, cfg)
-        try:
-            if cfg["schedule"]["enabled"]:
-                windows_task.install(sys.executable, cfg["schedule"]["interval_hours"])
-                QMessageBox.information(self, "Scheduled", "Automatic sync scheduled.")
-            else:
-                windows_task.remove()
-                QMessageBox.information(self, "Unscheduled", "Automatic sync removed.")
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Scheduling failed", str(exc))
+        QMessageBox.information(self, "Schedules updated", "\n".join(messages))
 
 
 def launch(config_path):

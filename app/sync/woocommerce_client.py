@@ -53,18 +53,19 @@ class WooCommerceClient:
         raise WooCommerceError(f"{method} {path} failed after {MAX_RETRIES} attempts: {last_exc}")
 
     # -- products -----------------------------------------------------------
-    def batch_products(self, create=None, update=None, delete=None):
-        """Runs /products/batch in chunks of <= BATCH_LIMIT total items per
-        call, since WooCommerce enforces that cap. Returns the combined
-        'create'/'update'/'delete' response lists."""
+    def batch_products(self, create=None, update=None, delete=None, chunk_size=BATCH_LIMIT):
+        """Runs /products/batch in chunks of <= chunk_size total items per
+        call (capped at BATCH_LIMIT, WooCommerce's hard limit). Returns the
+        combined 'create'/'update'/'delete' response lists."""
+        chunk_size = min(chunk_size, BATCH_LIMIT)
         create = list(create or [])
         update = list(update or [])
         delete = list(delete or [])
 
         results = {"create": [], "update": [], "delete": []}
         while create or update or delete:
-            chunk_create, create = create[:BATCH_LIMIT], create[BATCH_LIMIT:]
-            remaining = BATCH_LIMIT - len(chunk_create)
+            chunk_create, create = create[:chunk_size], create[chunk_size:]
+            remaining = chunk_size - len(chunk_create)
             chunk_update, update = update[:remaining], update[remaining:]
             remaining -= len(chunk_update)
             chunk_delete, delete = delete[:remaining], delete[remaining:]

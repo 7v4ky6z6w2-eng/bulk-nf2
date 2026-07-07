@@ -12,7 +12,27 @@
     "filter_boutique_visible": true,
     "price_field": "PRIXVENTETTC",
     "promo_price_field": "PRIXTTCPROMO",
-    "sync_images": true
+    "sync_images": true,
+    "name_replacements": {
+      "GM": "Grand Modèle",
+      "PM": "Petit Modèle",
+      "MM": "Moyen Modèle",
+      "STYL": "Stylo",
+      "CAH": "Cahier",
+      "ARB": "Ardoise",
+      "PQT": "Paquet",
+      "RECH": "Recharge",
+      "CLAS": "Classeur",
+      "BIL": "Bille",
+      "PCH": "Pochette",
+      "BTE": "Boîte",
+      "FT": "Format",
+      "COUL": "Couleur",
+      "NR": "Noir",
+      "BLC": "Blanc",
+      "ROU": "Rouge",
+      "BLU": "Bleu"
+    }
   },
   "woocommerce": {
     "site_url": "https://example.com",
@@ -23,9 +43,30 @@
     "username": "",
     "app_password": ""
   },
+  "stock_sync": {
+    "enabled": false,
+    "interval_minutes": 30,
+    "batch_size": 100,
+    "zero_missing_in_db": false
+  },
+  "order_import": {
+    "enabled": false,
+    "client_code": "CF01A00002",
+    "code_depot": "DP00001",
+    "username": "WCSYNC",
+    "on_missing_sku": "skip_line",
+    "status_mapping": {
+      "processing": "PC_VE_COM",
+      "completed": "PC_VE_B"
+    },
+    "transformation": {
+      "PC_VE_B": "PC_VE_COM"
+    },
+    "interval_minutes": 15
+  },
   "state_db_path": "sync_state.sqlite3",
   "schedule": {
     "enabled": false,
-    "interval_hours": 6
+    "interval_minutes": 360
   }
 }

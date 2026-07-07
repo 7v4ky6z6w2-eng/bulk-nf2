@@ -2,8 +2,10 @@
 """Entry point.
 
 No args (or double-clicking the .exe): launches the GUI.
---sync: runs one sync pass headlessly and exits -- this is what the
-Windows Task Scheduler entry created by the GUI actually invokes.
+--sync / --stock-sync / --import-orders: run one pass of the
+corresponding mode headlessly and exit -- these are what the Windows Task
+Scheduler entries created by the GUI actually invoke, each on its own
+schedule.
 """
 
 import argparse
@@ -19,8 +21,10 @@ DRY_RUN_PREVIEW_LIMIT = 15
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ERP -> WooCommerce product sync")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Path to config.json")
-    parser.add_argument("--sync", action="store_true", help="Run one sync pass headlessly and exit")
-    parser.add_argument("--dry-run", action="store_true", help="With --sync: preview only, no writes")
+    parser.add_argument("--sync", action="store_true", help="Run one full product sync pass headlessly and exit")
+    parser.add_argument("--stock-sync", action="store_true", help="Run one stock-only sync pass headlessly and exit")
+    parser.add_argument("--import-orders", action="store_true", help="Run one order-import pass headlessly and exit")
+    parser.add_argument("--dry-run", action="store_true", help="With --sync/--stock-sync/--import-orders: preview only, no writes")
     args = parser.parse_args(argv)
 
     if args.sync:
@@ -41,6 +45,26 @@ def main(argv=None):
         if report["errors"]:
             return 1
         return 0
+
+    if args.stock_sync:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+        from app.sync.stock_sync import run_stock_sync
+        cfg = load_config(args.config)
+        report = run_stock_sync(cfg, dry_run=args.dry_run)
+        if args.dry_run:
+            for u in report["updates_preview"][:DRY_RUN_PREVIEW_LIMIT]:
+                print(f"[update] sku={u['sku']} stock_quantity={u['stock_quantity']}")
+            remaining = len(report["updates_preview"]) - DRY_RUN_PREVIEW_LIMIT
+            if remaining > 0:
+                print(f"... and {remaining} more")
+        return 1 if report["errors"] else 0
+
+    if args.import_orders:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+        from app.sync.order_importer import run_order_import
+        cfg = load_config(args.config)
+        report = run_order_import(cfg, dry_run=args.dry_run)
+        return 1 if report["errors"] else 0
 
     from app.gui.main_window import launch
     return launch(args.config)

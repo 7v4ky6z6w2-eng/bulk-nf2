@@ -96,10 +96,10 @@ DEFAULT_CONFIG = {
     # --- Local state ----------------------------------------------------------
     "state_db_path": "sync_state.sqlite3",
 
-    # --- Scheduling -----------------------------------------------------------
+    # --- Scheduling (full product sync) --------------------------------------
     "schedule": {
         "enabled": False,
-        "interval_hours": 6,
+        "interval_minutes": 360,  # 6 hours
     },
 }
 
