@@ -85,6 +85,26 @@ class WooCommerceClient:
                 results[key].extend(resp.get(key, []))
         return results
 
+    def fetch_all_products(self, fields=("id", "sku", "stock_quantity", "manage_stock")):
+        """Paginated fetch of every product, restricted to 'fields' (keeps
+        the response small -- used by stock_sync to bulk-diff against the
+        DB without pulling full product bodies)."""
+        results = []
+        page = 1
+        while True:
+            rows = self._request(
+                "GET", "/wp-json/wc/v3/products",
+                auth=self.auth,
+                params={"per_page": 100, "page": page, "_fields": ",".join(fields)},
+            )
+            if not rows:
+                break
+            results.extend(rows)
+            if len(rows) < 100:
+                break
+            page += 1
+        return results
+
     # -- categories -----------------------------------------------------------
     def _load_categories(self):
         if self._category_cache is not None:

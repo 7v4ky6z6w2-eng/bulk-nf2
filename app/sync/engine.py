@@ -63,6 +63,11 @@ def build_core_fields(article, cfg):
 
     barcodes = article["barcodes"]
     meta_data = []
+    if article["designation"] and article["designation"] != name:
+        # The cleaned name can drop trailing reference/packaging codes
+        # (see name_cleaner.strip_trailing_codes) -- keep the untouched
+        # ERP text around too, so nothing is lost even if it's not shown.
+        meta_data.append({"key": "_erp_designation", "value": article["designation"]})
     if barcodes:
         fields["global_unique_id"] = barcodes[0]
         meta_data.append({"key": "_barcode", "value": barcodes[0]})

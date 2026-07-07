@@ -71,6 +71,28 @@ DEFAULT_CONFIG = {
         "app_password": "",
     },
 
+    # --- Stock sync (separate, lightweight, more-frequent than full sync) ----
+    "stock_sync": {
+        "enabled": False,
+        "interval_minutes": 30,
+        "batch_size": 100,
+        # If true, WC products whose SKU isn't found in the DB's computed
+        # stock at all get their stock set to 0 (matches the old tool).
+        "zero_missing_in_db": False,
+    },
+
+    # --- Order import (WC orders -> Firebird PIECE/ITEM documents) -----------
+    "order_import": {
+        "enabled": False,
+        "client_code": "",       # CODE_TIERS of the dedicated WC client
+        "code_depot": "",        # default warehouse for stock movements
+        "username": "WCSYNC",    # stamped on each imported PIECE
+        "on_missing_sku": "skip_line",  # skip_line | skip_order
+        "status_mapping": {},    # WC order status -> CODE_TYPE_PIECE
+        "transformation": {},    # target CODE_TYPE_PIECE -> source CODE_TYPE_PIECE
+        "interval_minutes": 15,
+    },
+
     # --- Local state ----------------------------------------------------------
     "state_db_path": "sync_state.sqlite3",
 
