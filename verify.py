@@ -79,6 +79,20 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         all_ok &= check("Firebird connexion locale", False, str(exc))
 
+    # 3 bis. Lecture du stock (procédure SPSTOCKDEP/SPSTOCK ou table dédiée)
+    try:
+        from sync.reader import FirebirdReader
+        reader = FirebirdReader(kw)
+        try:
+            stock = reader.read_stock_snapshot()
+        finally:
+            reader.close()
+        all_ok &= check("Stock lisible", bool(stock),
+                        "%d article(s)" % len(stock) if stock
+                        else "0 ligne — voir les WARNING du log agent")
+    except Exception as exc:  # noqa: BLE001
+        all_ok &= check("Stock lisible", False, str(exc))
+
     # 4. Ping hub
     hub_url = registry.hub_url()
     try:

@@ -25,7 +25,8 @@ SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.s
 COLUMN_MAP = {
     "article": ["ref_art", "designation", "code_barres", "prixventeht",
                 "prixventettc", "prixachatht", "ctrlstock", "qtemin", "qtemax",
-                "codefamille", "datemodif"],
+                "codefamille", "datemodif",
+                "prixttcpromo", "activepromo", "datedebpromo", "datefinpromo"],
     "famille": ["code_fam", "designation"],
     "tiers": ["code_tiers", "raison_sociale", "datemodif"],
     "depot": ["code_depot", "designation"],
@@ -113,6 +114,14 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE pending_ops ADD COLUMN op_uid TEXT")
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ops_uid "
                     "ON pending_ops (op_uid) WHERE op_uid IS NOT NULL")
+
+    # Colonnes promo sur article (bases créées avant l'édition des promos).
+    art_cols = [r[1] for r in con.execute("PRAGMA table_info(article)").fetchall()]
+    if art_cols:
+        for col, decl in (("prixttcpromo", "REAL"), ("activepromo", "INTEGER"),
+                          ("datedebpromo", "TEXT"), ("datefinpromo", "TEXT")):
+            if col not in art_cols:
+                con.execute("ALTER TABLE article ADD COLUMN %s %s" % (col, decl))
 
 
 # --------------------------------------------------------------------------- #
@@ -422,13 +431,53 @@ def pending_ops_recent(con: sqlite3.Connection, limit: int = 50) -> list:
 
 
 def article_search(con: sqlite3.Connection, query: str = "", limit: int = 200) -> list:
-    """Articles correspondant à la recherche, une ligne par (article, magasin)."""
+    """Articles correspondant à la recherche, une ligne par (article, magasin).
+
+    La recherche porte sur la référence, la désignation, le code-barres miroir
+    de l'article ET les codes-barres équivalents (EQUIV_CBARRES — la table que
+    le logiciel scanne réellement).
+
+    Chaque ligne porte aussi `match_key` : le plus petit code-barres équivalent
+    de l'article, ou à défaut sa référence. Deux magasins qui vendent le MÊME
+    produit sous des références différentes partagent ainsi la même clé (via le
+    code-barres commun) et les clients peuvent regrouper leurs lignes en un
+    seul article multi-magasins.
+    """
     q = "%" + (query or "") + "%"
     rows = con.execute(
-        "SELECT ref_art, designation, store_id, prixventeht "
-        "FROM article WHERE ref_art LIKE ? OR designation LIKE ? "
-        "ORDER BY ref_art, store_id LIMIT ?", (q, q, limit)).fetchall()
+        "SELECT a.ref_art, a.designation, a.store_id, a.prixventeht, "
+        "       a.prixventettc, a.prixttcpromo, a.activepromo, "
+        "       a.datedebpromo, a.datefinpromo, "
+        "       COALESCE((SELECT MIN(e.code_barres) FROM equiv_cbarres e "
+        "                  WHERE e.store_id=a.store_id AND e.ref_art=a.ref_art), "
+        "                a.ref_art) AS match_key "
+        "FROM article a "
+        "WHERE a.ref_art LIKE ? OR a.designation LIKE ? OR a.code_barres LIKE ? "
+        "   OR EXISTS (SELECT 1 FROM equiv_cbarres e WHERE e.store_id=a.store_id "
+        "              AND e.ref_art=a.ref_art AND e.code_barres LIKE ?) "
+        "ORDER BY a.ref_art, a.store_id LIMIT ?", (q, q, q, q, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+def refs_for_match_key(con: sqlite3.Connection, match_key: str) -> dict:
+    """Référence de CHAQUE magasin pour une clé de regroupement d'article.
+
+    `match_key` est soit un code-barres équivalent partagé, soit directement
+    une référence (cf. article_search). Le même produit pouvant porter une
+    référence différente selon le magasin, une mise à jour multi-magasins doit
+    cibler la référence propre à chacun."""
+    out: dict = {}
+    rows = con.execute(
+        "SELECT store_id, MIN(ref_art) AS ref_art FROM equiv_cbarres "
+        "WHERE code_barres=? GROUP BY store_id", (match_key,)).fetchall()
+    for r in rows:
+        out[r["store_id"]] = r["ref_art"]
+    rows = con.execute(
+        "SELECT store_id, ref_art FROM article WHERE ref_art=?",
+        (match_key,)).fetchall()
+    for r in rows:
+        out.setdefault(r["store_id"], r["ref_art"])
+    return out
 
 
 def article_barcodes(con: sqlite3.Connection, ref_art: str) -> list:
@@ -455,4 +504,39 @@ def apply_barcode_ops_local(con: sqlite3.Connection, store_id: int, ops: list) -
             con.execute("INSERT OR IGNORE INTO equiv_cbarres "
                         "(store_id, ref_art, code_barres, synced_at) VALUES (?,?,?,?)",
                         (store_id, ref, bc, now_iso()))
+    con.commit()
+
+
+# Champ Firebird (payload price_update) -> colonne du miroir article. Les
+# écritures directes sur un magasin ne bumpent pas forcément ARTICLE.DATEMODIF,
+# donc la synchro incrémentale ne rafraîchirait jamais ces valeurs : on met le
+# miroir à jour ici, immédiatement après l'application de l'op.
+_PRICE_MIRROR_COLS = {
+    "PRIXVENTEHT": "prixventeht",
+    "PRIXVENTETTC": "prixventettc",
+    "PRIXTTCPROMO": "prixttcpromo",
+    "ACTIVEPROMO": "activepromo",
+    "DATEDEBPROMO": "datedebpromo",
+    "DATEFINPROMO": "datefinpromo",
+}
+
+
+def apply_price_changes_local(con: sqlite3.Connection, store_id: int,
+                              changes: list) -> None:
+    """Répercute une op price_update appliquée sur le miroir central (même
+    logique que apply_barcode_ops_local pour les codes-barres)."""
+    for change in changes or []:
+        ref = change.get("ref0")
+        values = change.get("values") or {}
+        sets, params = [], []
+        for field, col in _PRICE_MIRROR_COLS.items():
+            if field in values:
+                sets.append("%s=?" % col)
+                params.append(values[field])
+        if not ref or not sets:
+            continue
+        sets.append("synced_at=?")
+        params += [now_iso(), store_id, ref]
+        con.execute("UPDATE article SET %s WHERE store_id=? AND ref_art=?"
+                    % ", ".join(sets), params)
     con.commit()

@@ -18,9 +18,12 @@ Aucune écriture : connexion en lecture seule.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 import fdb
+
+log = logging.getLogger("reader")
 
 
 # Types Firebird texte (pour repérer les colonnes libellé) : 14=CHAR, 37=VARCHAR.
@@ -139,7 +142,9 @@ class FirebirdReader:
                             ("PRIXVENTEHT", "prixventeht"), ("PRIXVENTETTC", "prixventettc"),
                             ("PRIXACHATHT", "prixachatht"), ("CTRLSTOCK", "ctrlstock"),
                             ("QTEMIN", "qtemin"), ("QTEMAX", "qtemax"),
-                            ("CODEFAMILLE", "codefamille"), ("DATEMODIF", "datemodif")]:
+                            ("CODEFAMILLE", "codefamille"), ("DATEMODIF", "datemodif"),
+                            ("PRIXTTCPROMO", "prixttcpromo"), ("ACTIVEPROMO", "activepromo"),
+                            ("DATEDEBPROMO", "datedebpromo"), ("DATEFINPROMO", "datefinpromo")]:
             add(real, alias)
         sql = "SELECT " + ", ".join(sel) + " FROM ARTICLE"
         params = ()
@@ -149,7 +154,8 @@ class FirebirdReader:
             # implicite chaîne -> timestamp (SQLCODE -303) : il faut un vrai
             # datetime Python, pas la chaîne JSON brute du fichier d'état.
             params = (datetime.fromisoformat(since),)
-        return self._normalize_dates(self._fetch(sql, params), "datemodif")
+        return self._normalize_dates(self._fetch(sql, params), "datemodif",
+                                     "datedebpromo", "datefinpromo")
 
     def read_tiers(self, since: str | None = None) -> list:
         cols = self.columns("TIERS")
@@ -225,12 +231,12 @@ class FirebirdReader:
 
     # -- stock (instantané) ------------------------------------------------
     def read_stock_snapshot(self) -> list:
-        """Instantané du stock par article et dépôt.
+        """Instantané du stock par article (et dépôt si disponible).
 
-        Privilégie une vue/table dénormalisée si présente ; sinon tente la
-        procédure SPSTOCKDEP par article×dépôt. Si rien n'est disponible,
-        renvoie une liste vide (le stock n'apparaît pas au tableau de bord mais
-        la synchro continue).
+        Privilégie une vue/table dénormalisée si présente ; sinon appelle la
+        procédure de stock du logiciel (SPSTOCKDEP / SPSTOCK) en UNE requête.
+        Chaque branche vide est journalisée en WARNING : un stock absent du
+        tableau de bord ne doit plus jamais être silencieux.
         """
         # 1) table/vue dénormalisée éventuelle
         for tbl in ("V_STOCK_DEPOT", "STOCK_DEPOT", "FICHE_STOCK"):
@@ -238,50 +244,104 @@ class FirebirdReader:
                 cols = self.columns(tbl)
                 ref = _candidate(cols, "REF_ART")
                 dep = _candidate(cols, "CODE_DEPOT")
-                qte = _candidate(cols, "QTE_STOCK", "QTE", "STOCK", "QUANTITE")
+                qte = _candidate(cols, "QTE_STOCK", "QTESTOCK", "QTE", "STOCK",
+                                 "QUANTITE")
                 pump = _candidate(cols, "PUMP", "PRIXSTOCK", "PRIX_REVIENT")
                 if ref and dep and qte:
                     sel = ["%s AS ref_art" % ref, "%s AS code_depot" % dep,
                            "%s AS qte_stock" % qte]
                     sel.append(("%s AS pump" % pump) if pump else "NULL AS pump")
                     return self._fetch("SELECT %s FROM %s" % (", ".join(sel), tbl))
-        # 2) procédure stockée SPSTOCKDEP(ref, depot) — appelée par lot
+                log.warning("Stock : table %s présente mais colonnes attendues "
+                            "introuvables (ref=%s, depot=%s, qte=%s) — ignorée.",
+                            tbl, ref, dep, qte)
+        # 2) procédure de stock du logiciel
         return self._stock_via_proc()
 
-    def _stock_via_proc(self) -> list:
-        if not _proc_exists(self.con, "SPSTOCKDEP"):
-            return []
-        refs = [r["ref_art"] for r in self._fetch("SELECT REF_ART AS ref_art FROM ARTICLE")]
-        depots = [r["code_depot"] for r in self._fetch("SELECT CODE_DEPOT AS code_depot FROM DEPOT")] \
-            if self.has_table("DEPOT") else []
-        if not depots:
-            return []
-        out = []
+    # Valeur d'entrée par nom de paramètre pour l'appel « tout le stock » :
+    #   * PREM_REF_ART/CODE_FAM/CODE_DEPOT vides = tous les articles/familles/
+    #     dépôts ;
+    #   * GET_ITEM='0' = une ligne RÉSUMÉ par article (''/NULL ferait sortir la
+    #     procédure sans AUCUNE ligne — vérifié dans le source PSQL réel) ;
+    #   * DATEMIN/DATEMAX NULL = « aujourd'hui » côté procédure.
+    _PROC_INPUT_VALUES = {
+        "PREM_REF_ART": "", "REF_ART": "",
+        "CODE_FAM": "", "CODEFAMILLE": "",
+        "CODE_DEPOT": "", "PARAM_CODE_DEPOT": "",
+        "GET_ITEM": "0",
+        "DATEMIN": None, "DATEMAX": None,
+    }
+
+    def _proc_inputs(self, proc: str) -> list | None:
+        """Noms des paramètres d'ENTRÉE d'une procédure, dans l'ordre d'appel.
+
+        RDB$PARAMETER_TYPE : 0 = entrée, 1 = sortie. Renvoie None si la
+        procédure n'existe pas."""
+        if not _proc_exists(self.con, proc):
+            return None
         cur = self.con.cursor()
-        for ref in refs:
-            for dep in depots:
-                try:
-                    cur.execute("SELECT * FROM SPSTOCKDEP(?, ?)", (ref, dep))
-                    row = cur.fetchone()
-                except fdb.Error:
-                    continue
-                if not row:
-                    continue
-                desc = [d[0].lower() for d in cur.description]
-                rec = {c: v for c, v in zip(desc, row)}
-                qte = rec.get("qte_stock")
-                if qte is None:
-                    qte = rec.get("qte")
-                if qte is None:
-                    qte = rec.get("stock")
-                # Les quantités à 0 sont CONSERVÉES : une rupture de stock doit
-                # rester visible au tableau de bord (0 en rouge), pas disparaître
-                # comme si l'article n'existait plus.
-                if qte is None:
-                    continue
-                out.append({"ref_art": ref, "code_depot": dep,
-                            "qte_stock": qte,
-                            "pump": rec.get("pump") or rec.get("prixstock")})
+        cur.execute(
+            "SELECT TRIM(RDB$PARAMETER_NAME) FROM RDB$PROCEDURE_PARAMETERS "
+            "WHERE TRIM(RDB$PROCEDURE_NAME) = ? AND RDB$PARAMETER_TYPE = 0 "
+            "ORDER BY RDB$PARAMETER_NUMBER", (proc.upper(),))
+        return [r[0] for r in cur.fetchall()]
+
+    def _stock_via_proc(self) -> list:
+        """Stock complet en UN appel à la procédure du logiciel.
+
+        La signature varie selon la version Netfact2/PrimeOffice : sur
+        PrimeOffice2026, SPSTOCKDEP prend 6 entrées (PREM_REF_ART, CODE_FAM,
+        CODE_DEPOT, GET_ITEM, DATEMIN, DATEMAX) et renvoie une ligne par
+        article (REF_ART, QTE_TOT, PUMP…). On introspecte donc les paramètres
+        réels au lieu de supposer une arité fixe — l'ancien appel à 2
+        arguments échouait sur CHAQUE article, silencieusement, d'où un stock
+        éternellement vide au tableau de bord.
+        """
+        proc = None
+        inputs = None
+        for cand in ("SPSTOCKDEP", "SPSTOCK"):
+            inputs = self._proc_inputs(cand)
+            if inputs is not None:
+                proc = cand
+                break
+        if proc is None:
+            log.warning("Stock : aucune procédure SPSTOCKDEP/SPSTOCK et aucune "
+                        "table de stock — le stock restera vide au tableau de bord.")
+            return []
+
+        args = [self._PROC_INPUT_VALUES.get(p.upper()) for p in inputs]
+        sql = "SELECT * FROM %s(%s)" % (proc, ", ".join("?" * len(args))) \
+            if args else "SELECT * FROM %s" % proc
+        try:
+            rows = self._fetch(sql, tuple(args))
+        except fdb.Error as exc:
+            log.warning("Stock : l'appel %s(%s) a échoué : %s", proc,
+                        ", ".join(inputs), exc)
+            return []
+
+        out = []
+        for rec in rows:
+            ref = rec.get("ref_art")
+            if not ref or not str(ref).strip():
+                continue
+            qte = None
+            for k in ("qte_tot", "qte_stock", "qtestock", "qte", "stock"):
+                if rec.get(k) is not None:
+                    qte = rec[k]
+                    break
+            # Les quantités à 0 sont CONSERVÉES : une rupture de stock doit
+            # rester visible au tableau de bord (0 en rouge), pas disparaître
+            # comme si l'article n'existait plus.
+            if qte is None:
+                continue
+            depot = str(rec.get("code_depot") or "").strip() or "(global)"
+            out.append({"ref_art": str(ref).strip(), "code_depot": depot,
+                        "qte_stock": qte,
+                        "pump": rec.get("pump") or rec.get("prixstock")})
+        if not out:
+            log.warning("Stock : %s a renvoyé %d ligne(s) mais aucune "
+                        "exploitable (colonnes quantité inconnues ?).",
+                        proc, len(rows))
         return out
 
     # Types de pièce représentant un MOUVEMENT d'argent réel (encaissement /

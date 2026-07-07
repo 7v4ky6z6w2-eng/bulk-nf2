@@ -25,7 +25,7 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
-from hub.central_db import article_search
+from hub.central_db import article_search, refs_for_match_key
 from hub.ops import submit_op
 
 _VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
@@ -253,13 +253,17 @@ def prix_search():
     results = []
     if q:
         rows = article_search(_db(), q)
-        by_ref: dict = {}
+        # Regroupement par match_key (code-barres partagé, sinon référence) :
+        # le même produit vendu sous des références différentes selon le
+        # magasin apparaît comme UNE ligne multi-magasins.
+        by_key: dict = {}
         for r in rows:
-            ref = r["ref_art"]
-            by_ref.setdefault(ref, {"ref": ref, "designation": r.get("designation"),
-                                    "prices": {}})
-            by_ref[ref]["prices"][r["store_id"]] = r.get("prixventeht")
-        results = list(by_ref.values())
+            key = r.get("match_key") or r["ref_art"]
+            g = by_key.setdefault(key, {"ref": r["ref_art"], "match_key": key,
+                                        "designation": r.get("designation"),
+                                        "prices": {}})
+            g["prices"][r["store_id"]] = r.get("prixventeht")
+        results = list(by_key.values())
     return render_template("mobile/prix_search.html", q=q, results=results,
                            store_names=_store_names())
 
@@ -267,8 +271,9 @@ def prix_search():
 @bp.get("/prix/edit")
 def prix_edit_form():
     ref = request.args.get("ref", "")
+    match_key = request.args.get("match_key", "")
     reg = _registry()
-    return render_template("mobile/prix_edit.html", ref=ref,
+    return render_template("mobile/prix_edit.html", ref=ref, match_key=match_key,
                            stores=reg.stores if reg else [])
 
 
@@ -284,13 +289,20 @@ def prix_apply():
 
     if not ref or new_price <= 0 or not store_ids:
         return render_template("mobile/prix_edit.html", ref=ref,
+                               match_key=(request.form.get("match_key") or ""),
                                stores=reg.stores if reg else [],
                                error="Article, prix (> 0) et au moins un magasin requis.")
 
-    changes = [{"ref0": ref, "values": {"PRIXVENTEHT": new_price, "PRIXVENTETTC": new_price}}]
+    # Le même produit peut porter une référence différente par magasin : on
+    # résout la référence PROPRE à chaque magasin via la clé de regroupement
+    # (code-barres partagé), avec la référence affichée en repli.
+    refs = refs_for_match_key(_db(), (request.form.get("match_key") or "").strip() or ref)
     results = []
     names = _store_names()
     for sid in store_ids:
+        ref_sid = refs.get(sid, ref)
+        changes = [{"ref0": ref_sid,
+                    "values": {"PRIXVENTEHT": new_price, "PRIXVENTETTC": new_price}}]
         res = submit_op(_db(), reg, sid, "price_update", {"changes": changes})
         res["store_id"] = sid
         res["store_name"] = names.get(sid, "Magasin %s" % sid)

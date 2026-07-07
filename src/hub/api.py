@@ -13,7 +13,8 @@ from hub.central_db import (
     store_status, tresorerie_today, tresorerie_caisses, stock_rows, ventes_rows,
     sync_logs, pending_ops_recent, article_search,
 )
-from hub.central_db import article_barcodes, replace_snapshot
+from hub.central_db import article_barcodes, replace_snapshot, \
+    apply_price_changes_local
 from hub.ops import submit_op as _submit_op, OP_TYPES
 
 bp = Blueprint("api", __name__)
@@ -144,7 +145,21 @@ def report_op(op_id: int, action: str):
     data = request.get_json(force=True) or {}
     error_msg = data.get("error_msg")
     status = "applied" if action == "done" else "failed"
-    mark_op(_db(), op_id, status, error_msg)
+    con = _db()
+    mark_op(con, op_id, status, error_msg)
+    # Op de prix appliquée par l'agent (magasin qui était hors ligne) :
+    # répercuter aussi sur le miroir central, comme pour une écriture directe
+    # (l'écriture Firebird de l'agent ne bumpe pas ARTICLE.DATEMODIF).
+    if status == "applied":
+        row = con.execute("SELECT store_id, op_type, payload FROM pending_ops "
+                          "WHERE id=?", (op_id,)).fetchone()
+        if row and row["op_type"] == "price_update":
+            try:
+                payload = json.loads(row["payload"] or "{}")
+                apply_price_changes_local(con, row["store_id"],
+                                          payload.get("changes") or [])
+            except (ValueError, TypeError):
+                pass
     # Déclenche la notification asynchrone (si notifier configuré)
     notifier = current_app.config.get("notifier")
     if notifier:

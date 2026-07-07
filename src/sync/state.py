@@ -14,12 +14,22 @@ from datetime import datetime, timezone
 DEFAULT_WATERMARK = "1900-01-01T00:00:00"
 MAX_APPLIED_OPS = 2000  # borne la taille du fichier (purge des plus anciens)
 
+# Version du schéma de synchro. À chaque fois qu'une table incrémentale gagne
+# de NOUVELLES colonnes (ex. promos sur article), les lignes déjà synchronisées
+# ne seraient jamais re-poussées (leur DATEMODIF n'a pas bougé) : on liste ici
+# les watermarks à réinitialiser pour forcer UNE resynchronisation complète de
+# ces tables au premier cycle après mise à jour de l'agent.
+STATE_VERSION = 2
+_RESYNC_ON_UPGRADE = {
+    2: ["article"],   # v2 : colonnes promo ajoutées au miroir article
+}
+
 
 class StateManager:
     def __init__(self, path: str):
         self.path = path
         self.data = {"store_id": None, "watermarks": {}, "last_sync_ok": None,
-                     "applied_ops": []}
+                     "applied_ops": [], "version": STATE_VERSION}
         self.load()
 
     def load(self) -> None:
@@ -31,6 +41,12 @@ class StateManager:
                 pass
         self.data.setdefault("watermarks", {})
         self.data.setdefault("applied_ops", [])
+        old = int(self.data.get("version") or 1)
+        if old < STATE_VERSION:
+            for v in range(old + 1, STATE_VERSION + 1):
+                for table in _RESYNC_ON_UPGRADE.get(v, []):
+                    self.data["watermarks"].pop(table, None)
+            self.data["version"] = STATE_VERSION
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(self.path)) or ".", exist_ok=True)

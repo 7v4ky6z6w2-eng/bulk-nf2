@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS article (
     qtemax        REAL,
     codefamille   TEXT,
     datemodif     TEXT,
+    prixttcpromo  REAL,
+    activepromo   INTEGER,
+    datedebpromo  TEXT,
+    datefinpromo  TEXT,
     synced_at     TEXT    NOT NULL,
     UNIQUE (store_id, ref_art)
 );

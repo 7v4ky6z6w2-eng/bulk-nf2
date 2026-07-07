@@ -9,8 +9,8 @@ from __future__ import annotations
 import sqlite3
 
 from hub.central_db import (
-    enqueue_op, apply_barcode_ops_local, completed_op_result, record_completed_op,
-    log_immediate_op,
+    enqueue_op, apply_barcode_ops_local, apply_price_changes_local,
+    completed_op_result, record_completed_op, log_immediate_op,
 )
 from hub.write_back import is_reachable, write_bdr, write_prices, write_barcode_ops, WriteError
 
@@ -52,8 +52,13 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
                 write_bdr(kw, payload.get("config") or {}, payload.get("lines") or [])
                 n = len(payload.get("lines") or [])
             elif op_type == "price_update":
-                write_prices(kw, payload.get("changes") or [])
-                n = len(payload.get("changes") or [])
+                changes = payload.get("changes") or []
+                write_prices(kw, changes)
+                # Rafraîchir le miroir tout de suite : l'écriture directe ne
+                # bumpe pas ARTICLE.DATEMODIF, la synchro incrémentale ne
+                # rattraperait donc jamais ces nouvelles valeurs.
+                apply_price_changes_local(con, store_id, changes)
+                n = len(changes)
             else:  # barcode_ops
                 bops = payload.get("ops") or []
                 write_barcode_ops(kw, bops)

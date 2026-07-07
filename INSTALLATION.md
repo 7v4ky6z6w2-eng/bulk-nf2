@@ -377,6 +377,23 @@ Scénarios à valider une fois :
 
 ---
 
+## Mettre à jour une installation existante
+
+Après un `git pull` (ou re-téléchargement) de la branche sur le hub :
+
+1. **Hub** : redémarrez le serveur (`net stop PrimeNFHub && net start PrimeNFHub`,
+   ou relancez `python hub_server.py …`). Les migrations de la base centrale
+   sont automatiques au démarrage.
+2. **Exécutables** : relancez `install_windows\build_windows.bat`, puis :
+   - remplacez `C:\PrimeNFAgent\PrimeNFAgent.exe` sur **chaque** poste
+     (y compris le hub s'il a son agent planifié) ;
+   - remplacez `PrimeNFHub.exe` partout où l'application bureau est utilisée.
+3. Test rapide : `python verify.py --store-id 1` sur le hub (la ligne
+   « Stock lisible » doit être OK), puis un cycle agent
+   (`PrimeNFAgent.exe --store-id N --once`) par magasin.
+
+---
+
 ## Dépannage rapide
 
 | Symptôme | Cause probable | Solution |

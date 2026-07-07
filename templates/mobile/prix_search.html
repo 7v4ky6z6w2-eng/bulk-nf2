@@ -14,7 +14,7 @@
 
 <div class="list-group">
   {% for item in results %}
-  <a href="{{ url_for('mobile.prix_edit_form', ref=item.ref) }}"
+  <a href="{{ url_for('mobile.prix_edit_form', ref=item.ref, match_key=item.match_key) }}"
      class="list-group-item list-group-item-action bg-dark m-card">
     <div class="d-flex justify-content-between">
       <strong>{{ item.ref }}</strong>
