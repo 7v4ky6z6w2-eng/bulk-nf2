@@ -1,7 +1,7 @@
 """PySide6 GUI: configure the tool, run a sync, and toggle scheduling.
 
-Kept intentionally simple (three tabs) -- this is a config/preview/log tool
-for one person, not a product.
+Kept intentionally simple -- this is a config/preview/log tool for one
+person, not a product.
 """
 
 import platform
@@ -16,12 +16,32 @@ from PySide6.QtWidgets import (
 
 from app.config import load_config, save_config
 from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
+from app.sync.order_importer import run_order_import
 from app.sync.stock_sync import run_stock_sync
 
 try:
     from app.scheduler import windows_task
 except Exception:  # pragma: no cover - only relevant off-Windows
     windows_task = None
+
+
+def _parse_mapping_text(text):
+    """Parses "key=value" lines (one per row) into a dict, ignoring blank
+    lines and lines without an '='."""
+    result = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if key and value:
+            result[key] = value
+    return result
+
+
+def _format_mapping_text(mapping):
+    return "\n".join(f"{k}={v}" for k, v in (mapping or {}).items())
 
 
 class SyncWorker(QThread):
@@ -60,6 +80,24 @@ class StockSyncWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class OrderImportWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_order_import(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -71,11 +109,13 @@ class MainWindow(QMainWindow):
         self.resize(720, 560)
 
         self.stock_worker = None
+        self.order_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
         tabs.addTab(self._build_sync_tab(), "Sync")
         tabs.addTab(self._build_stock_sync_tab(), "Stock Sync")
+        tabs.addTab(self._build_orders_tab(), "Orders")
         tabs.addTab(self._build_schedule_tab(), "Schedule")
         self.setCentralWidget(tabs)
 
@@ -285,6 +325,93 @@ class MainWindow(QMainWindow):
         self.stock_dry_run_btn.setEnabled(True)
         self.stock_sync_btn.setEnabled(True)
         self.stock_log_view.appendPlainText(f"FAILED: {message}")
+
+    # -- Orders tab -------------------------------------------------------------
+    def _build_orders_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        oi_cfg = self.cfg["order_import"]
+
+        cfg_group = QGroupBox("WooCommerce order -> Firebird document mapping")
+        form = QFormLayout(cfg_group)
+        self.order_client_code = QLineEdit(oi_cfg["client_code"])
+        form.addRow("Client CODE_TIERS:", self.order_client_code)
+        self.order_code_depot = QLineEdit(oi_cfg["code_depot"])
+        form.addRow("Default CODE_DEPOT:", self.order_code_depot)
+        self.order_username = QLineEdit(oi_cfg["username"])
+        form.addRow("Username stamped on PIECE:", self.order_username)
+        self.order_on_missing_sku = QComboBox()
+        self.order_on_missing_sku.addItems(["skip_line", "skip_order"])
+        self.order_on_missing_sku.setCurrentText(oi_cfg["on_missing_sku"])
+        form.addRow("On missing SKU:", self.order_on_missing_sku)
+        layout.addWidget(cfg_group)
+
+        mapping_group = QGroupBox("Status mapping (one 'wc_status=CODE_TYPE_PIECE' per line)")
+        mapping_layout = QVBoxLayout(mapping_group)
+        self.order_status_mapping = QPlainTextEdit(_format_mapping_text(oi_cfg["status_mapping"]))
+        self.order_status_mapping.setMaximumHeight(80)
+        mapping_layout.addWidget(self.order_status_mapping)
+        layout.addWidget(mapping_group)
+
+        transform_group = QGroupBox("Transformation linking (one 'TARGET_TYPE=SOURCE_TYPE' per line)")
+        transform_layout = QVBoxLayout(transform_group)
+        self.order_transformation = QPlainTextEdit(_format_mapping_text(oi_cfg["transformation"]))
+        self.order_transformation.setMaximumHeight(60)
+        transform_layout.addWidget(self.order_transformation)
+        layout.addWidget(transform_group)
+
+        btn_row = QHBoxLayout()
+        self.order_dry_run_btn = QPushButton("Dry run (preview only)")
+        self.order_dry_run_btn.clicked.connect(lambda: self._start_order_import(dry_run=True))
+        self.order_import_btn = QPushButton("Import orders now")
+        self.order_import_btn.clicked.connect(lambda: self._start_order_import(dry_run=False))
+        btn_row.addWidget(self.order_dry_run_btn)
+        btn_row.addWidget(self.order_import_btn)
+        layout.addLayout(btn_row)
+
+        self.order_log_view = QPlainTextEdit()
+        self.order_log_view.setReadOnly(True)
+        layout.addWidget(self.order_log_view)
+        return widget
+
+    def _collect_order_import_config(self):
+        oi_cfg = self.cfg["order_import"]
+        oi_cfg["client_code"] = self.order_client_code.text()
+        oi_cfg["code_depot"] = self.order_code_depot.text()
+        oi_cfg["username"] = self.order_username.text()
+        oi_cfg["on_missing_sku"] = self.order_on_missing_sku.currentText()
+        oi_cfg["status_mapping"] = _parse_mapping_text(self.order_status_mapping.toPlainText())
+        oi_cfg["transformation"] = _parse_mapping_text(self.order_transformation.toPlainText())
+        return oi_cfg
+
+    def _start_order_import(self, dry_run):
+        if self.order_worker and self.order_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self._collect_order_import_config()
+        self.order_log_view.clear()
+        self.order_dry_run_btn.setEnabled(False)
+        self.order_import_btn.setEnabled(False)
+        self.order_worker = OrderImportWorker(cfg, dry_run)
+        self.order_worker.line.connect(self.order_log_view.appendPlainText)
+        self.order_worker.finished_ok.connect(self._order_import_done)
+        self.order_worker.finished_error.connect(self._order_import_failed)
+        self.order_worker.start()
+
+    def _order_import_done(self, report):
+        self.order_dry_run_btn.setEnabled(True)
+        self.order_import_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(
+            f"created={len(report['created'])} skipped={len(report['skipped'])} "
+            f"errors={len(report['errors'])}"
+        )
+        if report.get("errors"):
+            self.order_log_view.appendPlainText(f"Errors: {report['errors']}")
+
+    def _order_import_failed(self, message):
+        self.order_dry_run_btn.setEnabled(True)
+        self.order_import_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"FAILED: {message}")
 
     # -- Schedule tab -------------------------------------------------------
     # Each mode gets its own independent Task Scheduler entry, since they

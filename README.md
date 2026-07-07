@@ -1,9 +1,17 @@
 # bulk-nf2
 
-Desktop tool that syncs products from a Firebird-based ERP database (the
-`ARTICLE` table) into a WooCommerce store, with a GUI and an optional
-recurring schedule. See `/root/.claude/plans/i-need-a-tool-quizzical-lark.md`
-(or ask for a copy) for the full design context and rationale.
+Desktop tool with three integrated capabilities between a Firebird-based
+ERP database and a WooCommerce store, with a GUI and independently
+schedulable recurring jobs for each. See
+`/root/.claude/plans/i-need-a-tool-quizzical-lark.md` (or ask for a copy)
+for the full design context and rationale.
+
+1. **Product sync** -- `ARTICLE` rows -> WooCommerce products (create/update,
+   name cleaning, category derivation, promo pricing, live stock).
+2. **Stock sync** -- a separate, lightweight, more-frequent pass that only
+   updates `stock_quantity`/`manage_stock` on already-synced products.
+3. **Order import** -- WooCommerce orders -> Firebird `PIECE`/`ITEM`
+   documents (e.g. Bon de Livraison), idempotent per order.
 
 ## Setup (development)
 
@@ -15,8 +23,10 @@ cp config.example.json config.json   # then edit with your real values
 ## Running
 
 - GUI: `python -m app.main --config config.json`
-- One headless sync: `python -m app.main --sync --config config.json`
-- Preview without writing anything: `python -m app.main --sync --dry-run --config config.json`
+- One headless product sync: `python -m app.main --sync --config config.json`
+- One headless stock-only sync: `python -m app.main --stock-sync --config config.json`
+- One headless order import: `python -m app.main --import-orders --config config.json`
+- Preview without writing anything: add `--dry-run` to any of the three above.
 
 ## Before wiring up the real database
 
