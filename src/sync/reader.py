@@ -259,18 +259,25 @@ class FirebirdReader:
         return self._stock_via_proc()
 
     # Valeur d'entrée par nom de paramètre pour l'appel « tout le stock » :
-    #   * PREM_REF_ART/CODE_FAM/CODE_DEPOT vides = tous les articles/familles/
-    #     dépôts ;
+    #   * PREM_REF_ART vide = tous les articles (le source gère '' ET NULL via
+    #     coalesce) ;
+    #   * CODE_FAM doit être NULL, PAS '' : la procédure AllF (jointure des
+    #     familles) ne renvoie TOUTES les familles que si son entrée est NULL —
+    #     avec '' elle cherche la famille de code '' (inexistante) et ne
+    #     renvoie rien, ce qui vide tout le stock (vérifié dans le source
+    #     PSQL réel de la base de l'utilisateur) ;
     #   * GET_ITEM='0' = une ligne RÉSUMÉ par article (''/NULL ferait sortir la
-    #     procédure sans AUCUNE ligne — vérifié dans le source PSQL réel) ;
+    #     procédure sans AUCUNE ligne — même source) ;
     #   * DATEMIN/DATEMAX NULL = « aujourd'hui » côté procédure.
+    # CODE_DEPOT : convention inconnue (''/NULL) — les deux sont tentées, voir
+    # _stock_via_proc.
     _PROC_INPUT_VALUES = {
         "PREM_REF_ART": "", "REF_ART": "",
-        "CODE_FAM": "", "CODEFAMILLE": "",
-        "CODE_DEPOT": "", "PARAM_CODE_DEPOT": "",
+        "CODE_FAM": None, "CODEFAMILLE": None,
         "GET_ITEM": "0",
         "DATEMIN": None, "DATEMAX": None,
     }
+    _DEPOT_PARAMS = ("CODE_DEPOT", "PARAM_CODE_DEPOT")
 
     def _proc_inputs(self, proc: str) -> list | None:
         """Noms des paramètres d'ENTRÉE d'une procédure, dans l'ordre d'appel.
@@ -296,20 +303,41 @@ class FirebirdReader:
         réels au lieu de supposer une arité fixe — l'ancien appel à 2
         arguments échouait sur CHAQUE article, silencieusement, d'où un stock
         éternellement vide au tableau de bord.
+
+        La convention ''/NULL du paramètre dépôt n'étant pas connue pour
+        toutes les versions, chaque procédure est tentée avec dépôt='' PUIS
+        dépôt=NULL ; SPSTOCK (sans dépôt) sert de dernier recours. Le premier
+        essai qui produit des lignes exploitables gagne.
         """
-        proc = None
-        inputs = None
+        tried = []
         for cand in ("SPSTOCKDEP", "SPSTOCK"):
             inputs = self._proc_inputs(cand)
-            if inputs is not None:
-                proc = cand
-                break
-        if proc is None:
+            if inputs is None:
+                continue
+            has_depot = any(p.upper() in self._DEPOT_PARAMS for p in inputs)
+            for depot_val in ("", None) if has_depot else (None,):
+                out = self._call_stock_proc(cand, inputs, depot_val)
+                if out:
+                    return out
+                tried.append("%s (dépôt=%r)" % (cand, depot_val)
+                             if has_depot else cand)
+        if tried:
+            log.warning("Stock : aucune ligne exploitable — essais : %s. "
+                        "Le stock restera vide au tableau de bord.",
+                        " ; ".join(tried))
+        else:
             log.warning("Stock : aucune procédure SPSTOCKDEP/SPSTOCK et aucune "
                         "table de stock — le stock restera vide au tableau de bord.")
-            return []
+        return []
 
-        args = [self._PROC_INPUT_VALUES.get(p.upper()) for p in inputs]
+    def _call_stock_proc(self, proc: str, inputs: list, depot_val) -> list:
+        args = []
+        for p in inputs:
+            name = p.upper()
+            if name in self._DEPOT_PARAMS:
+                args.append(depot_val)
+            else:
+                args.append(self._PROC_INPUT_VALUES.get(name))
         sql = "SELECT * FROM %s(%s)" % (proc, ", ".join("?" * len(args))) \
             if args else "SELECT * FROM %s" % proc
         try:
@@ -338,10 +366,6 @@ class FirebirdReader:
             out.append({"ref_art": str(ref).strip(), "code_depot": depot,
                         "qte_stock": qte,
                         "pump": rec.get("pump") or rec.get("prixstock")})
-        if not out:
-            log.warning("Stock : %s a renvoyé %d ligne(s) mais aucune "
-                        "exploitable (colonnes quantité inconnues ?).",
-                        proc, len(rows))
         return out
 
     # Types de pièce représentant un MOUVEMENT d'argent réel (encaissement /

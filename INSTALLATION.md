@@ -127,13 +127,31 @@ python hub_server.py --db central.db --port 5000
 ```
 Ouvrez ensuite `http://localhost:5000` dans le navigateur → le tableau de bord apparaît.
 
-Pour qu'il tourne **en permanence** comme service Windows (recommandé) :
+**⚠️ Sans ce qui suit, le hub s'arrête dès que vous fermez la fenêtre `cmd` ou
+que le poste redémarre** — c'est pourquoi le lien du tableau de bord ne
+répond plus tant que vous n'avez pas retapé la commande à la main. Choisissez
+UNE des deux options pour que le hub démarre **tout seul** :
+
+**Option A — tâche planifiée (le plus simple, aucun outil à télécharger) :**
+```bat
+install_windows\install_hub_task.bat
+```
+(en Administrateur). Le hub démarre automatiquement à chaque ouverture de
+session Windows, dans une fenêtre réduite (ne pas la fermer). Pratique si le
+poste ouvre sa session automatiquement au démarrage — cas habituel d'un poste
+caisse toujours allumé.
+
+**Option B — service Windows via NSSM (démarre même sans session ouverte) :**
 1. Téléchargez `nssm.exe` sur https://nssm.cc et placez-le dans `install_windows\`.
 2. Lancez (en Administrateur) :
    ```bat
    install_windows\install_hub.bat
    ```
-   Le service `PrimeNFHub` démarre désormais automatiquement au boot.
+   Le service `PrimeNFHub` démarre désormais automatiquement au boot, même
+   avant toute ouverture de session.
+
+Dans les deux cas, vérifiez après un redémarrage du PC que
+`http://localhost:5000` répond **sans** avoir rien tapé dans `cmd`.
 
 ### 2.7 — Créer le bot Telegram (notifications téléphone)
 
