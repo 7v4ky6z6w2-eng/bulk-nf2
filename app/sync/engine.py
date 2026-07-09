@@ -142,7 +142,13 @@ def run_sync(cfg, dry_run=False, log_fn=None):
         # ref_art -> (article, image_source) for post-batch state updates
         pending = {}
 
-        for article in articles:
+        for i, article in enumerate(articles, 1):
+            # Large catalogs can take minutes overall (category lookups,
+            # image uploads); without this a long silent gap can look like
+            # the sync hung even though it's working.
+            if i == 1 or i % 250 == 0 or i == len(articles):
+                emit(f"Processing article {i}/{len(articles)}...")
+
             ref = article["ref_art"]
             seen_refs.add(ref)
             core = build_core_fields(article, cfg)
@@ -192,8 +198,12 @@ def run_sync(cfg, dry_run=False, log_fn=None):
                 to_create.append(payload)
 
         if not dry_run and (to_create or to_update):
+            def _batch_progress(chunk_num, total_chunks, item_count):
+                emit(f"Sending batch {chunk_num}/{total_chunks} ({item_count} item(s))...")
+
             try:
-                results = wc_client.batch_products(create=to_create, update=to_update)
+                results = wc_client.batch_products(create=to_create, update=to_update,
+                                                     progress_fn=_batch_progress)
             except WooCommerceError as exc:
                 emit(f"Batch call failed: {exc}")
                 for payload in to_create + to_update:

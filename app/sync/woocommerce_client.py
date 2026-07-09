@@ -15,6 +15,11 @@ log = logging.getLogger(__name__)
 BATCH_LIMIT = 100  # WooCommerce's hard cap per /products/batch call
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
+# Creating/updating up to 100 full products (category assignment, meta,
+# other plugins' save_post hooks) can legitimately take much longer than a
+# simple GET, especially on shared hosting -- give batch calls more room
+# than the default request timeout before giving up.
+BATCH_TIMEOUT_SECONDS = 120
 
 
 class WooCommerceError(Exception):
@@ -30,13 +35,13 @@ class WooCommerceClient:
         self.timeout = timeout
         self._category_cache = None
 
-    def _request(self, method, path, auth, **kwargs):
+    def _request(self, method, path, auth, timeout=None, **kwargs):
         url = f"{self.base_url}{path}"
         last_exc = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 resp = requests.request(
-                    method, url, auth=auth, timeout=self.timeout, **kwargs
+                    method, url, auth=auth, timeout=timeout or self.timeout, **kwargs
                 )
                 if resp.status_code >= 500 and attempt < MAX_RETRIES:
                     time.sleep(RETRY_BACKOFF_SECONDS * attempt)
@@ -53,17 +58,34 @@ class WooCommerceClient:
         raise WooCommerceError(f"{method} {path} failed after {MAX_RETRIES} attempts: {last_exc}")
 
     # -- products -----------------------------------------------------------
-    def batch_products(self, create=None, update=None, delete=None, chunk_size=BATCH_LIMIT):
+    def batch_products(self, create=None, update=None, delete=None,
+                        chunk_size=BATCH_LIMIT, progress_fn=None):
         """Runs /products/batch in chunks of <= chunk_size total items per
         call (capped at BATCH_LIMIT, WooCommerce's hard limit). Returns the
-        combined 'create'/'update'/'delete' response lists."""
+        combined 'create'/'update'/'delete' response lists.
+
+        A chunk that fails outright (timeout, network error, 4xx/5xx after
+        retries) does NOT abort the run: its items are recorded as errors
+        in the returned results (same {"sku", "error"} shape a per-item WC
+        validation error has), and the next chunk is still attempted. A
+        large sync shouldn't lose every already-succeeded chunk because one
+        transient failure happened partway through.
+
+        'progress_fn(chunk_num, total_chunks, item_count)' is called right
+        before each chunk is sent, if provided -- lets the caller show
+        progress during what can otherwise be several silent minutes."""
         chunk_size = min(chunk_size, BATCH_LIMIT)
         create = list(create or [])
         update = list(update or [])
         delete = list(delete or [])
 
+        total_items = len(create) + len(update) + len(delete)
+        total_chunks = -(-total_items // chunk_size) if total_items else 0
+
         results = {"create": [], "update": [], "delete": []}
+        chunk_num = 0
         while create or update or delete:
+            chunk_num += 1
             chunk_create, create = create[:chunk_size], create[chunk_size:]
             remaining = chunk_size - len(chunk_create)
             chunk_update, update = update[:remaining], update[remaining:]
@@ -78,12 +100,24 @@ class WooCommerceClient:
             if chunk_delete:
                 payload["delete"] = chunk_delete
 
-            resp = self._request(
-                "POST", "/wp-json/wc/v3/products/batch",
-                auth=self.auth, json=payload,
-            )
-            for key in ("create", "update", "delete"):
-                results[key].extend(resp.get(key, []))
+            if progress_fn:
+                progress_fn(chunk_num, total_chunks,
+                            len(chunk_create) + len(chunk_update) + len(chunk_delete))
+
+            try:
+                resp = self._request(
+                    "POST", "/wp-json/wc/v3/products/batch",
+                    auth=self.auth, json=payload, timeout=BATCH_TIMEOUT_SECONDS,
+                )
+                for key in ("create", "update", "delete"):
+                    results[key].extend(resp.get(key, []))
+            except WooCommerceError as exc:
+                log.error("Batch chunk %d/%d failed, marking %d item(s) as errored: %s",
+                          chunk_num, total_chunks,
+                          len(chunk_create) + len(chunk_update) + len(chunk_delete), exc)
+                for key, chunk in (("create", chunk_create), ("update", chunk_update)):
+                    for item in chunk:
+                        results[key].append({"sku": item.get("sku"), "error": str(exc)})
         return results
 
     def fetch_all_products(self, fields=("id", "sku", "stock_quantity", "manage_stock")):

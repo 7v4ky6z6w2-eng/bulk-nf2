@@ -27,7 +27,7 @@ class FakeWooCommerceClient:
         self.kwargs = kwargs
         self.batch_calls = []
 
-    def batch_products(self, create=None, update=None, delete=None, chunk_size=100):
+    def batch_products(self, create=None, update=None, delete=None, chunk_size=100, progress_fn=None):
         self.batch_calls.append(update or [])
         return {"create": [], "update": [{"id": u["id"]} for u in (update or [])], "delete": []}
 

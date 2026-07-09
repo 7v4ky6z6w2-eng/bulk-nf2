@@ -172,7 +172,7 @@ class FakeWooCommerceClient:
     def find_or_create_category(self, name):
         return 1
 
-    def batch_products(self, create=None, update=None, delete=None):
+    def batch_products(self, create=None, update=None, delete=None, chunk_size=100, progress_fn=None):
         create = create or []
         update = update or []
         next_id = 1000

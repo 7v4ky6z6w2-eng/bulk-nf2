@@ -89,8 +89,12 @@ def run_stock_sync(cfg, dry_run=False, log_fn=None):
                 consumer_key=wc_cfg["consumer_key"],
                 consumer_secret=wc_cfg["consumer_secret"],
             )
+            def _batch_progress(chunk_num, total_chunks, item_count):
+                emit(f"Sending batch {chunk_num}/{total_chunks} ({item_count} item(s))...")
+
             try:
-                result = wc_client.batch_products(update=batch, chunk_size=stock_cfg["batch_size"])
+                result = wc_client.batch_products(update=batch, chunk_size=stock_cfg["batch_size"],
+                                                    progress_fn=_batch_progress)
                 updated_ids = {row.get("id") for row in result["update"] if not row.get("error")}
                 confirmed = [(ref, qty) for ref, wc_id, qty in updates if wc_id in updated_ids]
                 store.set_last_stocks(confirmed, now)
