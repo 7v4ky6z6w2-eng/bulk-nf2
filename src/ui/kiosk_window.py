@@ -132,16 +132,31 @@ class KioskWindow:
         self._photo = None            # ImageTk.PhotoImage courant
         self._photo_state = "none"    # "none" | "loading" | "ok"
 
-        # Logo Prime Office (PNG rendu depuis le SVG). Repli « PO » si absent.
+        # Logo Prime Office. On charge d'abord la copie embarquée (base64,
+        # indépendante de l'empaquetage), puis à défaut le fichier assets/.
+        # Repli « PO » si Pillow est absent.
         self._logo_src = None
         self._badge_cache: dict = {}
+        logo_source = "aucune"
         if _HAS_PIL:
-            lp = _find_asset("logo.png")
-            if lp:
-                try:
-                    self._logo_src = Image.open(lp).convert("RGBA")
-                except Exception:  # noqa: BLE001
-                    self._logo_src = None
+            try:
+                import base64
+                import io
+                from ui.logo_asset import LOGO_PNG_B64
+                data = base64.b64decode(LOGO_PNG_B64)
+                self._logo_src = Image.open(io.BytesIO(data)).convert("RGBA")
+                logo_source = "embarqué"
+            except Exception:  # noqa: BLE001 — repli sur le fichier
+                self._logo_src = None
+            if self._logo_src is None:
+                lp = _find_asset("logo.png")
+                if lp:
+                    try:
+                        self._logo_src = Image.open(lp).convert("RGBA")
+                        logo_source = f"fichier {lp}"
+                    except Exception:  # noqa: BLE001
+                        self._logo_src = None
+        _cfgmod.log(f"Logo — Pillow={_HAS_PIL}, source={logo_source}")
 
         # Capturer les erreurs de rappel Tkinter (sinon avalées en mode
         # --windowed : fenêtre qui reste noire sans message d'erreur).
