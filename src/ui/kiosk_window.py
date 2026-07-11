@@ -29,8 +29,10 @@ import tkinter.font as tkfont
 try:
     from PIL import Image, ImageTk
     _HAS_PIL = True
-except Exception:  # noqa: BLE001 — Pillow absent : on affiche sans photo
+    _PIL_ERR = ""
+except Exception as _pil_exc:  # noqa: BLE001 — Pillow absent : on affiche sans photo
     _HAS_PIL = False
+    _PIL_ERR = repr(_pil_exc)
 
 import i18n
 import config as _cfgmod
@@ -156,7 +158,8 @@ class KioskWindow:
                         logo_source = f"fichier {lp}"
                     except Exception:  # noqa: BLE001
                         self._logo_src = None
-        _cfgmod.log(f"Logo — Pillow={_HAS_PIL}, source={logo_source}")
+        _cfgmod.log(f"Logo — Pillow={_HAS_PIL}, source={logo_source}"
+                    + (f", erreur PIL={_PIL_ERR}" if not _HAS_PIL else ""))
 
         # Capturer les erreurs de rappel Tkinter (sinon avalées en mode
         # --windowed : fenêtre qui reste noire sans message d'erreur).
