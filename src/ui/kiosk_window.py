@@ -313,12 +313,16 @@ class KioskWindow:
         """Récupère la photo WooCommerce (par SKU) dans un thread."""
         woo = self._woo
         if woo is None or not getattr(woo, "configured", False):
+            _cfgmod.log("PHOTO: fetch ignoré (WooCommerce non configuré)")
             return
+
+        _cfgmod.log(f"PHOTO: lancement fetch pour REF_ART={ref_art}")
 
         def _work():
             try:
                 path = woo.get_image(ref_art)
-            except Exception:  # noqa: BLE001 — jamais bruyant
+            except Exception as exc:  # noqa: BLE001 — jamais bruyant
+                _cfgmod.log(f"PHOTO: exception fetch : {exc!r}")
                 path = None
             self._queue.put(("image", scan_id, path))
 

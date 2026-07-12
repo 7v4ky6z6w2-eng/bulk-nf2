@@ -12,7 +12,7 @@ from typing import Optional
 
 import requests
 
-from config import WooConfig, CACHE_DIR
+from config import WooConfig, CACHE_DIR, log as _log
 
 
 class WooClient:
@@ -38,13 +38,16 @@ class WooClient:
         """
         sku = (sku or "").strip()
         if not sku:
+            _log("PHOTO: SKU vide -> pas de photo")
             return None
 
         cache_path = self._cache_path(sku)
         if os.path.exists(cache_path):
+            _log(f"PHOTO: cache hit pour SKU={sku}")
             return cache_path
 
         if not self.configured:
+            _log("PHOTO: WooCommerce non configuré -> pas de photo")
             return None
 
         try:
@@ -55,23 +58,31 @@ class WooClient:
                 auth=(self._cfg.consumer_key, self._cfg.consumer_secret),
                 timeout=timeout,
             )
+            _log(f"PHOTO: GET {url}?sku={sku} -> HTTP {resp.status_code}")
             resp.raise_for_status()
             products = resp.json()
             if not products:
+                _log(f"PHOTO: aucun produit avec SKU={sku} (vérifier que "
+                     f"REF_ART == SKU WooCommerce)")
                 return None
             images = products[0].get("images") or []
             if not images:
+                _log(f"PHOTO: produit SKU={sku} trouvé mais sans image")
                 return None
             img_src = images[0].get("src")
             if not img_src:
+                _log(f"PHOTO: image sans URL src pour SKU={sku}")
                 return None
 
             img_resp = requests.get(img_src, timeout=timeout)
+            _log(f"PHOTO: téléchargement {img_src} -> HTTP {img_resp.status_code}")
             img_resp.raise_for_status()
             with open(cache_path, "wb") as fh:
                 fh.write(img_resp.content)
+            _log(f"PHOTO: OK, enregistrée dans {cache_path}")
             return cache_path
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            _log(f"PHOTO: ERREUR pour SKU={sku} : {exc!r}")
             return None
 
     def test(self, timeout: float = 6.0) -> None:

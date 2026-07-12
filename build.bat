@@ -68,7 +68,7 @@ py -3.8-32 -m PyInstaller ^
     --noconsole ^
     --hidden-import PIL._tkinter_finder ^
     --hidden-import PIL.ImageTk ^
-    --collect-submodules PIL ^
+    --collect-all PIL ^
     %ICON_OPT% ^
     %ASSETS_OPT% ^
     %FBCLIENT_OPT% ^
