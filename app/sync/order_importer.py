@@ -13,7 +13,7 @@ native document numbering later.
 import datetime
 import logging
 
-from app.db.firebird_client import connect as connect_firebird
+from app.db.firebird_client import connect as connect_firebird, python_codec_for
 from app.sync.wc_orders_client import WCOrdersClient
 
 log = logging.getLogger(__name__)
@@ -37,6 +37,21 @@ class OrderImporter:
         self.con = con
         self.cfg = cfg["order_import"]
         self.cur = con.cursor()
+        self._codec = python_codec_for(cfg["firebird"].get("charset"))
+
+    def _safe_text(self, s):
+        """Replaces any character the connection's charset can't encode
+        (e.g. a Kurdish/Persian letter with a WIN1256 connection) with '?'
+        instead of letting the whole order fail on insert -- a customer's
+        free-text name/address shouldn't be able to lose an entire order's
+        stock movement over one unsupported character."""
+        if not s:
+            return s
+        try:
+            s.encode(self._codec)
+            return s
+        except (UnicodeEncodeError, LookupError):
+            return s.encode(self._codec, errors="replace").decode(self._codec)
 
     # -- generator helpers (proven pattern from import_bon_reception.py) ----
     def _gen_value(self, generator):
@@ -136,6 +151,9 @@ class OrderImporter:
             addr_src.get("city", ""), addr_src.get("postcode", ""),
         ]))
         phone = (billing.get("phone") or "").strip()
+        full_name = self._safe_text(full_name)
+        address = self._safe_text(address)
+        phone = self._safe_text(phone)
         date_piece = _parse_wc_date(wc_order.get("date_created"))
 
         line_payloads = []
@@ -246,6 +264,38 @@ class OrderImporter:
         return ("created", f"{doc_type} NOPIECE={nopiece}, {len(line_payloads)} line(s){extra}{link}",
                 None)
 
+    # -- cancellation -----------------------------------------------------------
+    def cancel_order(self, wc_order, dry_run=False):
+        """Annuls (ANNULEE=1) every still-active PIECE/ITEM document already
+        created for this order, instead of creating anything new. Used for
+        orders whose WooCommerce status is in cfg['cancel_statuses'] -- e.g.
+        an order that went processing (document created) -> cancelled.
+
+        Returns ('cancelled'|'skipped'|'error', message, reason)."""
+        order_id = wc_order["id"]
+        refdoc = f"WC-{order_id}"
+        self.cur.execute(
+            "SELECT NOPIECE, CODE_TYPE_PIECE, ANNULEE FROM PIECE WHERE REFDOC = ?",
+            (refdoc,),
+        )
+        rows = self.cur.fetchall()
+        if not rows:
+            return "skipped", "no existing document to cancel", "no_existing_document"
+
+        active = [(nopiece, doc_type) for nopiece, doc_type, annulee in rows if not annulee]
+        if not active:
+            return "skipped", "already cancelled", "already_cancelled"
+
+        docs = ", ".join(f"{doc_type}#{nopiece}" for nopiece, doc_type in active)
+        if dry_run:
+            return "skipped", f"[DRY] would annul {docs}", "dry_run"
+
+        for nopiece, _doc_type in active:
+            self.cur.execute("UPDATE PIECE SET ANNULEE = 1 WHERE NOPIECE = ?", (nopiece,))
+            self.cur.execute("UPDATE ITEM SET ANNULEE = 1 WHERE NOPIECE = ?", (nopiece,))
+        self.con.commit()
+        return "cancelled", f"annulled {docs}", None
+
 
 def run_order_import(cfg, dry_run=False, log_fn=None):
     """Scans the FULL WooCommerce order history matching the configured
@@ -255,10 +305,18 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
     already imported, so a first run naturally backfills all matching
     history and every later run only picks up what's new.
 
+    Orders whose WooCommerce status is in cfg['order_import']['cancel_statuses']
+    are handled separately: instead of creating a document, any document(s)
+    already created for that order (by an earlier run, back when it had a
+    mapped status) get annulled -- e.g. an order that went
+    processing -> cancelled.
+
     Returns a report dict:
-    {"created": [order_id, ...], "skipped": [order_id, ...],
+    {"created": [order_id, ...], "cancelled": [order_id, ...],
+     "skipped": [order_id, ...],
      "skip_reasons": {"already_imported": N, "status_not_mapped": N,
-                       "no_valid_lines": N, "dry_run": N},
+                       "no_valid_lines": N, "dry_run": N,
+                       "no_existing_document": N, "already_cancelled": N},
      "errors": [{"order_id": ..., "error": ...}]}
     'skip_reasons["already_imported"]' is the direct, visible count of
     duplicates the tool caught and did NOT re-create.
@@ -266,8 +324,19 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
     emit = log_fn or (lambda msg: log.info(msg))
     oi_cfg = cfg["order_import"]
 
+    def record(order_id, status, msg, reason):
+        emit(f"WC#{order_id}: {status} - {msg}")
+        if status in ("created", "cancelled"):
+            report[status].append(order_id)
+        elif status == "skipped":
+            report["skipped"].append(order_id)
+            if reason:
+                report["skip_reasons"][reason] = report["skip_reasons"].get(reason, 0) + 1
+        else:
+            report["errors"].append({"order_id": order_id, "error": msg})
+
     con = connect_firebird(cfg)
-    report = {"created": [], "skipped": [], "skip_reasons": {}, "errors": []}
+    report = {"created": [], "cancelled": [], "skipped": [], "skip_reasons": {}, "errors": []}
     try:
         importer = OrderImporter(con, cfg)
         client_name = importer.verify_client()
@@ -275,31 +344,30 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
             raise RuntimeError(f"Client {oi_cfg['client_code']!r} not found in TIERS")
         emit(f"Client OK: {oi_cfg['client_code']} = {client_name}")
 
-        statuses = list(oi_cfg["status_mapping"].keys())
-        if not statuses:
-            raise RuntimeError("No status_mapping configured -- nothing to import")
+        create_statuses = list(oi_cfg["status_mapping"].keys())
+        cancel_statuses = list(oi_cfg.get("cancel_statuses") or [])
+        if not create_statuses and not cancel_statuses:
+            raise RuntimeError("No status_mapping or cancel_statuses configured -- nothing to import")
+        cancel_set = {s.strip().lower() for s in cancel_statuses if s.strip()}
 
         wc_cfg = cfg["woocommerce"]
         wc_orders = WCOrdersClient(wc_cfg["site_url"], wc_cfg["consumer_key"], wc_cfg["consumer_secret"])
-        orders = wc_orders.fetch_orders(statuses)
+        all_statuses = list(dict.fromkeys(create_statuses + cancel_statuses))
+        orders = wc_orders.fetch_orders(all_statuses)
         emit(f"{len(orders)} order(s) fetched matching configured statuses "
              f"(full history, not just new ones).")
 
         for order in orders:
             order_id = order["id"]
+            wc_status = (order.get("status") or "").lower()
             try:
-                status, msg, reason = importer.import_order(
-                    order, dry_run=dry_run, wc_orders_client=wc_orders
-                )
-                emit(f"WC#{order_id}: {status} - {msg}")
-                if status == "created":
-                    report["created"].append(order_id)
-                elif status == "skipped":
-                    report["skipped"].append(order_id)
-                    if reason:
-                        report["skip_reasons"][reason] = report["skip_reasons"].get(reason, 0) + 1
+                if wc_status in cancel_set:
+                    status, msg, reason = importer.cancel_order(order, dry_run=dry_run)
                 else:
-                    report["errors"].append({"order_id": order_id, "error": msg})
+                    status, msg, reason = importer.import_order(
+                        order, dry_run=dry_run, wc_orders_client=wc_orders
+                    )
+                record(order_id, status, msg, reason)
             except Exception as exc:  # noqa: BLE001 -- one bad order shouldn't kill the run
                 con.rollback()
                 report["errors"].append({"order_id": order_id, "error": str(exc)})
@@ -307,6 +375,6 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
         con.close()
 
     reasons = ", ".join(f"{k}={v}" for k, v in report["skip_reasons"].items())
-    emit(f"Done. created={len(report['created'])} skipped={len(report['skipped'])} "
-         f"({reasons}) errors={len(report['errors'])}")
+    emit(f"Done. created={len(report['created'])} cancelled={len(report['cancelled'])} "
+         f"skipped={len(report['skipped'])} ({reasons}) errors={len(report['errors'])}")
     return report

@@ -510,6 +510,15 @@ class MainWindow(QMainWindow):
             "skip_order: if any line's SKU isn't found in ARTICLE, skip the whole order."
         )
         form.addRow("On missing SKU:", self.order_on_missing_sku)
+        self.order_cancel_statuses = QLineEdit(", ".join(oi_cfg.get("cancel_statuses") or []))
+        self.order_cancel_statuses.setPlaceholderText("e.g. cancelled, refunded")
+        self.order_cancel_statuses.setToolTip(
+            "WooCommerce statuses that mean 'annul the document(s) already\n"
+            "created for this order' instead of creating a new one -- e.g. an\n"
+            "order that went processing (document created) then got cancelled.\n"
+            "Comma-separated. Leave empty to disable (cancellations are ignored)."
+        )
+        form.addRow("Cancel statuses:", self.order_cancel_statuses)
         layout.addWidget(cfg_group)
 
         types_row = QHBoxLayout()
@@ -659,6 +668,9 @@ class MainWindow(QMainWindow):
         oi_cfg["code_depot"] = self.order_code_depot.text()
         oi_cfg["username"] = self.order_username.text()
         oi_cfg["on_missing_sku"] = self.order_on_missing_sku.currentText()
+        oi_cfg["cancel_statuses"] = [
+            s.strip() for s in self.order_cancel_statuses.text().split(",") if s.strip()
+        ]
 
         status_mapping = {}
         for row in range(self.status_table.rowCount()):
@@ -699,8 +711,8 @@ class MainWindow(QMainWindow):
         self.order_dry_run_btn.setEnabled(True)
         self.order_import_btn.setEnabled(True)
         self.order_log_view.appendPlainText(
-            f"created={len(report['created'])} skipped={len(report['skipped'])} "
-            f"errors={len(report['errors'])}"
+            f"created={len(report['created'])} cancelled={len(report.get('cancelled', []))} "
+            f"skipped={len(report['skipped'])} errors={len(report['errors'])}"
         )
         skip_reasons = report.get("skip_reasons") or {}
         if skip_reasons:

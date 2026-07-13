@@ -21,6 +21,9 @@ class FakeCursor:
     def fetchone(self):
         return self._last
 
+    def fetchall(self):
+        return self._last if isinstance(self._last, list) else []
+
 
 class FakeConnection:
     def __init__(self, cur):
@@ -67,10 +70,12 @@ def _wc_order(order_id=555, status="processing", sku="REF1", qty=2, price=24.0):
 
 
 def _responder(article_by_sku=None, already_imported=None, source_piece=None,
-                max_nopiece=100, max_noitem=500, gen_piece=0, gen_item=0):
+                max_nopiece=100, max_noitem=500, gen_piece=0, gen_item=0,
+                existing_docs=None):
     article_by_sku = article_by_sku or {"REF1": ("REF1", 20.0, 24.0, 19.0)}
     already_imported = already_imported or {}
     source_piece = source_piece or {}
+    existing_docs = existing_docs or {}
 
     def responder(sql, params):
         s = sql.upper()
@@ -84,6 +89,9 @@ def _responder(article_by_sku=None, already_imported=None, source_piece=None,
             return (max_nopiece,)
         if "MAX(CAST(NOITEM" in s:
             return (max_noitem,)
+        if "ANNULEE FROM PIECE WHERE REFDOC" in s:
+            (refdoc,) = params
+            return list(existing_docs.get(refdoc, []))
         if "NOPIECE FROM PIECE WHERE REFDOC" in s:
             refdoc, doc_type = params
             key = (refdoc, doc_type)
@@ -239,3 +247,128 @@ def test_run_order_import_tallies_skip_reasons(monkeypatch):
     assert set(report["skipped"]) == {1, 2}
     assert report["skip_reasons"] == {"already_imported": 1, "status_not_mapped": 1}
     assert report["errors"] == []
+
+
+def test_cancel_order_annuls_active_documents():
+    cfg = _cfg()
+    responder = _responder(existing_docs={"WC-777": [("501", "PC_VE_COM", 0)]})
+    importer, con, cur = _make_importer(cfg, responder)
+
+    status, msg, reason = importer.cancel_order(_wc_order(order_id=777, status="cancelled"))
+
+    assert status == "cancelled"
+    assert "PC_VE_COM#501" in msg
+    assert reason is None
+    assert con.committed is True
+    piece_updates = [p for sql, p in cur.executed if sql.startswith("UPDATE PIECE SET ANNULEE")]
+    item_updates = [p for sql, p in cur.executed if sql.startswith("UPDATE ITEM SET ANNULEE")]
+    assert piece_updates == [("501",)]
+    assert item_updates == [("501",)]
+
+
+def test_cancel_order_annuls_all_active_documents_for_the_order():
+    # An order can accumulate more than one PIECE over time via
+    # transformation linking (e.g. commande then bon de livraison) --
+    # cancelling must annul all of them, not just one.
+    cfg = _cfg()
+    responder = _responder(existing_docs={
+        "WC-42": [("10", "PC_VE_COM", 0), ("11", "PC_VE_B", 0)],
+    })
+    importer, con, cur = _make_importer(cfg, responder)
+
+    status, msg, reason = importer.cancel_order(_wc_order(order_id=42, status="cancelled"))
+
+    assert status == "cancelled"
+    piece_updates = {p[0] for sql, p in cur.executed if sql.startswith("UPDATE PIECE SET ANNULEE")}
+    assert piece_updates == {"10", "11"}
+
+
+def test_cancel_order_with_no_existing_document_is_skipped():
+    cfg = _cfg()
+    importer, con, cur = _make_importer(cfg, _responder())
+    status, msg, reason = importer.cancel_order(_wc_order(order_id=999, status="cancelled"))
+    assert status == "skipped"
+    assert reason == "no_existing_document"
+    assert con.committed is False
+
+
+def test_cancel_order_already_cancelled_is_skipped_not_reannuled():
+    cfg = _cfg()
+    responder = _responder(existing_docs={"WC-5": [("20", "PC_VE_COM", 1)]})
+    importer, con, cur = _make_importer(cfg, responder)
+    status, msg, reason = importer.cancel_order(_wc_order(order_id=5, status="cancelled"))
+    assert status == "skipped"
+    assert reason == "already_cancelled"
+    assert not any(sql.startswith("UPDATE") for sql, _ in cur.executed)
+
+
+def test_cancel_order_dry_run_does_not_write():
+    cfg = _cfg()
+    responder = _responder(existing_docs={"WC-8": [("30", "PC_VE_COM", 0)]})
+    importer, con, cur = _make_importer(cfg, responder)
+    status, msg, reason = importer.cancel_order(_wc_order(order_id=8, status="cancelled"), dry_run=True)
+    assert status == "skipped"
+    assert msg.startswith("[DRY]")
+    assert not any(sql.startswith("UPDATE") for sql, _ in cur.executed)
+    assert con.committed is False
+
+
+def test_run_order_import_dispatches_cancel_statuses_to_cancel_order(monkeypatch):
+    from app.sync import order_importer
+
+    cfg = _cfg(cancel_statuses=["cancelled"])
+    cfg["woocommerce"]["site_url"] = "https://example.com"
+    cfg["woocommerce"]["consumer_key"] = "ck"
+    cfg["woocommerce"]["consumer_secret"] = "cs"
+
+    responder = _responder(existing_docs={"WC-9": [("60", "PC_VE_COM", 0)]})
+    cur = FakeCursor(responder)
+    con = FakeConnection(cur)
+
+    orders = [
+        _wc_order(order_id=9, status="cancelled"),   # had a document -> cancelled
+        _wc_order(order_id=10, status="processing"),  # new -> created
+    ]
+
+    class FakeWCOrdersClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_orders(self, statuses, after=None):
+            return orders
+
+        def get_variation_sku(self, *args, **kwargs):
+            return ""
+
+        def get_product_sku(self, *args, **kwargs):
+            return ""
+
+    monkeypatch.setattr(order_importer, "connect_firebird", lambda cfg: con)
+    monkeypatch.setattr(order_importer, "WCOrdersClient", FakeWCOrdersClient)
+
+    report = order_importer.run_order_import(cfg)
+
+    assert report["cancelled"] == [9]
+    assert report["created"] == [10]
+    assert report["errors"] == []
+
+
+def test_safe_text_replaces_characters_the_connection_charset_cant_encode():
+    cfg = _cfg()
+    cfg["firebird"]["charset"] = "WIN1256"
+    importer, con, cur = _make_importer(cfg, _responder())
+    # ڨ (Kurdish KAF) isn't representable in Windows-1256 -- must not
+    # raise, so one customer's name can't take down the whole order.
+    result = importer._safe_text("مڨان")
+    assert result is not None
+    result.encode("cp1256")  # no UnicodeEncodeError
+
+
+def test_import_order_sanitizes_unencodable_customer_name():
+    cfg = _cfg()
+    cfg["firebird"]["charset"] = "WIN1256"
+    importer, con, cur = _make_importer(cfg, _responder())
+    order = _wc_order(order_id=321)
+    order["billing"]["first_name"] = "ڨاک"  # contains Kurdish KAF
+    status, msg, reason = importer.import_order(order)
+    assert status == "created"

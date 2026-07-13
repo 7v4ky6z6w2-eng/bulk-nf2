@@ -11,6 +11,27 @@ import sys
 
 import fdb
 
+# Best-effort Firebird charset name -> Python codec name, so callers can
+# pre-sanitize free-text values before they hit the wire: fdb raises rather
+# than substituting when a string has a character the connection charset
+# can't represent (e.g. a Kurdish/Persian letter in a customer name with a
+# WIN1256 connection, which only covers Arabic).
+_FB_CHARSET_TO_PYTHON = {
+    "WIN1256": "cp1256",
+    "WIN1252": "cp1252",
+    "WIN1250": "cp1250",
+    "UTF8": "utf-8",
+    "ASCII": "ascii",
+    "NONE": "ascii",
+    "ISO8859_1": "iso8859-1",
+    "DOS437": "cp437",
+    "DOS850": "cp850",
+}
+
+
+def python_codec_for(fb_charset):
+    return _FB_CHARSET_TO_PYTHON.get((fb_charset or "").upper(), "utf-8")
+
 
 def _default_client_library_path():
     """Best-effort path to a bundled fbclient.dll next to a frozen (PyInstaller

@@ -90,6 +90,11 @@ DEFAULT_CONFIG = {
         "on_missing_sku": "skip_line",  # skip_line | skip_order
         "status_mapping": {},    # WC order status -> CODE_TYPE_PIECE
         "transformation": {},    # target CODE_TYPE_PIECE -> source CODE_TYPE_PIECE
+        # WC order statuses that mean "annul whatever document(s) were
+        # already created for this order" instead of creating a new one --
+        # e.g. an order that went processing -> cancelled. Empty by default
+        # (opt-in), since it writes to Firebird (ANNULEE=1).
+        "cancel_statuses": [],
         "interval_minutes": 15,
     },
 
