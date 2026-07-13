@@ -21,7 +21,14 @@ import sys
 from app.config import load_config
 from app.db.firebird_client import connect
 
-CANDIDATE_TABLES = ["ARTICLE", "EQUIV_CBARRES", "FAMILLE", "STOCK", "FICHE_STOCK"]
+CANDIDATE_TABLES = ["ARTICLE", "EQUIV_CBARRES", "FAMILLE", "STOCK", "FICHE_STOCK", "PIECE", "ITEM"]
+
+# Firebird system-catalog RDB$FIELD_TYPE codes, for readable output.
+FIELD_TYPE_NAMES = {
+    7: "SMALLINT", 8: "INTEGER", 9: "QUAD", 10: "FLOAT", 12: "DATE",
+    13: "TIME", 14: "CHAR", 16: "BIGINT", 23: "BOOLEAN", 27: "DOUBLE PRECISION",
+    35: "TIMESTAMP", 37: "VARCHAR", 261: "BLOB",
+}
 
 
 def list_columns(cur, table):
@@ -72,6 +79,26 @@ def sample_photo_blobs(cur, sample_size=10):
     print(f"  -> {real_images}/{len(rows)} sampled non-NULL PHOTO blobs are real images")
 
 
+def sample_piece_annulee(cur):
+    """Compares the ANNULEE value on manually-created PIECE documents vs.
+    the ones this tool has written (REFDOC starting with 'WC-'). If those
+    differ in kind (e.g. 'N'/'O' vs. 0/1), that's exactly why NetFact2
+    might be showing WC-imported documents as cancelled even though the
+    importer writes what it believes is the "not cancelled" value."""
+    cur.execute(
+        "SELECT CASE WHEN REFDOC STARTING WITH 'WC-' THEN 'WC-imported' "
+        "            ELSE 'other' END AS source, "
+        "       ANNULEE, COUNT(*) "
+        "FROM PIECE GROUP BY 1, 2 ORDER BY 1, 2"
+    )
+    rows = cur.fetchall()
+    if not rows:
+        print("  PIECE has no rows.")
+        return
+    for source, value, count in rows:
+        print(f"  {source:<12} ANNULEE={value!r}  ({count} document(s))")
+
+
 def sample_boutiq_visible(cur):
     cur.execute("SELECT CODEFAMILLE, BOUTIQ_VISIBLE FROM FAMILLE")
     rows = cur.fetchall()
@@ -100,7 +127,8 @@ def main():
             print(f"[{table}]")
             for name, ftype, flen, subtype, null_flag in list_columns(cur, table):
                 nullable = "NOT NULL" if null_flag else "nullable"
-                print(f"  {name:<25} type={ftype} subtype={subtype} "
+                type_name = FIELD_TYPE_NAMES.get(ftype, ftype)
+                print(f"  {name:<25} type={type_name} subtype={subtype} "
                       f"len={flen} {nullable}")
 
         if table_exists(cur, "ARTICLE"):
@@ -110,6 +138,10 @@ def main():
         if table_exists(cur, "FAMILLE"):
             print("\n[FAMILLE.BOUTIQ_VISIBLE check]")
             sample_boutiq_visible(cur)
+
+        if table_exists(cur, "PIECE"):
+            print("\n[PIECE.ANNULEE check -- manually-created vs. WC-imported documents]")
+            sample_piece_annulee(cur)
     finally:
         con.close()
 
