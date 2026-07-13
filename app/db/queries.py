@@ -56,6 +56,24 @@ def fetch_all_ref_arts(con):
     return {str(r[0]).strip() for r in cur.fetchall() if r[0] is not None}
 
 
+def fetch_type_pieces(con):
+    """Returns [{"code": str, "label": str}, ...] from LOCAL_TYPE_PIECE --
+    the ERP's own list of document types (e.g. PC_VE_COM, PC_VE_B). Used to
+    populate real dropdowns for order-import status mapping instead of a
+    free-text field prone to typos. Confirmed via import_bon_reception.py
+    that CODE_TYPE_PIECE exists; a label/INTITULE column isn't confirmed
+    for this table, so fall back to using the code as its own label."""
+    cur = con.cursor()
+    try:
+        cur.execute("SELECT CODE_TYPE_PIECE, INTITULE FROM LOCAL_TYPE_PIECE ORDER BY CODE_TYPE_PIECE")
+        rows = [{"code": code, "label": (label or code).strip()} for code, label in cur.fetchall()]
+    except Exception:
+        cur = con.cursor()
+        cur.execute("SELECT CODE_TYPE_PIECE FROM LOCAL_TYPE_PIECE ORDER BY CODE_TYPE_PIECE")
+        rows = [{"code": code, "label": code} for (code,) in cur.fetchall()]
+    return [r for r in rows if r["code"]]
+
+
 def fetch_barcodes(con):
     """Returns {ref_art: [barcode, ...]} ordered by NOEQUIV_CBARRES (insertion
     order), from EQUIV_CBARRES -- the table actually used for barcodes in

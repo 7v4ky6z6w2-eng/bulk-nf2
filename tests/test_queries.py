@@ -120,3 +120,51 @@ def test_fetch_articles_wires_stock_qty_from_item_ledger():
     familles = queries.fetch_familles(con)
     articles = queries.fetch_articles(con, familles, filter_boutique_visible=True)
     assert articles[0]["stock_qty"] == 42
+
+
+class _TypePieceCursor:
+    def __init__(self, with_label):
+        self.with_label = with_label
+
+    def execute(self, sql, params=None):
+        if not self.with_label:
+            raise Exception("simulated: no INTITULE column on this install")
+
+    def fetchall(self):
+        return [("PC_VE_COM", "Commande de vente"), ("PC_VE_B", "Bon de livraison"), ("", "Empty code")]
+
+
+class _TypePieceCursorFallback:
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchall(self):
+        return [("PC_VE_COM",), ("PC_VE_B",)]
+
+
+class _TypePieceConnection:
+    def __init__(self, with_label):
+        self.with_label = with_label
+        self._calls = 0
+
+    def cursor(self):
+        self._calls += 1
+        if self.with_label:
+            return _TypePieceCursor(True)
+        # First call (with INTITULE) fails; second call (fallback) succeeds.
+        return _TypePieceCursor(False) if self._calls == 1 else _TypePieceCursorFallback()
+
+
+def test_fetch_type_pieces_with_label_column():
+    con = _TypePieceConnection(with_label=True)
+    result = queries.fetch_type_pieces(con)
+    assert {"code": "PC_VE_COM", "label": "Commande de vente"} in result
+    assert {"code": "PC_VE_B", "label": "Bon de livraison"} in result
+    assert not any(r["code"] == "" for r in result)  # blank codes filtered out
+
+
+def test_fetch_type_pieces_falls_back_without_label_column():
+    con = _TypePieceConnection(with_label=False)
+    result = queries.fetch_type_pieces(con)
+    assert {"code": "PC_VE_COM", "label": "PC_VE_COM"} in result
+    assert {"code": "PC_VE_B", "label": "PC_VE_B"} in result

@@ -92,37 +92,27 @@ def test_batch_products_uses_extended_timeout():
     assert seen_timeouts == [BATCH_TIMEOUT_SECONDS]
 
 
-def test_find_or_create_category_uses_cache():
-    client = WooCommerceClient("https://example.com", "ck", "cs")
-    calls = []
-
-    def fake_request(method, url, auth=None, timeout=None, **kwargs):
-        calls.append((method, url))
-        if method == "GET":
-            return _mock_response([{"id": 5, "name": "Scolaire"}])
-        return _mock_response({"id": 99, "name": kwargs["json"]["name"]})
-
-    with patch("requests.request", side_effect=fake_request):
-        cat_id = client.find_or_create_category("Scolaire")
-        assert cat_id == 5
-        # second call should hit the cache, no extra GET/POST
-        n_calls_before = len(calls)
-        cat_id_again = client.find_or_create_category("scolaire")
-        assert cat_id_again == 5
-        assert len(calls) == n_calls_before
-
-
-def test_find_or_create_category_creates_when_missing():
+def test_ping_succeeds_on_200():
     client = WooCommerceClient("https://example.com", "ck", "cs")
 
     def fake_request(method, url, auth=None, timeout=None, **kwargs):
-        if method == "GET":
-            return _mock_response([])
-        return _mock_response({"id": 42, "name": kwargs["json"]["name"]})
+        assert method == "GET"
+        assert kwargs["params"]["per_page"] == 1
+        return _mock_response([{"id": 1}])
 
     with patch("requests.request", side_effect=fake_request):
-        cat_id = client.find_or_create_category("Bureau")
-        assert cat_id == 42
+        client.ping()  # must not raise
+
+
+def test_ping_raises_on_auth_failure():
+    client = WooCommerceClient("https://example.com", "bad-key", "bad-secret")
+
+    def fake_request(method, url, auth=None, timeout=None, **kwargs):
+        return _mock_response({"message": "Invalid signature"}, status_code=401)
+
+    with patch("requests.request", side_effect=fake_request):
+        with pytest.raises(WooCommerceError):
+            client.ping()
 
 
 def test_upload_media_requires_wp_auth():
@@ -176,12 +166,3 @@ def test_fetch_all_products_paginates():
     assert len(result) == 101
 
 
-def test_request_raises_on_4xx():
-    client = WooCommerceClient("https://example.com", "ck", "cs")
-
-    def fake_request(method, url, auth=None, timeout=None, **kwargs):
-        return _mock_response({}, status_code=404)
-
-    with patch("requests.request", side_effect=fake_request):
-        with pytest.raises(WooCommerceError):
-            client.find_or_create_category("Anything")

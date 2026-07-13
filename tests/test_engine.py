@@ -3,8 +3,6 @@ import json
 import os
 import tempfile
 
-import pytest
-
 from app.config import DEFAULT_CONFIG
 from app.sync import engine
 
@@ -96,33 +94,15 @@ def test_build_core_fields_barcodes():
     assert meta["_alt_barcodes"] == "2222222222,3333333333"
 
 
-@pytest.mark.parametrize("name,expected", [
-    ("Stylo Bille Bleu", "Stylo"),
-    ("Cahier 96 Pages", "Cahier"),
-    ("", None),
-    ("   ", None),
-    (None, None),
-])
-def test_category_from_cleaned_name(name, expected):
-    assert engine._category_from_cleaned_name(name) == expected
-
-
-def test_build_core_fields_category_survives_abbreviation_expansion():
-    # Raw DESIGNATION uses the abbreviations from the user's real
-    # sync_config.ini -- category must be derived AFTER expansion, so
-    # "STYL" (abbreviation) still lands in category "Stylo", not "Styl".
+def test_build_core_fields_does_not_set_category():
+    # Categories are intentionally left untouched -- the store runs its own
+    # WordPress auto-categorizer plugin instead.
     article = _article(designation="STYL BIL BLU")
     cfg = _cfg("unused.sqlite3")
     core = engine.build_core_fields(article, cfg)
     assert core["name"] == "Stylo Bille Bleu"
-    assert core["_category_name"] == "Stylo"
-
-
-def test_build_core_fields_uses_designation_first_word_for_category():
-    article = _article(designation="trousse scolaire rose", famille_intitule="Some Family Name")
-    cfg = _cfg("unused.sqlite3")
-    core = engine.build_core_fields(article, cfg)
-    assert core["_category_name"] == "Trousse"
+    assert "categories" not in core
+    assert not any(k.startswith("_category") for k in core)
 
 
 def test_content_hash_changes_when_price_changes():
@@ -168,9 +148,6 @@ class FakeWooCommerceClient:
         self.kwargs = kwargs
         self.created = []
         FakeWooCommerceClient.instances.append(self)
-
-    def find_or_create_category(self, name):
-        return 1
 
     def batch_products(self, create=None, update=None, delete=None, chunk_size=100, progress_fn=None):
         create = create or []

@@ -9,11 +9,13 @@ import sys
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+    QTableWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from app import diagnostics
 from app.config import load_config, save_config
 from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
 from app.sync.order_importer import run_order_import
@@ -24,24 +26,25 @@ try:
 except Exception:  # pragma: no cover - only relevant off-Windows
     windows_task = None
 
-
-def _parse_mapping_text(text):
-    """Parses "key=value" lines (one per row) into a dict, ignoring blank
-    lines and lines without an '='."""
-    result = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if key and value:
-            result[key] = value
-    return result
+# Statuses WooCommerce ships with out of the box; editable comboboxes still
+# accept any custom status a store adds.
+_COMMON_WC_STATUSES = [
+    "pending", "processing", "on-hold", "completed",
+    "cancelled", "refunded", "failed",
+]
 
 
-def _format_mapping_text(mapping):
-    return "\n".join(f"{k}={v}" for k, v in (mapping or {}).items())
+def _combo_value(combo):
+    """Reads a code out of an editable QComboBox: prefers the selected
+    item's stored data, falls back to parsing typed "CODE - Label" or
+    "CODE" text."""
+    data = combo.currentData()
+    if data:
+        return data
+    text = combo.currentText().strip()
+    if " - " in text:
+        return text.split(" - ", 1)[0].strip()
+    return text
 
 
 class SyncWorker(QThread):
@@ -116,6 +119,47 @@ class AdoptWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class TestConnectionWorker(QThread):
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            result = diagnostics.test_connections(self.cfg)
+            self.finished_ok.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class TypePiecesWorker(QThread):
+    """Loads LOCAL_TYPE_PIECE codes/labels from Firebird in the background
+    so the Orders tab's dropdowns can offer real document types instead of
+    requiring the user to know/type the raw codes."""
+    finished_ok = Signal(list)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            from app.db import queries
+            from app.db.firebird_client import connect as connect_firebird
+            con = connect_firebird(self.cfg)
+            try:
+                rows = queries.fetch_type_pieces(con)
+            finally:
+                con.close()
+            self.finished_ok.emit(rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -124,11 +168,14 @@ class MainWindow(QMainWindow):
         self.worker = None
 
         self.setWindowTitle("ERP -> WooCommerce Product Sync")
-        self.resize(720, 560)
+        self.resize(920, 720)
 
         self.stock_worker = None
         self.order_worker = None
         self.adopt_worker = None
+        self.test_conn_worker = None
+        self.type_pieces_worker = None
+        self.type_piece_choices = []
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
@@ -137,6 +184,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_orders_tab(), "Orders")
         tabs.addTab(self._build_schedule_tab(), "Schedule")
         self.setCentralWidget(tabs)
+        self.statusBar().showMessage("Ready.")
 
     # -- Configuration tab ----------------------------------------------------
     def _build_config_tab(self):
@@ -153,8 +201,10 @@ class MainWindow(QMainWindow):
         db_row.addWidget(browse_btn)
         db_row_widget = QWidget()
         db_row_widget.setLayout(db_row)
+        self.db_path.setToolTip("Path to the .FDB file, e.g. C:\\Prime\\DIFA2.FDB")
         fb_form.addRow("Database path:", db_row_widget)
         self.fb_host = QLineEdit(self.cfg["firebird"]["host"])
+        self.fb_host.setToolTip("Leave blank to open the .FDB file directly (embedded);\nset this only if connecting to a Firebird server over the network.")
         fb_form.addRow("Host (blank = local file):", self.fb_host)
         self.fb_port = QSpinBox()
         self.fb_port.setRange(1, 65535)
@@ -186,12 +236,17 @@ class MainWindow(QMainWindow):
         wc_group = QGroupBox("WooCommerce REST API")
         wc_form = QFormLayout(wc_group)
         self.wc_url = QLineEdit(self.cfg["woocommerce"]["site_url"])
+        self.wc_url.setToolTip("e.g. https://your-store.com")
         wc_form.addRow("Site URL:", self.wc_url)
         self.wc_key = QLineEdit(self.cfg["woocommerce"]["consumer_key"])
         wc_form.addRow("Consumer key:", self.wc_key)
         self.wc_secret = QLineEdit(self.cfg["woocommerce"]["consumer_secret"])
         self.wc_secret.setEchoMode(QLineEdit.Password)
         wc_form.addRow("Consumer secret:", self.wc_secret)
+        wc_form.addRow(QLabel(
+            "WooCommerce -> Settings -> Advanced -> REST API -> Add key\n"
+            "(needs Read/Write permissions)."
+        ))
         layout.addWidget(wc_group)
 
         wp_group = QGroupBox("WordPress (only needed to upload ARTICLE.PHOTO images)")
@@ -200,14 +255,52 @@ class MainWindow(QMainWindow):
         wp_form.addRow("Username:", self.wp_user)
         self.wp_pass = QLineEdit(self.cfg["wordpress"]["app_password"])
         self.wp_pass.setEchoMode(QLineEdit.Password)
+        self.wp_pass.setToolTip("Users -> Profile -> Application Passwords -> New (not your login password).")
         wp_form.addRow("Application password:", self.wp_pass)
         layout.addWidget(wp_group)
+
+        test_group = QGroupBox("Test connections")
+        test_layout = QVBoxLayout(test_group)
+        self.test_conn_btn = QPushButton("Test connections now")
+        self.test_conn_btn.clicked.connect(self._start_test_connection)
+        test_layout.addWidget(self.test_conn_btn)
+        self.fb_status_label = QLabel("Firebird: not tested yet.")
+        self.wc_status_label = QLabel("WooCommerce: not tested yet.")
+        test_layout.addWidget(self.fb_status_label)
+        test_layout.addWidget(self.wc_status_label)
+        layout.addWidget(test_group)
 
         save_btn = QPushButton("Save configuration")
         save_btn.clicked.connect(self._save_config)
         layout.addWidget(save_btn)
         layout.addStretch()
         return widget
+
+    def _start_test_connection(self):
+        if self.test_conn_worker and self.test_conn_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.test_conn_btn.setEnabled(False)
+        self.fb_status_label.setText("Firebird: testing...")
+        self.wc_status_label.setText("WooCommerce: testing...")
+        self.test_conn_worker = TestConnectionWorker(cfg)
+        self.test_conn_worker.finished_ok.connect(self._test_connection_done)
+        self.test_conn_worker.finished_error.connect(self._test_connection_failed)
+        self.test_conn_worker.start()
+
+    def _test_connection_done(self, result):
+        self.test_conn_btn.setEnabled(True)
+        fb, wc = result["firebird"], result["woocommerce"]
+        self.fb_status_label.setText(f"Firebird: {'OK' if fb['ok'] else 'FAILED'} -- {fb['message']}")
+        self.fb_status_label.setStyleSheet(f"color: {'green' if fb['ok'] else 'red'};")
+        self.wc_status_label.setText(f"WooCommerce: {'OK' if wc['ok'] else 'FAILED'} -- {wc['message']}")
+        self.wc_status_label.setStyleSheet(f"color: {'green' if wc['ok'] else 'red'};")
+
+    def _test_connection_failed(self, message):
+        self.test_conn_btn.setEnabled(True)
+        self.fb_status_label.setText(f"Firebird: FAILED -- {message}")
+        self.fb_status_label.setStyleSheet("color: red;")
+        self.wc_status_label.setText("WooCommerce: not tested (unexpected error above).")
 
     def _browse_fdb(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select .FDB file", "", "Firebird DB (*.fdb *.FDB)")
@@ -234,6 +327,7 @@ class MainWindow(QMainWindow):
     def _save_config(self):
         cfg = self._collect_config()
         save_config(self.config_path, cfg)
+        self.statusBar().showMessage(f"Configuration saved to {self.config_path}", 5000)
         QMessageBox.information(self, "Saved", f"Configuration saved to {self.config_path}")
 
     # -- Sync tab ---------------------------------------------------------------
@@ -387,9 +481,22 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(widget)
         oi_cfg = self.cfg["order_import"]
 
+        note = QLabel(
+            "Every run scans the FULL WooCommerce order history for the statuses\n"
+            "mapped below -- there's no separate \"import past orders\" step.\n"
+            "Each order is written to Firebird as PIECE.REFDOC = 'WC-<order id>',\n"
+            "and that field is checked before creating anything, so re-running\n"
+            "(or scheduling this to run repeatedly) never creates a duplicate\n"
+            "document for an order that was already imported."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
         cfg_group = QGroupBox("WooCommerce order -> Firebird document mapping")
         form = QFormLayout(cfg_group)
         self.order_client_code = QLineEdit(oi_cfg["client_code"])
+        self.order_client_code.setToolTip("TIERS.CODE_TIERS the generated PIECE is billed to.")
         form.addRow("Client CODE_TIERS:", self.order_client_code)
         self.order_code_depot = QLineEdit(oi_cfg["code_depot"])
         form.addRow("Default CODE_DEPOT:", self.order_code_depot)
@@ -398,22 +505,74 @@ class MainWindow(QMainWindow):
         self.order_on_missing_sku = QComboBox()
         self.order_on_missing_sku.addItems(["skip_line", "skip_order"])
         self.order_on_missing_sku.setCurrentText(oi_cfg["on_missing_sku"])
+        self.order_on_missing_sku.setToolTip(
+            "skip_line: drop just the unmatched line, import the rest of the order.\n"
+            "skip_order: if any line's SKU isn't found in ARTICLE, skip the whole order."
+        )
         form.addRow("On missing SKU:", self.order_on_missing_sku)
         layout.addWidget(cfg_group)
 
-        mapping_group = QGroupBox("Status mapping (one 'wc_status=CODE_TYPE_PIECE' per line)")
-        mapping_layout = QVBoxLayout(mapping_group)
-        self.order_status_mapping = QPlainTextEdit(_format_mapping_text(oi_cfg["status_mapping"]))
-        self.order_status_mapping.setMaximumHeight(80)
-        mapping_layout.addWidget(self.order_status_mapping)
-        layout.addWidget(mapping_group)
+        types_row = QHBoxLayout()
+        self.refresh_types_btn = QPushButton("Load document types from database")
+        self.refresh_types_btn.setToolTip(
+            "Connects to Firebird and reads LOCAL_TYPE_PIECE so the dropdowns\n"
+            "below show real document types (e.g. PC_VE_COM = Commande de vente)\n"
+            "instead of requiring you to know the raw codes."
+        )
+        self.refresh_types_btn.clicked.connect(self._load_type_pieces)
+        types_row.addWidget(self.refresh_types_btn)
+        types_row.addStretch()
+        layout.addLayout(types_row)
 
-        transform_group = QGroupBox("Transformation linking (one 'TARGET_TYPE=SOURCE_TYPE' per line)")
+        mapping_group = QGroupBox("Status mapping -- which Firebird document each WooCommerce order status creates")
+        mapping_layout = QVBoxLayout(mapping_group)
+        mapping_layout.addWidget(QLabel(
+            "Example: WooCommerce status \"processing\" -> document type "
+            "\"PC_VE_COM\" (Commande de vente)."
+        ))
+        self.status_table = QTableWidget(0, 2)
+        self.status_table.setHorizontalHeaderLabels(["WooCommerce order status", "Firebird document type"])
+        self.status_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.status_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        mapping_layout.addWidget(self.status_table)
+        status_btn_row = QHBoxLayout()
+        add_status_btn = QPushButton("+ Add row")
+        add_status_btn.clicked.connect(lambda: self._add_status_mapping_row())
+        remove_status_btn = QPushButton("- Remove selected row")
+        remove_status_btn.clicked.connect(lambda: self._remove_selected_row(self.status_table))
+        status_btn_row.addWidget(add_status_btn)
+        status_btn_row.addWidget(remove_status_btn)
+        status_btn_row.addStretch()
+        mapping_layout.addLayout(status_btn_row)
+        layout.addWidget(mapping_group)
+        for wc_status, code in oi_cfg["status_mapping"].items():
+            self._add_status_mapping_row(wc_status, code)
+
+        transform_group = QGroupBox("Transformation linking -- link a created document back to an earlier one")
         transform_layout = QVBoxLayout(transform_group)
-        self.order_transformation = QPlainTextEdit(_format_mapping_text(oi_cfg["transformation"]))
-        self.order_transformation.setMaximumHeight(60)
-        transform_layout.addWidget(self.order_transformation)
+        transform_layout.addWidget(QLabel(
+            "Example: a \"PC_VE_B\" (Bon de livraison) created for status "
+            "\"completed\" links back to the \"PC_VE_COM\" (Commande de vente)\n"
+            "created earlier for the same order, the way turning a commande "
+            "into a delivery note would in the ERP."
+        ))
+        self.transform_table = QTableWidget(0, 2)
+        self.transform_table.setHorizontalHeaderLabels(["Newly created document type", "Links back to source document type"])
+        self.transform_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.transform_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        transform_layout.addWidget(self.transform_table)
+        transform_btn_row = QHBoxLayout()
+        add_transform_btn = QPushButton("+ Add row")
+        add_transform_btn.clicked.connect(lambda: self._add_transform_row())
+        remove_transform_btn = QPushButton("- Remove selected row")
+        remove_transform_btn.clicked.connect(lambda: self._remove_selected_row(self.transform_table))
+        transform_btn_row.addWidget(add_transform_btn)
+        transform_btn_row.addWidget(remove_transform_btn)
+        transform_btn_row.addStretch()
+        transform_layout.addLayout(transform_btn_row)
         layout.addWidget(transform_group)
+        for target, source in oi_cfg["transformation"].items():
+            self._add_transform_row(target, source)
 
         btn_row = QHBoxLayout()
         self.order_dry_run_btn = QPushButton("Dry run (preview only)")
@@ -429,14 +588,97 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.order_log_view)
         return widget
 
+    def _type_piece_combo(self, current_code=""):
+        combo = QComboBox()
+        combo.setEditable(True)
+        for choice in self.type_piece_choices:
+            combo.addItem(f"{choice['code']} - {choice['label']}", choice["code"])
+        if current_code:
+            idx = combo.findData(current_code)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setEditText(current_code)
+        return combo
+
+    def _add_status_mapping_row(self, wc_status="", code_type_piece=""):
+        row = self.status_table.rowCount()
+        self.status_table.insertRow(row)
+        status_combo = QComboBox()
+        status_combo.setEditable(True)
+        status_combo.addItems(_COMMON_WC_STATUSES)
+        if wc_status:
+            status_combo.setCurrentText(wc_status)
+        else:
+            status_combo.setCurrentText("")
+        self.status_table.setCellWidget(row, 0, status_combo)
+        self.status_table.setCellWidget(row, 1, self._type_piece_combo(code_type_piece))
+
+    def _add_transform_row(self, target="", source=""):
+        row = self.transform_table.rowCount()
+        self.transform_table.insertRow(row)
+        self.transform_table.setCellWidget(row, 0, self._type_piece_combo(target))
+        self.transform_table.setCellWidget(row, 1, self._type_piece_combo(source))
+
+    def _remove_selected_row(self, table):
+        rows = sorted({idx.row() for idx in table.selectedIndexes()}, reverse=True)
+        for row in rows:
+            table.removeRow(row)
+
+    def _load_type_pieces(self):
+        if self.type_pieces_worker and self.type_pieces_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.refresh_types_btn.setEnabled(False)
+        self.refresh_types_btn.setText("Loading...")
+        self.type_pieces_worker = TypePiecesWorker(cfg)
+        self.type_pieces_worker.finished_ok.connect(self._type_pieces_loaded)
+        self.type_pieces_worker.finished_error.connect(self._type_pieces_failed)
+        self.type_pieces_worker.start()
+
+    def _type_pieces_loaded(self, choices):
+        self.type_piece_choices = choices
+        self.refresh_types_btn.setEnabled(True)
+        self.refresh_types_btn.setText("Load document types from database")
+        for table, columns in ((self.status_table, [1]), (self.transform_table, [0, 1])):
+            for row in range(table.rowCount()):
+                for col in columns:
+                    old_combo = table.cellWidget(row, col)
+                    current = _combo_value(old_combo) if old_combo else ""
+                    table.setCellWidget(row, col, self._type_piece_combo(current))
+        self.statusBar().showMessage(f"Loaded {len(choices)} document type(s) from LOCAL_TYPE_PIECE.", 5000)
+
+    def _type_pieces_failed(self, message):
+        self.refresh_types_btn.setEnabled(True)
+        self.refresh_types_btn.setText("Load document types from database")
+        QMessageBox.warning(self, "Could not load document types", message)
+
     def _collect_order_import_config(self):
         oi_cfg = self.cfg["order_import"]
         oi_cfg["client_code"] = self.order_client_code.text()
         oi_cfg["code_depot"] = self.order_code_depot.text()
         oi_cfg["username"] = self.order_username.text()
         oi_cfg["on_missing_sku"] = self.order_on_missing_sku.currentText()
-        oi_cfg["status_mapping"] = _parse_mapping_text(self.order_status_mapping.toPlainText())
-        oi_cfg["transformation"] = _parse_mapping_text(self.order_transformation.toPlainText())
+
+        status_mapping = {}
+        for row in range(self.status_table.rowCount()):
+            status_combo = self.status_table.cellWidget(row, 0)
+            code_combo = self.status_table.cellWidget(row, 1)
+            wc_status = status_combo.currentText().strip() if status_combo else ""
+            code = _combo_value(code_combo) if code_combo else ""
+            if wc_status and code:
+                status_mapping[wc_status] = code
+        oi_cfg["status_mapping"] = status_mapping
+
+        transformation = {}
+        for row in range(self.transform_table.rowCount()):
+            target_combo = self.transform_table.cellWidget(row, 0)
+            source_combo = self.transform_table.cellWidget(row, 1)
+            target = _combo_value(target_combo) if target_combo else ""
+            source = _combo_value(source_combo) if source_combo else ""
+            if target and source:
+                transformation[target] = source
+        oi_cfg["transformation"] = transformation
         return oi_cfg
 
     def _start_order_import(self, dry_run):
@@ -460,6 +702,14 @@ class MainWindow(QMainWindow):
             f"created={len(report['created'])} skipped={len(report['skipped'])} "
             f"errors={len(report['errors'])}"
         )
+        skip_reasons = report.get("skip_reasons") or {}
+        if skip_reasons:
+            breakdown = ", ".join(f"{reason}={count}" for reason, count in skip_reasons.items())
+            self.order_log_view.appendPlainText(f"Skip reasons: {breakdown}")
+            if skip_reasons.get("already_imported"):
+                self.order_log_view.appendPlainText(
+                    f"  ({skip_reasons['already_imported']} already existed in Firebird -- not duplicated.)"
+                )
         if report.get("errors"):
             self.order_log_view.appendPlainText(f"Errors: {report['errors']}")
 

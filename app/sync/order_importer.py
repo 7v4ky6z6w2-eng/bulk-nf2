@@ -106,17 +106,24 @@ class OrderImporter:
 
     # -- main entry -----------------------------------------------------------
     def import_order(self, wc_order, dry_run=False, wc_orders_client=None):
-        """Returns ('created'|'skipped'|'error', message)."""
+        """Returns ('created'|'skipped'|'error', message, reason).
+
+        'reason' is a stable machine-readable code the caller can tally
+        (e.g. to show "N already imported" separately from "N status not
+        mapped" in a summary) -- notably 'already_imported', which is the
+        direct evidence the REFDOC duplicate check is doing its job on a
+        re-run over the same order history."""
         order_id = wc_order["id"]
         wc_status = (wc_order.get("status") or "").lower()
 
         doc_type = self.cfg["status_mapping"].get(wc_status)
         if not doc_type:
-            return "skipped", f"status '{wc_status}' not mapped"
+            return "skipped", f"status '{wc_status}' not mapped", "status_not_mapped"
 
         existing = self.already_imported(order_id, doc_type)
         if existing:
-            return "skipped", f"{doc_type} already imported as NOPIECE={existing}"
+            return ("skipped", f"{doc_type} already imported as NOPIECE={existing}",
+                    "already_imported")
 
         billing = wc_order.get("billing") or {}
         shipping = wc_order.get("shipping") or {}
@@ -159,7 +166,8 @@ class OrderImporter:
             art = self.lookup_article(sku)
             if not art:
                 if self.cfg["on_missing_sku"] == "skip_order":
-                    return "error", f"SKU {sku} not found in Firebird ARTICLE (skip_order policy)"
+                    return ("error", f"SKU {sku} not found in Firebird ARTICLE (skip_order policy)",
+                            "missing_sku")
                 log.warning("Order %s: SKU %s not in Firebird ARTICLE, line skipped", order_id, sku)
                 skipped_lines += 1
                 continue
@@ -182,7 +190,7 @@ class OrderImporter:
             })
 
         if not line_payloads:
-            return "skipped", "no valid lines"
+            return "skipped", "no valid lines", "no_valid_lines"
 
         total_ht = round(total_ht, 2)
         total_ttc = round(total_ttc, 2)
@@ -193,8 +201,8 @@ class OrderImporter:
 
         if dry_run:
             link = f" (would link to {source_type}#{source_nopiece})" if source_nopiece else ""
-            return "skipped", (f"[DRY] -> {doc_type}: {len(line_payloads)} line(s), "
-                                f"HT={total_ht}, TTC={total_ttc}{link}")
+            return ("skipped", (f"[DRY] -> {doc_type}: {len(line_payloads)} line(s), "
+                                 f"HT={total_ht}, TTC={total_ttc}{link}"), "dry_run")
 
         refdoc = f"WC-{order_id}"
         nopiece = str(self._next_base("NEXTPIECE", "PIECE", "NOPIECE") + 1)
@@ -235,19 +243,31 @@ class OrderImporter:
         self.con.commit()
         extra = f" (skipped {skipped_lines} line(s))" if skipped_lines else ""
         link = f" linked from {source_type}#{source_nopiece}" if source_nopiece else ""
-        return "created", f"{doc_type} NOPIECE={nopiece}, {len(line_payloads)} line(s){extra}{link}"
+        return ("created", f"{doc_type} NOPIECE={nopiece}, {len(line_payloads)} line(s){extra}{link}",
+                None)
 
 
 def run_order_import(cfg, dry_run=False, log_fn=None):
-    """Returns a report dict:
+    """Scans the FULL WooCommerce order history matching the configured
+    statuses every time it runs -- there's no separate "past orders" mode,
+    because this already is one: the REFDOC duplicate check
+    (OrderImporter.already_imported) makes it safe to re-run over orders
+    already imported, so a first run naturally backfills all matching
+    history and every later run only picks up what's new.
+
+    Returns a report dict:
     {"created": [order_id, ...], "skipped": [order_id, ...],
+     "skip_reasons": {"already_imported": N, "status_not_mapped": N,
+                       "no_valid_lines": N, "dry_run": N},
      "errors": [{"order_id": ..., "error": ...}]}
+    'skip_reasons["already_imported"]' is the direct, visible count of
+    duplicates the tool caught and did NOT re-create.
     """
     emit = log_fn or (lambda msg: log.info(msg))
     oi_cfg = cfg["order_import"]
 
     con = connect_firebird(cfg)
-    report = {"created": [], "skipped": [], "errors": []}
+    report = {"created": [], "skipped": [], "skip_reasons": {}, "errors": []}
     try:
         importer = OrderImporter(con, cfg)
         client_name = importer.verify_client()
@@ -262,17 +282,22 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
         wc_cfg = cfg["woocommerce"]
         wc_orders = WCOrdersClient(wc_cfg["site_url"], wc_cfg["consumer_key"], wc_cfg["consumer_secret"])
         orders = wc_orders.fetch_orders(statuses)
-        emit(f"{len(orders)} order(s) fetched matching configured statuses.")
+        emit(f"{len(orders)} order(s) fetched matching configured statuses "
+             f"(full history, not just new ones).")
 
         for order in orders:
             order_id = order["id"]
             try:
-                status, msg = importer.import_order(order, dry_run=dry_run, wc_orders_client=wc_orders)
+                status, msg, reason = importer.import_order(
+                    order, dry_run=dry_run, wc_orders_client=wc_orders
+                )
                 emit(f"WC#{order_id}: {status} - {msg}")
                 if status == "created":
                     report["created"].append(order_id)
                 elif status == "skipped":
                     report["skipped"].append(order_id)
+                    if reason:
+                        report["skip_reasons"][reason] = report["skip_reasons"].get(reason, 0) + 1
                 else:
                     report["errors"].append({"order_id": order_id, "error": msg})
             except Exception as exc:  # noqa: BLE001 -- one bad order shouldn't kill the run
@@ -281,6 +306,7 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
     finally:
         con.close()
 
+    reasons = ", ".join(f"{k}={v}" for k, v in report["skip_reasons"].items())
     emit(f"Done. created={len(report['created'])} skipped={len(report['skipped'])} "
-         f"errors={len(report['errors'])}")
+         f"({reasons}) errors={len(report['errors'])}")
     return report

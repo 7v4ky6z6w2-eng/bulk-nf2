@@ -76,22 +76,7 @@ def build_core_fields(article, cfg):
     if meta_data:
         fields["meta_data"] = meta_data
 
-    fields["_category_name"] = _category_from_cleaned_name(name)
     return fields
-
-
-def _category_from_cleaned_name(name):
-    """WooCommerce category name: the first word of the already-cleaned
-    product name (Title-cased, abbreviations expanded -- see name_cleaner),
-    so "stylo bille bleu" / "STYLO ..." / "STYL BIL BLU" all land in the
-    same "Stylo" category instead of near-duplicates piling up from
-    inconsistent data-entry casing or abbreviations."""
-    if not name:
-        return None
-    words = name.strip().split()
-    if not words:
-        return None
-    return words[0]
 
 
 def content_hash(core_fields, has_image, image_bytes=None):
@@ -165,21 +150,15 @@ def run_sync(cfg, dry_run=False, log_fn=None):
                 report["unchanged"] += 1
                 continue
 
+            # Categories are deliberately not touched here -- the store runs
+            # its own WordPress auto-categorizer plugin instead.
             payload = {k: v for k, v in core.items() if not k.startswith("_")}
 
             if dry_run:
-                payload["categories"] = [{"name": core["_category_name"]}] if core["_category_name"] else []
                 payload["images"] = ["<would upload ARTICLE.PHOTO>"] if image else []
                 report["payloads"].append({"ref_art": ref, "payload": payload,
                                             "action": "update" if existing else "create"})
                 continue
-
-            if core["_category_name"]:
-                try:
-                    cat_id = wc_client.find_or_create_category(core["_category_name"])
-                    payload["categories"] = [{"id": cat_id}]
-                except WooCommerceError as exc:
-                    report["errors"].append({"ref_art": ref, "error": f"category: {exc}"})
 
             image_source = "none"
             if image:

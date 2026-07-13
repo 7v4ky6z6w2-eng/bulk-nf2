@@ -37,6 +37,9 @@ class FakeConnection:
     def rollback(self):
         self.rolled_back = True
 
+    def close(self):
+        pass
+
 
 def _cfg(**overrides):
     cfg = copy.deepcopy(DEFAULT_CONFIG)
@@ -115,25 +118,27 @@ def test_next_base_uses_higher_of_max_existing_and_generator():
 def test_status_not_mapped_is_skipped():
     cfg = _cfg()
     importer, con, cur = _make_importer(cfg, _responder())
-    status, msg = importer.import_order(_wc_order(status="on-hold"))
+    status, msg, reason = importer.import_order(_wc_order(status="on-hold"))
     assert status == "skipped"
     assert "not mapped" in msg
+    assert reason == "status_not_mapped"
 
 
 def test_already_imported_order_is_skipped_not_duplicated():
     cfg = _cfg()
     responder = _responder(already_imported={("WC-555", "PC_VE_COM"): "42"})
     importer, con, cur = _make_importer(cfg, responder)
-    status, msg = importer.import_order(_wc_order(order_id=555, status="processing"))
+    status, msg, reason = importer.import_order(_wc_order(order_id=555, status="processing"))
     assert status == "skipped"
     assert "NOPIECE=42" in msg
+    assert reason == "already_imported"
     assert not any("INSERT INTO PIECE" in sql for sql, _ in cur.executed)
 
 
 def test_dry_run_does_not_write_or_commit(monkeypatch):
     cfg = _cfg()
     importer, con, cur = _make_importer(cfg, _responder())
-    status, msg = importer.import_order(_wc_order(), dry_run=True)
+    status, msg, reason = importer.import_order(_wc_order(), dry_run=True)
     assert status == "skipped"
     assert msg.startswith("[DRY]")
     assert not any("INSERT" in sql.upper() for sql, _ in cur.executed)
@@ -143,7 +148,7 @@ def test_dry_run_does_not_write_or_commit(monkeypatch):
 def test_missing_sku_skip_order_policy_errors_whole_order():
     cfg = _cfg(on_missing_sku="skip_order")
     importer, con, cur = _make_importer(cfg, _responder(article_by_sku={}))
-    status, msg = importer.import_order(_wc_order(sku="UNKNOWN_SKU"))
+    status, msg, reason = importer.import_order(_wc_order(sku="UNKNOWN_SKU"))
     assert status == "error"
     assert "UNKNOWN_SKU" in msg
 
@@ -151,7 +156,7 @@ def test_missing_sku_skip_order_policy_errors_whole_order():
 def test_missing_sku_skip_line_policy_skips_just_that_line():
     cfg = _cfg(on_missing_sku="skip_line")
     importer, con, cur = _make_importer(cfg, _responder(article_by_sku={}))
-    status, msg = importer.import_order(_wc_order(sku="UNKNOWN_SKU"))
+    status, msg, reason = importer.import_order(_wc_order(sku="UNKNOWN_SKU"))
     # No valid lines remain -> the whole order is skipped, but NOT an error.
     assert status == "skipped"
     assert msg == "no valid lines"
@@ -162,7 +167,7 @@ def test_creates_piece_and_items_with_correct_generator_based_ids():
     responder = _responder(max_nopiece=100, gen_piece=250, max_noitem=500, gen_item=10)
     importer, con, cur = _make_importer(cfg, responder)
 
-    status, msg = importer.import_order(_wc_order(order_id=999, sku="REF1", qty=3))
+    status, msg, reason = importer.import_order(_wc_order(order_id=999, sku="REF1", qty=3))
 
     assert status == "created"
     assert "NOPIECE=251" in msg  # max(100, 250) + 1
@@ -186,9 +191,51 @@ def test_transformation_links_to_source_piece():
         source_piece={("WC-321", "PC_VE_COM"): "77"},
     )
     importer, con, cur = _make_importer(cfg, responder)
-    status, msg = importer.import_order(_wc_order(order_id=321, status="completed"))
+    status, msg, reason = importer.import_order(_wc_order(order_id=321, status="completed"))
     assert status == "created"
     assert "linked from PC_VE_COM#77" in msg
     update_calls = [p for sql, p in cur.executed if sql.startswith("UPDATE PIECE SET NOPIECE_T")]
     assert len(update_calls) == 1
     assert update_calls[0][1] == "77"  # source NOPIECE being updated
+
+
+def test_run_order_import_tallies_skip_reasons(monkeypatch):
+    from app.sync import order_importer
+
+    cfg = _cfg()
+    cfg["woocommerce"]["site_url"] = "https://example.com"
+    cfg["woocommerce"]["consumer_key"] = "ck"
+    cfg["woocommerce"]["consumer_secret"] = "cs"
+
+    responder = _responder(already_imported={("WC-1", "PC_VE_COM"): "10"})
+    cur = FakeCursor(responder)
+    con = FakeConnection(cur)
+
+    orders = [
+        _wc_order(order_id=1, status="processing"),  # already imported -> skipped
+        _wc_order(order_id=2, status="on-hold"),      # status not mapped -> skipped
+        _wc_order(order_id=3, status="processing"),  # new -> created
+    ]
+
+    class FakeWCOrdersClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_orders(self, statuses, after=None):
+            return orders
+
+        def get_variation_sku(self, *args, **kwargs):
+            return ""
+
+        def get_product_sku(self, *args, **kwargs):
+            return ""
+
+    monkeypatch.setattr(order_importer, "connect_firebird", lambda cfg: con)
+    monkeypatch.setattr(order_importer, "WCOrdersClient", FakeWCOrdersClient)
+
+    report = order_importer.run_order_import(cfg)
+
+    assert report["created"] == [3]
+    assert set(report["skipped"]) == {1, 2}
+    assert report["skip_reasons"] == {"already_imported": 1, "status_not_mapped": 1}
+    assert report["errors"] == []

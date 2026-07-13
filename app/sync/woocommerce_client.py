@@ -1,8 +1,10 @@
 """Thin WooCommerce REST API client.
 
 Only implements what the sync engine needs: batch product create/update,
-category find-or-create, and (separately, since it needs different auth)
-uploading an image to the WordPress media library for ARTICLE.PHOTO blobs.
+and (separately, since it needs different auth) uploading an image to the
+WordPress media library for ARTICLE.PHOTO blobs. Categories are
+deliberately not touched here -- the store runs its own WordPress
+auto-categorizer plugin instead.
 """
 
 import logging
@@ -33,7 +35,6 @@ class WooCommerceClient:
         self.auth = (consumer_key, consumer_secret)
         self.wp_auth = (wp_username, wp_app_password) if wp_username else None
         self.timeout = timeout
-        self._category_cache = None
 
     def _request(self, method, path, auth, timeout=None, **kwargs):
         url = f"{self.base_url}{path}"
@@ -145,38 +146,14 @@ class WooCommerceClient:
             page += 1
         return results
 
-    # -- categories -----------------------------------------------------------
-    def _load_categories(self):
-        if self._category_cache is not None:
-            return
-        self._category_cache = {}
-        page = 1
-        while True:
-            rows = self._request(
-                "GET", "/wp-json/wc/v3/products/categories",
-                auth=self.auth, params={"per_page": 100, "page": page},
-            )
-            if not rows:
-                break
-            for row in rows:
-                self._category_cache[row["name"].strip().lower()] = row["id"]
-            if len(rows) < 100:
-                break
-            page += 1
-
-    def find_or_create_category(self, name):
-        if not name:
-            return None
-        self._load_categories()
-        key = name.strip().lower()
-        if key in self._category_cache:
-            return self._category_cache[key]
-        row = self._request(
-            "POST", "/wp-json/wc/v3/products/categories",
-            auth=self.auth, json={"name": name},
+    def ping(self):
+        """Lightweight connectivity/auth check for the GUI's Test Connection
+        button: fetch a single product. Raises WooCommerceError on failure
+        (bad URL, bad key/secret, network issue, etc.)."""
+        self._request(
+            "GET", "/wp-json/wc/v3/products",
+            auth=self.auth, params={"per_page": 1, "_fields": "id"},
         )
-        self._category_cache[key] = row["id"]
-        return row["id"]
 
     # -- media (needs WordPress app-password auth, not the WC keys) ---------
     def upload_media(self, image_bytes, filename, mime_type):
