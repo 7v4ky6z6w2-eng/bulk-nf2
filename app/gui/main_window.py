@@ -925,7 +925,8 @@ class MainWindow(QMainWindow):
             cfg[section]["interval_minutes"] = interval
             try:
                 if enabled:
-                    windows_task.install(sys.executable, cli_flag, interval, task_name)
+                    windows_task.install(sys.executable, cli_flag, interval, task_name,
+                                          self.config_path)
                     messages.append(f"{title}: scheduled every {interval} min")
                 else:
                     windows_task.remove(task_name)
