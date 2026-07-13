@@ -32,6 +32,20 @@ def _parse_wc_date(s):
         return datetime.datetime.now()
 
 
+# The exact "not cancelled" representation for PIECE.ANNULEE in this
+# install isn't confirmed yet (numeric 0/1 vs. CHAR 'N'/'O' are both common
+# in Firebird ERPs of this vintage). A SQL-side "ANNULEE = 0" filter was
+# found to silently never match real rows -- which made already_imported()
+# always return None and re-create every order on every run. Judging
+# "cancelled" in Python against this permissive allowlist of "not
+# cancelled" spellings is robust to either convention.
+_NOT_ANNULLED_VALUES = {None, 0, "0", "N", "n", "", False}
+
+
+def _is_annulled(value):
+    return value not in _NOT_ANNULLED_VALUES
+
+
 def _normalize_wc_after(date_str):
     """"YYYY-MM-DD" (from the GUI's date picker) -> the ISO8601 datetime
     WooCommerce's 'after' filter expects. Already-full datetimes pass
@@ -95,22 +109,26 @@ class OrderImporter:
     def already_imported(self, wc_order_id, doc_type):
         refdoc = f"WC-{wc_order_id}"
         self.cur.execute(
-            "SELECT NOPIECE FROM PIECE WHERE REFDOC = ? AND CODE_TYPE_PIECE = ? "
-            "AND (ANNULEE IS NULL OR ANNULEE = 0)",
+            "SELECT NOPIECE, ANNULEE FROM PIECE WHERE REFDOC = ? AND CODE_TYPE_PIECE = ?",
             (refdoc, doc_type),
         )
         row = self.cur.fetchone()
-        return row[0] if row else None
+        if not row:
+            return None
+        nopiece, annulee = row
+        return None if _is_annulled(annulee) else nopiece
 
     def find_source_piece(self, wc_order_id, source_type):
         refdoc = f"WC-{wc_order_id}"
         self.cur.execute(
-            "SELECT NOPIECE FROM PIECE WHERE REFDOC = ? AND CODE_TYPE_PIECE = ? "
-            "AND (ANNULEE IS NULL OR ANNULEE = 0)",
+            "SELECT NOPIECE, ANNULEE FROM PIECE WHERE REFDOC = ? AND CODE_TYPE_PIECE = ?",
             (refdoc, source_type),
         )
         row = self.cur.fetchone()
-        return row[0] if row else None
+        if not row:
+            return None
+        nopiece, annulee = row
+        return None if _is_annulled(annulee) else nopiece
 
     def lookup_article(self, sku):
         """Returns (REF_ART, PRIXVENTEHT, PRIXVENTETTC, TAUX_TVA) or None."""
@@ -292,7 +310,7 @@ class OrderImporter:
         if not rows:
             return "skipped", "no existing document to cancel", "no_existing_document"
 
-        active = [(nopiece, doc_type) for nopiece, doc_type, annulee in rows if not annulee]
+        active = [(nopiece, doc_type) for nopiece, doc_type, annulee in rows if not _is_annulled(annulee)]
         if not active:
             return "skipped", "already cancelled", "already_cancelled"
 

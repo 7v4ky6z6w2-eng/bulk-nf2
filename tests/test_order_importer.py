@@ -89,16 +89,16 @@ def _responder(article_by_sku=None, already_imported=None, source_piece=None,
             return (max_nopiece,)
         if "MAX(CAST(NOITEM" in s:
             return (max_noitem,)
-        if "ANNULEE FROM PIECE WHERE REFDOC" in s:
+        if "NOPIECE, CODE_TYPE_PIECE, ANNULEE FROM PIECE WHERE REFDOC" in s:
             (refdoc,) = params
             return list(existing_docs.get(refdoc, []))
-        if "NOPIECE FROM PIECE WHERE REFDOC" in s:
+        if "NOPIECE, ANNULEE FROM PIECE WHERE REFDOC" in s:
             refdoc, doc_type = params
             key = (refdoc, doc_type)
             if key in already_imported:
-                return (already_imported[key],)
+                return (already_imported[key], 0)
             if key in source_piece:
-                return (source_piece[key],)
+                return (source_piece[key], 0)
             return None
         if "REF_ART, PRIXVENTEHT, PRIXVENTETTC, TAUX_TVA FROM ARTICLE" in s:
             (sku,) = params
@@ -112,6 +112,34 @@ def _make_importer(cfg, responder):
     cur = FakeCursor(responder)
     con = FakeConnection(cur)
     return OrderImporter(con, cfg), con, cur
+
+
+def test_is_annulled_accepts_common_not_cancelled_encodings():
+    from app.sync.order_importer import _is_annulled
+
+    for value in (None, 0, "0", "N", "n", "", False):
+        assert _is_annulled(value) is False
+    for value in (1, "1", "O", "o", "Y", True):
+        assert _is_annulled(value) is True
+
+
+def test_already_imported_recognizes_prior_doc_even_when_annulee_is_char_zero():
+    # Regression test: the original SQL-side "ANNULEE = 0" filter silently
+    # never matched when ANNULEE was stored as a CHAR '0' rather than an
+    # integer, which made already_imported() always return None and
+    # re-create every previously-imported order on every run.
+    cfg = _cfg()
+
+    def responder(sql, params):
+        s = sql.upper()
+        if "RAISON_SOCIALE FROM TIERS" in s:
+            return ("Client",)
+        if "NOPIECE, ANNULEE FROM PIECE WHERE REFDOC" in s:
+            return ("77", "0")
+        return None
+
+    importer, con, cur = _make_importer(cfg, responder)
+    assert importer.already_imported(555, "PC_VE_COM") == "77"
 
 
 def test_next_base_uses_higher_of_max_existing_and_generator():
