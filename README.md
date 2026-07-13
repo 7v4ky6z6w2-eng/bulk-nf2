@@ -74,8 +74,16 @@ pytest tests/ -q
 1. Get a 64-bit `fbclient.dll` from a Firebird "client-only" install kit at
    firebirdsql.org (matching your Python's bitness) and place it at
    `packaging/fbclient/fbclient.dll` (not committed to this repo).
-2. `pip install -r requirements-dev.txt`
-3. `pyinstaller packaging/build.spec`
+2. Run `build.bat` (double-click it, or run it from a terminal). It installs
+   `requirements-dev.txt` and runs PyInstaller for you, using the `py`
+   launcher (`py -3.11`) rather than assuming `python` is on PATH. The
+   resulting exe is written to `dist\erp-woocommerce-sync.exe`.
+
+   Equivalent manual steps, if you'd rather run them yourself:
+   ```
+   py -3.11 -m pip install -r requirements-dev.txt
+   py -3.11 -m PyInstaller packaging\build.spec
+   ```
 
 The build must happen on Windows (or a Windows-targeting cross-build setup);
 it isn't produced by this repo's CI.
