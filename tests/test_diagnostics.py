@@ -81,3 +81,45 @@ def test_test_connections_combines_both(monkeypatch):
     result = diagnostics.test_connections(_cfg())
     assert result["firebird"] == {"ok": True, "message": "fb ok"}
     assert result["woocommerce"] == {"ok": False, "message": "wc bad"}
+
+
+class _RowsCursor:
+    def __init__(self, rows):
+        self.rows = rows
+        self.executed = []
+
+    def execute(self, sql, params=None):
+        self.executed.append(sql)
+
+    def fetchall(self):
+        return self.rows
+
+
+class _RowsConnection:
+    def __init__(self, rows):
+        self.rows = rows
+        self.closed = False
+
+    def cursor(self):
+        return _RowsCursor(self.rows)
+
+    def close(self):
+        self.closed = True
+
+
+def test_check_piece_annulee_returns_grouped_rows(monkeypatch):
+    rows = [("WC-imported", "0", 42), ("other", "N", 900)]
+    con = _RowsConnection(rows)
+    monkeypatch.setattr(diagnostics, "connect_firebird", lambda cfg: con)
+    result = diagnostics.check_piece_annulee(_cfg())
+    assert result == rows
+    assert con.closed is True
+
+
+def test_check_duplicate_wc_orders_returns_grouped_rows(monkeypatch):
+    rows = [("WC-123", "PC_VE_COM", 3)]
+    con = _RowsConnection(rows)
+    monkeypatch.setattr(diagnostics, "connect_firebird", lambda cfg: con)
+    result = diagnostics.check_duplicate_wc_orders(_cfg())
+    assert result == rows
+    assert con.closed is True

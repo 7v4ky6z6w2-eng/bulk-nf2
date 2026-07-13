@@ -160,6 +160,29 @@ class TypePiecesWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class OrderDiagnosticsWorker(QThread):
+    """Runs one of app.diagnostics' PIECE-table checks in the background --
+    the user only has NetFact2, not a raw SQL tool, so these buttons are
+    the only way for them to see this data."""
+    finished_ok = Signal(str, list)
+    finished_error = Signal(str, str)
+
+    def __init__(self, cfg, kind):
+        super().__init__()
+        self.cfg = cfg
+        self.kind = kind
+
+    def run(self):
+        try:
+            if self.kind == "annulee":
+                rows = diagnostics.check_piece_annulee(self.cfg)
+            else:
+                rows = diagnostics.check_duplicate_wc_orders(self.cfg)
+            self.finished_ok.emit(self.kind, rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(self.kind, str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -176,6 +199,7 @@ class MainWindow(QMainWindow):
         self.test_conn_worker = None
         self.type_pieces_worker = None
         self.type_piece_choices = []
+        self.order_diag_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
@@ -609,6 +633,32 @@ class MainWindow(QMainWindow):
         for target, source in oi_cfg["transformation"].items():
             self._add_transform_row(target, source)
 
+        diag_group = QGroupBox("Diagnostics (results print to the log below)")
+        diag_layout = QVBoxLayout(diag_group)
+        diag_layout.addWidget(QLabel(
+            "These connect to Firebird and print raw results here -- useful if\n"
+            "you only have NetFact2 and can't run a SQL query yourself."
+        ))
+        diag_btn_row = QHBoxLayout()
+        self.check_annulee_btn = QPushButton("Check ANNULEE values")
+        self.check_annulee_btn.setToolTip(
+            "Compares PIECE.ANNULEE on documents you created manually in NetFact2\n"
+            "vs. the ones this tool imported (REFDOC starting with 'WC-'). Tells\n"
+            "us whether the tool is writing the right 'not cancelled' value."
+        )
+        self.check_annulee_btn.clicked.connect(self._start_annulee_check)
+        self.check_duplicates_btn = QPushButton("Check for duplicate WC imports")
+        self.check_duplicates_btn.setToolTip(
+            "Finds orders that ended up with more than one PIECE for the same\n"
+            "order (evidence of the now-fixed duplicate-reimport bug)."
+        )
+        self.check_duplicates_btn.clicked.connect(self._start_duplicate_check)
+        diag_btn_row.addWidget(self.check_annulee_btn)
+        diag_btn_row.addWidget(self.check_duplicates_btn)
+        diag_btn_row.addStretch()
+        diag_layout.addLayout(diag_btn_row)
+        layout.addWidget(diag_group)
+
         btn_row = QHBoxLayout()
         self.order_dry_run_btn = QPushButton("Dry run (preview only)")
         self.order_dry_run_btn.clicked.connect(lambda: self._start_order_import(dry_run=True))
@@ -687,6 +737,45 @@ class MainWindow(QMainWindow):
         self.refresh_types_btn.setEnabled(True)
         self.refresh_types_btn.setText("Load document types from database")
         QMessageBox.warning(self, "Could not load document types", message)
+
+    def _start_annulee_check(self):
+        self._start_order_diagnostic("annulee")
+
+    def _start_duplicate_check(self):
+        self._start_order_diagnostic("duplicates")
+
+    def _start_order_diagnostic(self, kind):
+        if self.order_diag_worker and self.order_diag_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.check_annulee_btn.setEnabled(False)
+        self.check_duplicates_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(f"Running '{kind}' check...")
+        self.order_diag_worker = OrderDiagnosticsWorker(cfg, kind)
+        self.order_diag_worker.finished_ok.connect(self._order_diagnostic_done)
+        self.order_diag_worker.finished_error.connect(self._order_diagnostic_failed)
+        self.order_diag_worker.start()
+
+    def _order_diagnostic_done(self, kind, rows):
+        self.check_annulee_btn.setEnabled(True)
+        self.check_duplicates_btn.setEnabled(True)
+        if kind == "annulee":
+            self.order_log_view.appendPlainText("--- ANNULEE values: manually-created vs. WC-imported ---")
+            if not rows:
+                self.order_log_view.appendPlainText("  PIECE has no rows.")
+            for source, value, count in rows:
+                self.order_log_view.appendPlainText(f"  {source}: ANNULEE={value!r} ({count} document(s))")
+        else:
+            self.order_log_view.appendPlainText("--- Duplicate WC-imported documents ---")
+            if not rows:
+                self.order_log_view.appendPlainText("  None found.")
+            for refdoc, doc_type, count in rows:
+                self.order_log_view.appendPlainText(f"  {refdoc} / {doc_type}: {count} copies")
+
+    def _order_diagnostic_failed(self, kind, message):
+        self.check_annulee_btn.setEnabled(True)
+        self.check_duplicates_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"'{kind}' check FAILED: {message}")
 
     def _collect_order_import_config(self):
         oi_cfg = self.cfg["order_import"]

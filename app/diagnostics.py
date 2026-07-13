@@ -51,3 +51,42 @@ def test_connections(cfg):
         "firebird": {"ok": fb_ok, "message": fb_msg},
         "woocommerce": {"ok": wc_ok, "message": wc_msg},
     }
+
+
+def check_piece_annulee(cfg):
+    """Compares the ANNULEE value on manually-created PIECE documents vs.
+    the ones this tool has written (REFDOC starting with 'WC-'). Returns
+    a list of (source, annulee_value, count) rows -- for the user to run
+    from the Orders tab, since they only have NetFact2, not a raw SQL
+    tool, to check this themselves."""
+    con = connect_firebird(cfg)
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT CASE WHEN REFDOC STARTING WITH 'WC-' THEN 'WC-imported' "
+            "            ELSE 'other' END AS source, "
+            "       ANNULEE, COUNT(*) "
+            "FROM PIECE GROUP BY 1, 2 ORDER BY 1, 2"
+        )
+        return cur.fetchall()
+    finally:
+        con.close()
+
+
+def check_duplicate_wc_orders(cfg):
+    """Returns [(refdoc, code_type_piece, count), ...] for WC-imported
+    orders that ended up with more than one PIECE for the same order +
+    document type -- evidence of documents created by the (now fixed)
+    duplicate-reimport bug."""
+    con = connect_firebird(cfg)
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT REFDOC, CODE_TYPE_PIECE, COUNT(*) "
+            "FROM PIECE WHERE REFDOC STARTING WITH 'WC-' "
+            "GROUP BY REFDOC, CODE_TYPE_PIECE HAVING COUNT(*) > 1 "
+            "ORDER BY REFDOC"
+        )
+        return cur.fetchall()
+    finally:
+        con.close()
