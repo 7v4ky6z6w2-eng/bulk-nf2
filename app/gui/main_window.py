@@ -255,6 +255,19 @@ class MainWindow(QMainWindow):
         self.sync_images = QCheckBox("Use ARTICLE.PHOTO when it's a real image")
         self.sync_images.setChecked(self.cfg["sync"]["sync_images"])
         sync_form.addRow(self.sync_images)
+        self.auto_sale_on_price_drop = QCheckBox(
+            "If a price drops in NetFact2, show it as a WooCommerce sale price"
+        )
+        self.auto_sale_on_price_drop.setChecked(self.cfg["sync"]["auto_sale_on_price_drop"])
+        self.auto_sale_on_price_drop.setToolTip(
+            "Keeps the last-synced (higher) price as the WooCommerce regular\n"
+            "price and pushes the new, lower NetFact2 price as sale_price --\n"
+            "shows as a strikethrough discount instead of just changing the\n"
+            "base price. When the price rises back up, it becomes the new\n"
+            "regular price and the sale is cleared. An explicit ACTIVEPROMO\n"
+            "in NetFact2 always takes priority over this."
+        )
+        sync_form.addRow(self.auto_sale_on_price_drop)
         layout.addWidget(sync_group)
 
         wc_group = QGroupBox("WooCommerce REST API")
@@ -341,6 +354,7 @@ class MainWindow(QMainWindow):
         self.cfg["sync"]["filter_boutique_visible"] = self.filter_boutique.isChecked()
         self.cfg["sync"]["price_field"] = self.price_field.currentText()
         self.cfg["sync"]["sync_images"] = self.sync_images.isChecked()
+        self.cfg["sync"]["auto_sale_on_price_drop"] = self.auto_sale_on_price_drop.isChecked()
         self.cfg["woocommerce"]["site_url"] = self.wc_url.text()
         self.cfg["woocommerce"]["consumer_key"] = self.wc_key.text()
         self.cfg["woocommerce"]["consumer_secret"] = self.wc_secret.text()

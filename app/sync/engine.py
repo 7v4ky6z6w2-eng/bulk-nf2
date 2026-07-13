@@ -79,6 +79,38 @@ def build_core_fields(article, cfg):
     return fields
 
 
+def apply_auto_sale_price(core, last_regular_price):
+    """If the article's regular_price (freshly computed from Firebird) is
+    lower than the price WooCommerce already shows (the anchor price this
+    tool last pushed as regular_price), keep regular_price at that anchor
+    and push the lower Firebird price as sale_price instead -- so a price
+    cut in NetFact2 shows up as a strikethrough sale on the storefront
+    rather than silently replacing the base price. If the price is back
+    at or above the anchor, that price becomes the new anchor and any
+    previous auto-sale is cleared.
+
+    Skips articles that already carry an explicit ACTIVEPROMO sale_price
+    (build_core_fields already set one) -- that's a deliberate promo from
+    NetFact2 and takes priority over this heuristic.
+
+    Returns (possibly-modified core_fields, new_anchor_price)."""
+    new_price = core.get("regular_price")
+    if new_price is None:
+        return core, last_regular_price
+    if "sale_price" in core:
+        return core, float(new_price)
+
+    new_price_f = float(new_price)
+    core = dict(core)
+    if last_regular_price is not None and new_price_f < last_regular_price:
+        core["regular_price"] = _price_str(last_regular_price)
+        core["sale_price"] = new_price
+        return core, last_regular_price
+
+    core["sale_price"] = ""  # explicitly clear any stale auto-sale
+    return core, new_price_f
+
+
 def content_hash(core_fields, has_image, image_bytes=None):
     payload = dict(core_fields)
     payload["_has_image"] = has_image
@@ -136,7 +168,15 @@ def run_sync(cfg, dry_run=False, log_fn=None):
 
             ref = article["ref_art"]
             seen_refs.add(ref)
+            existing = store.get(ref)
             core = build_core_fields(article, cfg)
+
+            last_price = existing["last_regular_price"] if existing else None
+            if cfg["sync"].get("auto_sale_on_price_drop", True):
+                core, new_anchor = apply_auto_sale_price(core, last_price)
+            else:
+                price = core.get("regular_price")
+                new_anchor = float(price) if price is not None else last_price
 
             image = None
             if cfg["sync"]["sync_images"]:
@@ -144,7 +184,6 @@ def run_sync(cfg, dry_run=False, log_fn=None):
 
             new_hash = content_hash(core, has_image=bool(image),
                                      image_bytes=image.data if image else None)
-            existing = store.get(ref)
 
             if existing and existing["content_hash"] == new_hash:
                 report["unchanged"] += 1
@@ -169,7 +208,7 @@ def run_sync(cfg, dry_run=False, log_fn=None):
                 except WooCommerceError as exc:
                     report["errors"].append({"ref_art": ref, "error": f"image: {exc}"})
 
-            pending[ref] = (new_hash, image_source)
+            pending[ref] = (new_hash, image_source, new_anchor)
             if existing and existing["wc_product_id"]:
                 payload["id"] = existing["wc_product_id"]
                 to_update.append(payload)
@@ -196,12 +235,13 @@ def run_sync(cfg, dry_run=False, log_fn=None):
                     ref = row.get("sku")
                     if ref is None or ref not in pending:
                         continue
-                    new_hash, image_source = pending[ref]
+                    new_hash, image_source, new_anchor = pending[ref]
                     if row.get("error"):
                         store.record_error(ref, str(row["error"]), now)
                         report["errors"].append({"ref_art": ref, "error": row["error"]})
                         continue
-                    store.upsert(ref, row.get("id"), new_hash, image_source, now)
+                    store.upsert(ref, row.get("id"), new_hash, image_source, now,
+                                 last_regular_price=new_anchor)
                     target_list.append(ref)
 
         # Orphans: articles the state store remembers syncing that no longer

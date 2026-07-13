@@ -105,6 +105,45 @@ def test_build_core_fields_does_not_set_category():
     assert not any(k.startswith("_category") for k in core)
 
 
+def test_apply_auto_sale_price_no_anchor_yet_just_records_it():
+    core = {"regular_price": "100.00"}
+    new_core, anchor = engine.apply_auto_sale_price(core, None)
+    assert new_core["sale_price"] == ""  # explicit "no sale" rather than an unmanaged field
+    assert anchor == 100.0
+
+
+def test_apply_auto_sale_price_drop_keeps_anchor_as_regular_price():
+    core = {"regular_price": "80.00"}
+    new_core, anchor = engine.apply_auto_sale_price(core, 100.0)
+    assert new_core["regular_price"] == "100.00"
+    assert new_core["sale_price"] == "80.00"
+    assert anchor == 100.0  # anchor unchanged while discounted
+
+
+def test_apply_auto_sale_price_recovery_clears_sale_and_sets_new_anchor():
+    core = {"regular_price": "110.00"}
+    new_core, anchor = engine.apply_auto_sale_price(core, 100.0)
+    assert new_core["regular_price"] == "110.00"
+    assert new_core["sale_price"] == ""
+    assert anchor == 110.0
+
+
+def test_apply_auto_sale_price_equal_to_anchor_clears_sale():
+    core = {"regular_price": "100.00"}
+    new_core, anchor = engine.apply_auto_sale_price(core, 100.0)
+    assert new_core["sale_price"] == ""
+    assert anchor == 100.0
+
+
+def test_apply_auto_sale_price_skips_when_explicit_promo_already_set():
+    # An ACTIVEPROMO sale from build_core_fields must not be overridden.
+    core = {"regular_price": "100.00", "sale_price": "60.00"}
+    new_core, anchor = engine.apply_auto_sale_price(core, 90.0)
+    assert new_core is core
+    assert new_core["sale_price"] == "60.00"
+    assert anchor == 100.0
+
+
 def test_content_hash_changes_when_price_changes():
     cfg = _cfg("unused.sqlite3")
     a1 = engine.build_core_fields(_article(prix_vente_ttc=24.0), cfg)
@@ -147,11 +186,15 @@ class FakeWooCommerceClient:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.created = []
+        self.last_create = []
+        self.last_update = []
         FakeWooCommerceClient.instances.append(self)
 
     def batch_products(self, create=None, update=None, delete=None, chunk_size=100, progress_fn=None):
         create = create or []
         update = update or []
+        self.last_create = create
+        self.last_update = update
         next_id = 1000
         out_create = []
         for item in create:
@@ -182,6 +225,54 @@ def test_run_sync_real_run_then_unchanged_on_rerun(monkeypatch):
         assert report2["created"] == []
         assert report2["updated"] == []
         assert report2["unchanged"] == 1
+
+
+def test_run_sync_auto_sale_price_across_runs(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = os.path.join(tmp, "state.sqlite3")
+        cfg = _cfg(state_path)
+
+        monkeypatch.setattr(engine, "connect_firebird", lambda cfg: DummyConnection())
+        monkeypatch.setattr(engine.queries, "fetch_familles", lambda con: {
+            "FAM1": {"intitule": "Stylos", "boutiq_visible": True}
+        })
+        monkeypatch.setattr(engine, "WooCommerceClient", FakeWooCommerceClient)
+
+        # Run 1: establishes the anchor at 24.00, no discount yet.
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=24.0)])
+        report1 = engine.run_sync(cfg, dry_run=False)
+        assert report1["created"] == ["REF1"]
+
+        # Run 2: price drops -> should push as a sale, keeping 24.00 as
+        # regular_price and 18.00 as sale_price.
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=18.0)])
+        report2 = engine.run_sync(cfg, dry_run=False)
+        assert report2["updated"] == ["REF1"]
+        pushed = FakeWooCommerceClient.instances[-1].last_update[0]
+        assert pushed["regular_price"] == "24.00"
+        assert pushed["sale_price"] == "18.00"
+
+        # Re-running with the same (still discounted) price should be a
+        # no-op -- confirms the anchor/sale state was persisted correctly.
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=18.0)])
+        dry = engine.run_sync(cfg, dry_run=True)
+        # unchanged because run 2 already pushed the same 18.00 discount
+        assert dry["payloads"] == []
+
+        # Run 3: price recovers above the anchor -> new anchor, sale cleared.
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=30.0)])
+        report3 = engine.run_sync(cfg, dry_run=False)
+        assert report3["updated"] == ["REF1"]
+        pushed3 = FakeWooCommerceClient.instances[-1].last_update[0]
+        assert pushed3["regular_price"] == "30.00"
+        assert pushed3["sale_price"] == ""
+
+        dry2 = engine.run_sync(cfg, dry_run=True)
+        assert dry2["payloads"] == []  # confirms 30.00 became the new stable anchor
 
 
 def test_run_sync_reports_orphans(monkeypatch):

@@ -78,6 +78,41 @@ def test_stock_targets_and_set_last_stocks():
             assert targets["A2"] == (20, 3)
 
 
+def test_last_regular_price_roundtrip():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "state.sqlite3")
+        with StateStore(path) as store:
+            assert store.get("A1") is None
+            store.upsert("A1", 10, "h1", "none", "t", last_regular_price=24.0)
+            assert store.get("A1")["last_regular_price"] == 24.0
+
+            store.upsert("A1", 10, "h2", "none", "t2", last_regular_price=30.0)
+            assert store.get("A1")["last_regular_price"] == 30.0
+
+            # omitted -> defaults to None (matches upsert()'s default)
+            store.upsert("A2", 11, "h3", "none", "t")
+            assert store.get("A2")["last_regular_price"] is None
+
+
+def test_last_regular_price_column_added_to_preexisting_db():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "state.sqlite3")
+        con = sqlite3.connect(path)
+        con.execute(
+            "CREATE TABLE sync_map (ref_art TEXT PRIMARY KEY, wc_product_id INTEGER, "
+            "content_hash TEXT, image_source TEXT, last_synced_at TEXT, last_error TEXT, "
+            "last_stock INTEGER)"
+        )
+        con.execute("INSERT INTO sync_map (ref_art, wc_product_id) VALUES ('A1', 5)")
+        con.commit()
+        con.close()
+
+        with StateStore(path) as store:
+            assert store.get("A1")["last_regular_price"] is None
+            store.upsert("A1", 5, "h", "none", "t", last_regular_price=15.5)
+            assert store.get("A1")["last_regular_price"] == 15.5
+
+
 def test_last_stock_column_added_to_preexisting_db():
     # A store created before last_stock existed must gain the column on open.
     with tempfile.TemporaryDirectory() as tmp:

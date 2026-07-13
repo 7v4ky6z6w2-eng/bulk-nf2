@@ -32,6 +32,12 @@ DEFAULT_CONFIG = {
         # depends on the store's "prices entered with tax" setting.
         "price_field": "PRIXVENTETTC",
         "promo_price_field": "PRIXTTCPROMO",
+        # If an article's price drops below the price WooCommerce already
+        # shows (and there's no explicit ACTIVEPROMO), keep the higher
+        # price as regular_price and push the lower one as sale_price --
+        # shows as a strikethrough sale instead of silently changing the
+        # base price. Tracked per-article in the local state store.
+        "auto_sale_on_price_drop": True,
         "sync_images": True,
         # Abbreviation -> full word, applied (case-insensitively) before
         # Title-casing the product name. Seeded from the user's own

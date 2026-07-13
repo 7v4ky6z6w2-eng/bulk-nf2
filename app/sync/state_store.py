@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS sync_map (
     image_source TEXT,          -- 'blob' | 'none'
     last_synced_at TEXT,
     last_error TEXT,
-    last_stock INTEGER          -- last stock_quantity pushed to WooCommerce
+    last_stock INTEGER,         -- last stock_quantity pushed to WooCommerce
+    last_regular_price REAL     -- anchor "was" price for auto-sale-on-price-drop
 );
 """
 
@@ -34,6 +35,8 @@ class StateStore:
         existing = {row[1] for row in self.con.execute("PRAGMA table_info(sync_map)")}
         if "last_stock" not in existing:
             self.con.execute("ALTER TABLE sync_map ADD COLUMN last_stock INTEGER")
+        if "last_regular_price" not in existing:
+            self.con.execute("ALTER TABLE sync_map ADD COLUMN last_regular_price REAL")
 
     def close(self):
         self.con.close()
@@ -47,31 +50,32 @@ class StateStore:
     def get(self, ref_art):
         row = self.con.execute(
             "SELECT ref_art, wc_product_id, content_hash, image_source, "
-            "last_synced_at, last_error FROM sync_map WHERE ref_art = ?",
+            "last_synced_at, last_error, last_regular_price FROM sync_map WHERE ref_art = ?",
             (ref_art,),
         ).fetchone()
         if not row:
             return None
         keys = ["ref_art", "wc_product_id", "content_hash", "image_source",
-                "last_synced_at", "last_error"]
+                "last_synced_at", "last_error", "last_regular_price"]
         return dict(zip(keys, row))
 
     def all_ref_arts(self):
         return {r[0] for r in self.con.execute("SELECT ref_art FROM sync_map")}
 
     def upsert(self, ref_art, wc_product_id, content_hash, image_source,
-               synced_at, error=None):
+               synced_at, error=None, last_regular_price=None):
         self.con.execute(
             "INSERT INTO sync_map (ref_art, wc_product_id, content_hash, "
-            "  image_source, last_synced_at, last_error) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "  image_source, last_synced_at, last_error, last_regular_price) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(ref_art) DO UPDATE SET "
             "  wc_product_id=excluded.wc_product_id, "
             "  content_hash=excluded.content_hash, "
             "  image_source=excluded.image_source, "
             "  last_synced_at=excluded.last_synced_at, "
-            "  last_error=excluded.last_error",
-            (ref_art, wc_product_id, content_hash, image_source, synced_at, error),
+            "  last_error=excluded.last_error, "
+            "  last_regular_price=excluded.last_regular_price",
+            (ref_art, wc_product_id, content_hash, image_source, synced_at, error, last_regular_price),
         )
         self.con.commit()
 
