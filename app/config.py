@@ -95,6 +95,9 @@ DEFAULT_CONFIG = {
         # e.g. an order that went processing -> cancelled. Empty by default
         # (opt-in), since it writes to Firebird (ANNULEE=1).
         "cancel_statuses": [],
+        # "YYYY-MM-DD" -- only fetch/import orders created on/after this
+        # date. Empty = no filter (full history, as before).
+        "start_date": "",
         "interval_minutes": 15,
     },
 

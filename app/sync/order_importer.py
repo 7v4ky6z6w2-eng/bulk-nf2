@@ -32,6 +32,16 @@ def _parse_wc_date(s):
         return datetime.datetime.now()
 
 
+def _normalize_wc_after(date_str):
+    """"YYYY-MM-DD" (from the GUI's date picker) -> the ISO8601 datetime
+    WooCommerce's 'after' filter expects. Already-full datetimes pass
+    through unchanged. Returns None for blank/unset (no date filter)."""
+    date_str = (date_str or "").strip()
+    if not date_str:
+        return None
+    return date_str if "T" in date_str else f"{date_str}T00:00:00"
+
+
 class OrderImporter:
     def __init__(self, con, cfg):
         self.con = con
@@ -305,6 +315,11 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
     already imported, so a first run naturally backfills all matching
     history and every later run only picks up what's new.
 
+    If cfg['order_import']['start_date'] is set ("YYYY-MM-DD"), only
+    orders created on/after that date are fetched at all -- useful to
+    keep a large store's every-run scan fast, or to deliberately exclude
+    old orders from ever being imported.
+
     Orders whose WooCommerce status is in cfg['order_import']['cancel_statuses']
     are handled separately: instead of creating a document, any document(s)
     already created for that order (by an earlier run, back when it had a
@@ -353,9 +368,10 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
         wc_cfg = cfg["woocommerce"]
         wc_orders = WCOrdersClient(wc_cfg["site_url"], wc_cfg["consumer_key"], wc_cfg["consumer_secret"])
         all_statuses = list(dict.fromkeys(create_statuses + cancel_statuses))
-        orders = wc_orders.fetch_orders(all_statuses)
-        emit(f"{len(orders)} order(s) fetched matching configured statuses "
-             f"(full history, not just new ones).")
+        after = _normalize_wc_after(oi_cfg.get("start_date"))
+        orders = wc_orders.fetch_orders(all_statuses, after=after)
+        scope = f"created on/after {oi_cfg['start_date']}" if after else "full history, not just new ones"
+        emit(f"{len(orders)} order(s) fetched matching configured statuses ({scope}).")
 
         for order in orders:
             order_id = order["id"]

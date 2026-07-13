@@ -372,3 +372,81 @@ def test_import_order_sanitizes_unencodable_customer_name():
     order["billing"]["first_name"] = "ڨاک"  # contains Kurdish KAF
     status, msg, reason = importer.import_order(order)
     assert status == "created"
+
+
+def test_normalize_wc_after():
+    from app.sync.order_importer import _normalize_wc_after
+
+    assert _normalize_wc_after("") is None
+    assert _normalize_wc_after(None) is None
+    assert _normalize_wc_after("  ") is None
+    assert _normalize_wc_after("2026-01-01") == "2026-01-01T00:00:00"
+    assert _normalize_wc_after("2026-01-01T08:30:00") == "2026-01-01T08:30:00"
+
+
+def test_run_order_import_passes_start_date_as_after_filter(monkeypatch):
+    from app.sync import order_importer
+
+    cfg = _cfg(start_date="2026-01-01")
+    cfg["woocommerce"]["site_url"] = "https://example.com"
+    cfg["woocommerce"]["consumer_key"] = "ck"
+    cfg["woocommerce"]["consumer_secret"] = "cs"
+
+    cur = FakeCursor(_responder())
+    con = FakeConnection(cur)
+    captured = {}
+
+    class FakeWCOrdersClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_orders(self, statuses, after=None):
+            captured["after"] = after
+            return []
+
+        def get_variation_sku(self, *args, **kwargs):
+            return ""
+
+        def get_product_sku(self, *args, **kwargs):
+            return ""
+
+    monkeypatch.setattr(order_importer, "connect_firebird", lambda cfg: con)
+    monkeypatch.setattr(order_importer, "WCOrdersClient", FakeWCOrdersClient)
+
+    order_importer.run_order_import(cfg)
+
+    assert captured["after"] == "2026-01-01T00:00:00"
+
+
+def test_run_order_import_with_no_start_date_fetches_full_history(monkeypatch):
+    from app.sync import order_importer
+
+    cfg = _cfg()  # start_date left at DEFAULT_CONFIG's "" (via _cfg's deepcopy)
+    cfg["woocommerce"]["site_url"] = "https://example.com"
+    cfg["woocommerce"]["consumer_key"] = "ck"
+    cfg["woocommerce"]["consumer_secret"] = "cs"
+
+    cur = FakeCursor(_responder())
+    con = FakeConnection(cur)
+    captured = {}
+
+    class FakeWCOrdersClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_orders(self, statuses, after=None):
+            captured["after"] = after
+            return []
+
+        def get_variation_sku(self, *args, **kwargs):
+            return ""
+
+        def get_product_sku(self, *args, **kwargs):
+            return ""
+
+    monkeypatch.setattr(order_importer, "connect_firebird", lambda cfg: con)
+    monkeypatch.setattr(order_importer, "WCOrdersClient", FakeWCOrdersClient)
+
+    order_importer.run_order_import(cfg)
+
+    assert captured["after"] is None

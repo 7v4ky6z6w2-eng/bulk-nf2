@@ -7,12 +7,12 @@ person, not a product.
 import platform
 import sys
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QDate, QThread, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
-    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
-    QTableWidget, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+    QSpinBox, QTableWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from app import diagnostics
@@ -483,10 +483,11 @@ class MainWindow(QMainWindow):
 
         note = QLabel(
             "Every run scans the FULL WooCommerce order history for the statuses\n"
-            "mapped below -- there's no separate \"import past orders\" step.\n"
-            "Each order is written to Firebird as PIECE.REFDOC = 'WC-<order id>',\n"
-            "and that field is checked before creating anything, so re-running\n"
-            "(or scheduling this to run repeatedly) never creates a duplicate\n"
+            "mapped below (or only orders on/after the date below, if set) --\n"
+            "there's no separate \"import past orders\" step. Each order is\n"
+            "written to Firebird as PIECE.REFDOC = 'WC-<order id>', and that\n"
+            "field is checked before creating anything, so re-running (or\n"
+            "scheduling this to run repeatedly) never creates a duplicate\n"
             "document for an order that was already imported."
         )
         note.setWordWrap(True)
@@ -519,6 +520,31 @@ class MainWindow(QMainWindow):
             "Comma-separated. Leave empty to disable (cancellations are ignored)."
         )
         form.addRow("Cancel statuses:", self.order_cancel_statuses)
+
+        start_date_row = QHBoxLayout()
+        self.order_use_start_date = QCheckBox("Only import orders created on/after:")
+        self.order_start_date = QDateEdit()
+        self.order_start_date.setCalendarPopup(True)
+        self.order_start_date.setDisplayFormat("yyyy-MM-dd")
+        configured_start = (oi_cfg.get("start_date") or "").strip()
+        if configured_start:
+            self.order_use_start_date.setChecked(True)
+            qd = QDate.fromString(configured_start, "yyyy-MM-dd")
+            self.order_start_date.setDate(qd if qd.isValid() else QDate.currentDate())
+        else:
+            self.order_use_start_date.setChecked(False)
+            self.order_start_date.setDate(QDate.currentDate().addMonths(-1))
+        self.order_start_date.setEnabled(self.order_use_start_date.isChecked())
+        self.order_use_start_date.toggled.connect(self.order_start_date.setEnabled)
+        self.order_use_start_date.setToolTip(
+            "Skips fetching/importing anything created before this date.\n"
+            "Useful to keep a large order history fast to scan each run, or\n"
+            "to deliberately leave old orders out. Unchecked = full history."
+        )
+        start_date_row.addWidget(self.order_use_start_date)
+        start_date_row.addWidget(self.order_start_date)
+        start_date_row.addStretch()
+        form.addRow(start_date_row)
         layout.addWidget(cfg_group)
 
         types_row = QHBoxLayout()
@@ -671,6 +697,10 @@ class MainWindow(QMainWindow):
         oi_cfg["cancel_statuses"] = [
             s.strip() for s in self.order_cancel_statuses.text().split(",") if s.strip()
         ]
+        oi_cfg["start_date"] = (
+            self.order_start_date.date().toString("yyyy-MM-dd")
+            if self.order_use_start_date.isChecked() else ""
+        )
 
         status_mapping = {}
         for row in range(self.status_table.rowCount()):
