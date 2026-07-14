@@ -55,16 +55,33 @@ def install(exe_path, cli_flag, interval_minutes, task_name, config_path):
     GUI. The absolute exe + config paths are written into the wrapper
     .bat's contents rather than passed directly to schtasks, so the /TR
     value itself (just the short wrapper path) never risks that length
-    limit regardless of how deep the real install folder is."""
+    limit regardless of how deep the real install folder is.
+
+    The wrapper .bat also `cd /d`s into the exe's own directory before
+    running it: that's not just about --config -- config.json's own
+    state_db_path (and other relative-path settings) default to bare
+    filenames like "sync_state.sqlite3", resolved against whatever the
+    process's current working directory happens to be. A bare wrapper
+    .bat run by Task Scheduler has no working directory guarantee either
+    (often not even writable), which is exactly what caused
+    "sqlite3.OperationalError: unable to open database file" from a
+    scheduled --stock-sync run. cd'ing to the exe's folder first restores
+    the same working directory a normal double-click launch would have,
+    fixing every relative path the app assumes at once."""
     _require_windows()
     abs_exe = os.path.abspath(exe_path)
     abs_config = os.path.abspath(config_path)
+    exe_dir = os.path.dirname(abs_exe)
 
     wrapper_dir = _wrapper_dir()
     os.makedirs(wrapper_dir, exist_ok=True)
     wrapper_path = _wrapper_path(task_name)
     with open(wrapper_path, "w", encoding="utf-8") as fh:
-        fh.write(f'@echo off\r\n"{abs_exe}" {cli_flag} --config "{abs_config}"\r\n')
+        fh.write(
+            "@echo off\r\n"
+            f'cd /d "{exe_dir}"\r\n'
+            f'"{abs_exe}" {cli_flag} --config "{abs_config}"\r\n'
+        )
 
     subprocess.run(
         ["schtasks", "/Create", "/TN", task_name, "/TR", f'"{wrapper_path}"',

@@ -36,6 +36,11 @@ def test_install_writes_wrapper_bat_with_full_paths(monkeypatch, tmp_path):
     assert os.path.abspath(config_path) in content
     assert "--import-orders" in content
     assert "--config" in content
+    # cd's into the exe's own directory first, so every relative path the
+    # app assumes (state_db_path, dry_run_payloads.json, ...) resolves the
+    # same way it would from a normal double-click launch.
+    exe_dir = os.path.dirname(os.path.abspath(exe_path))
+    assert f'cd /d "{exe_dir}"' in content
 
 
 def test_install_keeps_tr_argument_short_regardless_of_real_path_length(monkeypatch, tmp_path):
