@@ -96,10 +96,12 @@ def _responder(article_by_sku=None, already_imported=None, source_piece=None,
             refdoc, doc_type = params
             key = (refdoc, doc_type)
             if key in already_imported:
-                return (already_imported[key], 0)
+                val = already_imported[key]
+                return val if isinstance(val, list) else [(val, 0)]
             if key in source_piece:
-                return (source_piece[key], 0)
-            return None
+                val = source_piece[key]
+                return val if isinstance(val, list) else [(val, 0)]
+            return []
         if "REF_ART, PRIXVENTEHT, PRIXVENTETTC, TAUX_TVA FROM ARTICLE" in s:
             (sku,) = params
             return article_by_sku.get(sku)
@@ -135,11 +137,35 @@ def test_already_imported_recognizes_prior_doc_even_when_annulee_is_char_zero():
         if "RAISON_SOCIALE FROM TIERS" in s:
             return ("Client",)
         if "NOPIECE, ANNULEE FROM PIECE WHERE REFDOC" in s:
-            return ("77", "0")
+            return [("77", "0")]
         return None
 
     importer, con, cur = _make_importer(cfg, responder)
     assert importer.already_imported(555, "PC_VE_COM") == "77"
+
+
+def test_already_imported_finds_active_row_even_when_cancelled_duplicate_listed_first():
+    # Regression test: an order can end up with two PIECE rows sharing the
+    # same REFDOC -- e.g. a leftover duplicate from the historical
+    # duplicate-reimport bug that the user cancelled by hand in NetFact2
+    # instead of deleting. fetchone() with no ORDER BY could return that
+    # cancelled row first and wrongly conclude nothing was ever imported,
+    # creating yet another duplicate on the next run.
+    cfg = _cfg()
+    responder = _responder(already_imported={
+        ("WC-555", "PC_VE_COM"): [("41", 1), ("42", 0)],  # cancelled row first
+    })
+    importer, con, cur = _make_importer(cfg, responder)
+    assert importer.already_imported(555, "PC_VE_COM") == "42"
+
+
+def test_already_imported_returns_none_when_every_matching_row_is_cancelled():
+    cfg = _cfg()
+    responder = _responder(already_imported={
+        ("WC-555", "PC_VE_COM"): [("41", 1), ("42", 1)],
+    })
+    importer, con, cur = _make_importer(cfg, responder)
+    assert importer.already_imported(555, "PC_VE_COM") is None
 
 
 def test_next_base_uses_higher_of_max_existing_and_generator():
@@ -478,3 +504,75 @@ def test_run_order_import_with_no_start_date_fetches_full_history(monkeypatch):
     order_importer.run_order_import(cfg)
 
     assert captured["after"] is None
+
+
+def test_fix_duplicate_orders_keeps_earliest_and_annuls_rest(monkeypatch):
+    from app.sync import order_importer
+
+    def responder(sql, params):
+        s = sql.upper()
+        if "REFDOC, CODE_TYPE_PIECE, NOPIECE, ANNULEE FROM PIECE" in s:
+            return [
+                ("WC-1", "PC_VE_COM", "10", 0),
+                ("WC-1", "PC_VE_COM", "20", 0),
+                ("WC-2", "PC_VE_COM", "30", 0),
+                ("WC-2", "PC_VE_COM", "40", 1),  # already cancelled by hand -> not a live dup
+                ("WC-3", "PC_VE_B", "50", 0),
+            ]
+        return None
+
+    cur = FakeCursor(responder)
+    con = FakeConnection(cur)
+    monkeypatch.setattr(order_importer, "connect_firebird", lambda cfg: con)
+
+    report = order_importer.fix_duplicate_orders(_cfg(), dry_run=False)
+
+    assert report["total_annulled"] == 1
+    assert report["fixed"] == [
+        {"refdoc": "WC-1", "code_type_piece": "PC_VE_COM", "kept": "10", "annulled": ["20"]},
+    ]
+    piece_updates = [p for sql, p in cur.executed if sql.startswith("UPDATE PIECE SET ANNULEE")]
+    item_updates = [p for sql, p in cur.executed if sql.startswith("UPDATE ITEM SET ANNULEE")]
+    assert piece_updates == [("20",)]
+    assert item_updates == [("20",)]
+    assert con.committed is True
+
+
+def test_fix_duplicate_orders_dry_run_does_not_write(monkeypatch):
+    from app.sync import order_importer
+
+    def responder(sql, params):
+        s = sql.upper()
+        if "REFDOC, CODE_TYPE_PIECE, NOPIECE, ANNULEE FROM PIECE" in s:
+            return [("WC-1", "PC_VE_COM", "10", 0), ("WC-1", "PC_VE_COM", "20", 0)]
+        return None
+
+    cur = FakeCursor(responder)
+    con = FakeConnection(cur)
+    monkeypatch.setattr(order_importer, "connect_firebird", lambda cfg: con)
+
+    report = order_importer.fix_duplicate_orders(_cfg(), dry_run=True)
+
+    assert report["total_annulled"] == 1
+    assert report["fixed"][0]["annulled"] == ["20"]
+    assert not any(sql.startswith("UPDATE") for sql, _ in cur.executed)
+    assert con.committed is False
+
+
+def test_fix_duplicate_orders_no_duplicates_is_a_noop(monkeypatch):
+    from app.sync import order_importer
+
+    def responder(sql, params):
+        s = sql.upper()
+        if "REFDOC, CODE_TYPE_PIECE, NOPIECE, ANNULEE FROM PIECE" in s:
+            return [("WC-1", "PC_VE_COM", "10", 0), ("WC-2", "PC_VE_COM", "30", 0)]
+        return None
+
+    cur = FakeCursor(responder)
+    con = FakeConnection(cur)
+    monkeypatch.setattr(order_importer, "connect_firebird", lambda cfg: con)
+
+    report = order_importer.fix_duplicate_orders(_cfg(), dry_run=False)
+
+    assert report["fixed"] == []
+    assert report["total_annulled"] == 0

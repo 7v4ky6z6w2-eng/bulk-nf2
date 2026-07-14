@@ -107,16 +107,23 @@ class OrderImporter:
         return row[0].strip() if row and row[0] else None
 
     def already_imported(self, wc_order_id, doc_type):
+        """Returns the NOPIECE of an active (non-cancelled) document for
+        this order + doc type, or None. Must scan every matching row, not
+        just the first one: an order can have more than one PIECE sharing
+        the same REFDOC (e.g. a leftover duplicate from the historical
+        duplicate-reimport bug that got manually cancelled in NetFact2
+        instead of deleted) -- fetchone() with no ORDER BY could return
+        that cancelled row first and wrongly conclude nothing was ever
+        imported, creating yet another duplicate."""
         refdoc = f"WC-{wc_order_id}"
         self.cur.execute(
             "SELECT NOPIECE, ANNULEE FROM PIECE WHERE REFDOC = ? AND CODE_TYPE_PIECE = ?",
             (refdoc, doc_type),
         )
-        row = self.cur.fetchone()
-        if not row:
-            return None
-        nopiece, annulee = row
-        return None if _is_annulled(annulee) else nopiece
+        for nopiece, annulee in self.cur.fetchall():
+            if not _is_annulled(annulee):
+                return nopiece
+        return None
 
     def find_source_piece(self, wc_order_id, source_type):
         refdoc = f"WC-{wc_order_id}"
@@ -124,11 +131,10 @@ class OrderImporter:
             "SELECT NOPIECE, ANNULEE FROM PIECE WHERE REFDOC = ? AND CODE_TYPE_PIECE = ?",
             (refdoc, source_type),
         )
-        row = self.cur.fetchone()
-        if not row:
-            return None
-        nopiece, annulee = row
-        return None if _is_annulled(annulee) else nopiece
+        for nopiece, annulee in self.cur.fetchall():
+            if not _is_annulled(annulee):
+                return nopiece
+        return None
 
     def lookup_article(self, sku):
         """Returns (REF_ART, PRIXVENTEHT, PRIXVENTETTC, TAUX_TVA) or None."""
@@ -411,4 +417,60 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
     reasons = ", ".join(f"{k}={v}" for k, v in report["skip_reasons"].items())
     emit(f"Done. created={len(report['created'])} cancelled={len(report['cancelled'])} "
          f"skipped={len(report['skipped'])} ({reasons}) errors={len(report['errors'])}")
+    return report
+
+
+def fix_duplicate_orders(cfg, dry_run=True, log_fn=None):
+    """One-off cleanup for orders that ended up with more than one still-
+    active PIECE document -- the historical duplicate-reimport bug (now
+    fixed in already_imported()/find_source_piece() above) let this
+    happen before the fix landed.
+
+    For each REFDOC ('WC-<order id>') + CODE_TYPE_PIECE with more than one
+    active (non-cancelled) document, keeps the earliest (lowest NOPIECE)
+    and annuls (ANNULEE=1, on both PIECE and ITEM) the rest -- the exact
+    same mechanism cancel_order() and the user's own manual NetFact2
+    cleanup already use, not a SQL DELETE (which risks orphaning rows or
+    breaking whatever bookkeeping NetFact2 itself does on cancellation).
+
+    Returns a report dict:
+    {"fixed": [{"refdoc":.., "code_type_piece":.., "kept": nopiece,
+                 "annulled": [nopiece, ...]}, ...],
+     "total_annulled": N}
+    """
+    emit = log_fn or (lambda msg: log.info(msg))
+    con = connect_firebird(cfg)
+    report = {"fixed": [], "total_annulled": 0}
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT REFDOC, CODE_TYPE_PIECE, NOPIECE, ANNULEE FROM PIECE "
+            "WHERE REFDOC STARTING WITH 'WC-' ORDER BY REFDOC, CODE_TYPE_PIECE"
+        )
+        groups = {}
+        for refdoc, doc_type, nopiece, annulee in cur.fetchall():
+            if _is_annulled(annulee):
+                continue
+            groups.setdefault((refdoc, doc_type), []).append(nopiece)
+
+        for (refdoc, doc_type), nopieces in groups.items():
+            if len(nopieces) <= 1:
+                continue
+            ordered = sorted(nopieces, key=lambda n: int(n))
+            keep, extras = ordered[0], ordered[1:]
+            emit(f"{refdoc} / {doc_type}: keep {keep}, annul {extras}"
+                 + (" [DRY]" if dry_run else ""))
+            if not dry_run:
+                for nopiece in extras:
+                    cur.execute("UPDATE PIECE SET ANNULEE = 1 WHERE NOPIECE = ?", (nopiece,))
+                    cur.execute("UPDATE ITEM SET ANNULEE = 1 WHERE NOPIECE = ?", (nopiece,))
+                con.commit()
+            report["fixed"].append({"refdoc": refdoc, "code_type_piece": doc_type,
+                                     "kept": keep, "annulled": extras})
+            report["total_annulled"] += len(extras)
+    finally:
+        con.close()
+
+    emit(f"Done. {len(report['fixed'])} order(s) with duplicates, "
+         f"{report['total_annulled']} duplicate document(s) annulled.")
     return report

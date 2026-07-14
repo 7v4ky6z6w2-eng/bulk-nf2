@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from app import diagnostics
 from app.config import load_config, save_config
 from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
-from app.sync.order_importer import run_order_import
+from app.sync.order_importer import fix_duplicate_orders, run_order_import
 from app.sync.stock_sync import run_stock_sync
 
 try:
@@ -183,6 +183,24 @@ class OrderDiagnosticsWorker(QThread):
             self.finished_error.emit(self.kind, str(exc))
 
 
+class FixDuplicatesWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = fix_duplicate_orders(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -200,6 +218,7 @@ class MainWindow(QMainWindow):
         self.type_pieces_worker = None
         self.type_piece_choices = []
         self.order_diag_worker = None
+        self.fix_dup_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
@@ -671,6 +690,26 @@ class MainWindow(QMainWindow):
         diag_btn_row.addWidget(self.check_duplicates_btn)
         diag_btn_row.addStretch()
         diag_layout.addLayout(diag_btn_row)
+
+        diag_layout.addWidget(QLabel(
+            "\nFix duplicates: for any order with more than one active document,\n"
+            "keeps the earliest and annuls (ANNULEE=1 on PIECE + ITEM -- the same\n"
+            "mechanism the Cancel statuses feature and your own manual NetFact2\n"
+            "cleanup use) the rest. This does NOT delete anything from Firebird."
+        ))
+        fix_btn_row = QHBoxLayout()
+        self.preview_fix_btn = QPushButton("Preview duplicate fix (dry run)")
+        self.preview_fix_btn.clicked.connect(lambda: self._start_fix_duplicates(dry_run=True))
+        self.fix_duplicates_btn = QPushButton("Fix duplicates now")
+        self.fix_duplicates_btn.setToolTip(
+            "Writes to Firebird. Preview first to see exactly which documents\n"
+            "will be annulled before running this for real."
+        )
+        self.fix_duplicates_btn.clicked.connect(lambda: self._confirm_fix_duplicates())
+        fix_btn_row.addWidget(self.preview_fix_btn)
+        fix_btn_row.addWidget(self.fix_duplicates_btn)
+        fix_btn_row.addStretch()
+        diag_layout.addLayout(fix_btn_row)
         layout.addWidget(diag_group)
 
         btn_row = QHBoxLayout()
@@ -790,6 +829,47 @@ class MainWindow(QMainWindow):
         self.check_annulee_btn.setEnabled(True)
         self.check_duplicates_btn.setEnabled(True)
         self.order_log_view.appendPlainText(f"'{kind}' check FAILED: {message}")
+
+    def _confirm_fix_duplicates(self):
+        answer = QMessageBox.question(
+            self, "Fix duplicate WC imports?",
+            "This will annul (ANNULEE=1 on PIECE and ITEM) the extra document(s) "
+            "for any order that has more than one active document, keeping only "
+            "the earliest. This writes to Firebird.\n\n"
+            "Run 'Preview duplicate fix (dry run)' first if you haven't already, "
+            "to see exactly what will change.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_fix_duplicates(dry_run=False)
+
+    def _start_fix_duplicates(self, dry_run):
+        if self.fix_dup_worker and self.fix_dup_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.preview_fix_btn.setEnabled(False)
+        self.fix_duplicates_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(
+            "Previewing duplicate fix..." if dry_run else "Fixing duplicates..."
+        )
+        self.fix_dup_worker = FixDuplicatesWorker(cfg, dry_run)
+        self.fix_dup_worker.line.connect(self.order_log_view.appendPlainText)
+        self.fix_dup_worker.finished_ok.connect(self._fix_duplicates_done)
+        self.fix_dup_worker.finished_error.connect(self._fix_duplicates_failed)
+        self.fix_dup_worker.start()
+
+    def _fix_duplicates_done(self, report):
+        self.preview_fix_btn.setEnabled(True)
+        self.fix_duplicates_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(
+            f"{len(report['fixed'])} order(s) with duplicates, "
+            f"{report['total_annulled']} document(s) annulled."
+        )
+
+    def _fix_duplicates_failed(self, message):
+        self.preview_fix_btn.setEnabled(True)
+        self.fix_duplicates_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Fix duplicates FAILED: {message}")
 
     def _collect_order_import_config(self):
         oi_cfg = self.cfg["order_import"]
