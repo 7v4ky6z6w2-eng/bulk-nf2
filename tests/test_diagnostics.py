@@ -135,6 +135,16 @@ def test_lookup_pieces_by_refdoc_returns_rows(monkeypatch):
     assert con.closed is True
 
 
+def test_list_type_piece_coefficients_returns_rows(monkeypatch):
+    rows = [("PC_VE_B", "Bon de livraison", 1, 0, 1, 0),
+            ("PC_VE_COM", "Commande de vente", 1, 0, 1, 0)]
+    con = _RowsConnection(rows)
+    monkeypatch.setattr(diagnostics, "connect_firebird", lambda cfg: con)
+    result = diagnostics.list_type_piece_coefficients(_cfg())
+    assert result == rows
+    assert con.closed is True
+
+
 def test_list_table_columns_decodes_field_types(monkeypatch):
     # (name, RDB$FIELD_TYPE, length, subtype, null_flag)
     raw = [("NOPIECE", 37, 15, 0, 1), ("MONTANTTTC", 27, 8, 0, None)]

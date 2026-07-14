@@ -146,6 +146,34 @@ def list_table_triggers(cfg, table):
         con.close()
 
 
+def list_type_piece_coefficients(cfg):
+    """Returns [(code_type_piece, intitule, coeff_piece, coeff_piece_tr,
+    coeff_item, coeff_item_tr), ...] from LOCAL_TYPE_PIECE.
+
+    NetFact2's TIERS balance ("solde") is computed live as
+    SUM(PIECE.MONTANT * PIECE.ANNULEE * (PIECE.COEFF + PIECE.COEFF_TR))
+    -- confirmed straight from embedded SQL text in the NetFact2 binary.
+    PIECE.COEFF/COEFF_TR are per-document-type values copied from this
+    table's COEFF_PIECE/COEFF_PIECE_TR columns when NetFact2's own UI
+    creates a document. Our INSERT never sets PIECE.COEFF/COEFF_TR (or
+    MONTANT) at all, so every document this tool creates contributes
+    exactly 0 to solde regardless of ANNULEE -- not a caching issue, a
+    genuinely missing write. Needed to confirm the real sign/values
+    before writing code that sets these, since guessing wrong would
+    flip customer balances the wrong direction."""
+    con = connect_firebird(cfg)
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT CODE_TYPE_PIECE, INTITULE, COEFF_PIECE, COEFF_PIECE_TR, "
+            "       COEFF_ITEM, COEFF_ITEM_TR "
+            "FROM LOCAL_TYPE_PIECE ORDER BY CODE_TYPE_PIECE"
+        )
+        return cur.fetchall()
+    finally:
+        con.close()
+
+
 def list_table_columns(cfg, table):
     """Returns [(name, type_name, length, subtype, nullable), ...] for a
     table's columns straight from the Firebird system catalog -- needed

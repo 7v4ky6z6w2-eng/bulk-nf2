@@ -176,6 +176,8 @@ class OrderDiagnosticsWorker(QThread):
         try:
             if self.kind == "annulee":
                 rows = diagnostics.check_piece_annulee(self.cfg)
+            elif self.kind == "type_coeffs":
+                rows = diagnostics.list_type_piece_coefficients(self.cfg)
             else:
                 rows = diagnostics.check_duplicate_wc_orders(self.cfg)
             self.finished_ok.emit(self.kind, rows)
@@ -728,8 +730,17 @@ class MainWindow(QMainWindow):
             "order (evidence of the now-fixed duplicate-reimport bug)."
         )
         self.check_duplicates_btn.clicked.connect(self._start_duplicate_check)
+        self.check_coeffs_btn = QPushButton("List document type coefficients")
+        self.check_coeffs_btn.setToolTip(
+            "Shows LOCAL_TYPE_PIECE.COEFF_PIECE/COEFF_PIECE_TR per document\n"
+            "type -- the balance (solde) calculation multiplies these into\n"
+            "each document's contribution. Needed to know the right sign\n"
+            "before this tool starts setting PIECE.COEFF/COEFF_TR itself."
+        )
+        self.check_coeffs_btn.clicked.connect(self._start_coeffs_check)
         diag_btn_row.addWidget(self.check_annulee_btn)
         diag_btn_row.addWidget(self.check_duplicates_btn)
+        diag_btn_row.addWidget(self.check_coeffs_btn)
         diag_btn_row.addStretch()
         diag_layout.addLayout(diag_btn_row)
 
@@ -875,12 +886,16 @@ class MainWindow(QMainWindow):
     def _start_duplicate_check(self):
         self._start_order_diagnostic("duplicates")
 
+    def _start_coeffs_check(self):
+        self._start_order_diagnostic("type_coeffs")
+
     def _start_order_diagnostic(self, kind):
         if self.order_diag_worker and self.order_diag_worker.isRunning():
             return
         cfg = self._collect_config()
         self.check_annulee_btn.setEnabled(False)
         self.check_duplicates_btn.setEnabled(False)
+        self.check_coeffs_btn.setEnabled(False)
         self.order_log_view.appendPlainText(f"Running '{kind}' check...")
         self.order_diag_worker = OrderDiagnosticsWorker(cfg, kind)
         self.order_diag_worker.finished_ok.connect(self._order_diagnostic_done)
@@ -890,12 +905,22 @@ class MainWindow(QMainWindow):
     def _order_diagnostic_done(self, kind, rows):
         self.check_annulee_btn.setEnabled(True)
         self.check_duplicates_btn.setEnabled(True)
+        self.check_coeffs_btn.setEnabled(True)
         if kind == "annulee":
             self.order_log_view.appendPlainText("--- ANNULEE values: manually-created vs. WC-imported ---")
             if not rows:
                 self.order_log_view.appendPlainText("  PIECE has no rows.")
             for source, value, count in rows:
                 self.order_log_view.appendPlainText(f"  {source}: ANNULEE={value!r} ({count} document(s))")
+        elif kind == "type_coeffs":
+            self.order_log_view.appendPlainText("--- LOCAL_TYPE_PIECE coefficients ---")
+            if not rows:
+                self.order_log_view.appendPlainText("  LOCAL_TYPE_PIECE has no rows.")
+            for code, intitule, coeff_piece, coeff_piece_tr, coeff_item, coeff_item_tr in rows:
+                self.order_log_view.appendPlainText(
+                    f"  {code} ({intitule}): COEFF_PIECE={coeff_piece} COEFF_PIECE_TR={coeff_piece_tr} "
+                    f"COEFF_ITEM={coeff_item} COEFF_ITEM_TR={coeff_item_tr}"
+                )
         else:
             self.order_log_view.appendPlainText("--- Duplicate WC-imported documents ---")
             if not rows:
@@ -906,6 +931,7 @@ class MainWindow(QMainWindow):
     def _order_diagnostic_failed(self, kind, message):
         self.check_annulee_btn.setEnabled(True)
         self.check_duplicates_btn.setEnabled(True)
+        self.check_coeffs_btn.setEnabled(True)
         self.order_log_view.appendPlainText(f"'{kind}' check FAILED: {message}")
 
     def _start_lookup_refdoc(self):
