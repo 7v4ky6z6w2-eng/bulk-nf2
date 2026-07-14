@@ -200,6 +200,29 @@ class LookupRefdocWorker(QThread):
             self.finished_error.emit(self.refdoc, str(exc))
 
 
+class SchemaLookupWorker(QThread):
+    """Runs a schema-catalog lookup (columns or triggers) for a given
+    table in the background."""
+    finished_ok = Signal(str, str, list)
+    finished_error = Signal(str, str, str)
+
+    def __init__(self, cfg, kind, table):
+        super().__init__()
+        self.cfg = cfg
+        self.kind = kind
+        self.table = table
+
+    def run(self):
+        try:
+            if self.kind == "columns":
+                rows = diagnostics.list_table_columns(self.cfg, self.table)
+            else:
+                rows = diagnostics.list_table_triggers(self.cfg, self.table)
+            self.finished_ok.emit(self.kind, self.table, rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(self.kind, self.table, str(exc))
+
+
 class FixDuplicatesWorker(QThread):
     line = Signal(str)
     finished_ok = Signal(dict)
@@ -237,6 +260,7 @@ class MainWindow(QMainWindow):
         self.order_diag_worker = None
         self.fix_dup_worker = None
         self.lookup_worker = None
+        self.schema_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
@@ -723,6 +747,28 @@ class MainWindow(QMainWindow):
         lookup_row.addWidget(self.lookup_refdoc_btn)
         diag_layout.addLayout(lookup_row)
 
+        schema_row = QHBoxLayout()
+        self.schema_table_edit = QLineEdit("PIECE")
+        self.list_columns_btn = QPushButton("List columns")
+        self.list_columns_btn.setToolTip(
+            "Shows every column of this table straight from Firebird's system\n"
+            "catalog -- confirms exact field names before we write SQL that\n"
+            "references them (e.g. Remise/TVA1-3/Espece/Timbre/Montant Verse)."
+        )
+        self.list_columns_btn.clicked.connect(self._start_list_columns)
+        self.list_triggers_btn = QPushButton("List triggers")
+        self.list_triggers_btn.setToolTip(
+            "Shows every Firebird trigger on this table, with its timing\n"
+            "(BEFORE/AFTER INSERT/UPDATE/DELETE) and full source. Checks\n"
+            "whether balance recalculation only fires on UPDATE, not INSERT."
+        )
+        self.list_triggers_btn.clicked.connect(self._start_list_triggers)
+        schema_row.addWidget(QLabel("Table:"))
+        schema_row.addWidget(self.schema_table_edit)
+        schema_row.addWidget(self.list_columns_btn)
+        schema_row.addWidget(self.list_triggers_btn)
+        diag_layout.addLayout(schema_row)
+
         diag_layout.addWidget(QLabel(
             "\nFix duplicates: for any order with more than one document (even if\n"
             "you already cancelled one by hand), keeps one -- an active one if\n"
@@ -889,6 +935,51 @@ class MainWindow(QMainWindow):
     def _lookup_refdoc_failed(self, refdoc, message):
         self.lookup_refdoc_btn.setEnabled(True)
         self.order_log_view.appendPlainText(f"Lookup of {refdoc} FAILED: {message}")
+
+    def _start_list_columns(self):
+        self._start_schema_lookup("columns")
+
+    def _start_list_triggers(self):
+        self._start_schema_lookup("triggers")
+
+    def _start_schema_lookup(self, kind):
+        table = self.schema_table_edit.text().strip().upper()
+        if not table:
+            return
+        if self.schema_worker and self.schema_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.list_columns_btn.setEnabled(False)
+        self.list_triggers_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(f"Listing {kind} for {table}...")
+        self.schema_worker = SchemaLookupWorker(cfg, kind, table)
+        self.schema_worker.finished_ok.connect(self._schema_lookup_done)
+        self.schema_worker.finished_error.connect(self._schema_lookup_failed)
+        self.schema_worker.start()
+
+    def _schema_lookup_done(self, kind, table, rows):
+        self.list_columns_btn.setEnabled(True)
+        self.list_triggers_btn.setEnabled(True)
+        if not rows:
+            self.order_log_view.appendPlainText(f"  {table} has no {kind}.")
+            return
+        if kind == "columns":
+            for name, type_name, length, subtype, nullable in rows:
+                null_txt = "nullable" if nullable else "NOT NULL"
+                self.order_log_view.appendPlainText(
+                    f"  {name:<25} type={type_name} len={length} subtype={subtype} {null_txt}"
+                )
+        else:
+            for name, type_name, inactive, source in rows:
+                status = "INACTIVE" if inactive else "active"
+                self.order_log_view.appendPlainText(f"  [{name}] {type_name} ({status})")
+                for line in source.splitlines():
+                    self.order_log_view.appendPlainText(f"      {line}")
+
+    def _schema_lookup_failed(self, kind, table, message):
+        self.list_columns_btn.setEnabled(True)
+        self.list_triggers_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Listing {kind} for {table} FAILED: {message}")
 
     def _confirm_fix_duplicates(self):
         answer = QMessageBox.question(

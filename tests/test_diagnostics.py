@@ -133,3 +133,37 @@ def test_lookup_pieces_by_refdoc_returns_rows(monkeypatch):
     result = diagnostics.lookup_pieces_by_refdoc(_cfg(), "WC-18226")
     assert result == rows
     assert con.closed is True
+
+
+def test_list_table_columns_decodes_field_types(monkeypatch):
+    # (name, RDB$FIELD_TYPE, length, subtype, null_flag)
+    raw = [("NOPIECE", 37, 15, 0, 1), ("MONTANTTTC", 27, 8, 0, None)]
+    monkeypatch.setattr(diagnostics, "connect_firebird", lambda cfg: _RowsConnection([]))
+    monkeypatch.setattr(diagnostics, "list_columns", lambda cur, table: raw)
+    result = diagnostics.list_table_columns(_cfg(), "PIECE")
+    assert result == [
+        ("NOPIECE", "VARCHAR", 15, 0, True),
+        ("MONTANTTTC", "DOUBLE PRECISION", 8, 0, False),
+    ]
+
+
+class _BlobLike:
+    def __init__(self, data):
+        self._data = data
+
+    def read(self):
+        return self._data
+
+
+def test_list_table_triggers_decodes_type_and_reads_blob_source(monkeypatch):
+    rows = [
+        ("TR_PIECE_BALANCE", 4, 0, _BlobLike(b"UPDATE TIERS SET SOLDE = ...")),  # AFTER UPDATE
+        ("TR_PIECE_INACTIVE", 999, 1, "some source"),
+    ]
+    con = _RowsConnection(rows)
+    monkeypatch.setattr(diagnostics, "connect_firebird", lambda cfg: con)
+    result = diagnostics.list_table_triggers(_cfg(), "PIECE")
+    assert result == [
+        ("TR_PIECE_BALANCE", "AFTER UPDATE", False, "UPDATE TIERS SET SOLDE = ..."),
+        ("TR_PIECE_INACTIVE", "type=999", True, "some source"),
+    ]
