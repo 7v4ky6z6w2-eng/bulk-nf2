@@ -724,10 +724,10 @@ class MainWindow(QMainWindow):
         diag_layout.addLayout(lookup_row)
 
         diag_layout.addWidget(QLabel(
-            "\nFix duplicates: for any order with more than one active document,\n"
-            "keeps the earliest and DELETES the rest (their ITEM rows, then the\n"
-            "PIECE row itself) from Firebird. This is a real deletion, not a\n"
-            "cancellation -- preview first."
+            "\nFix duplicates: for any order with more than one document (even if\n"
+            "you already cancelled one by hand), keeps one -- an active one if\n"
+            "any, else the earliest -- and DELETES the rest (their ITEM rows,\n"
+            "then the PIECE row itself). This is a real deletion -- preview first."
         ))
         fix_btn_row = QHBoxLayout()
         self.preview_fix_btn = QPushButton("Preview duplicate fix (dry run)")
@@ -894,8 +894,9 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.question(
             self, "Fix duplicate WC imports?",
             "This will PERMANENTLY DELETE the extra document(s) (PIECE and "
-            "ITEM rows) for any order that has more than one active document, "
-            "keeping only the earliest. This cannot be undone.\n\n"
+            "ITEM rows) for any order that has more than one document -- "
+            "keeping an active one if any, else the earliest. This cannot "
+            "be undone.\n\n"
             "Run 'Preview duplicate fix (dry run)' first if you haven't already, "
             "to see exactly what will be deleted.\n\nProceed?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,

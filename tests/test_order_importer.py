@@ -505,7 +505,7 @@ def test_run_order_import_with_no_start_date_fetches_full_history(monkeypatch):
     assert captured["after"] is None
 
 
-def test_fix_duplicate_orders_keeps_earliest_and_annuls_rest(monkeypatch):
+def test_fix_duplicate_orders_prefers_active_and_deletes_the_rest(monkeypatch):
     from app.sync import order_importer
 
     def responder(sql, params):
@@ -514,9 +514,13 @@ def test_fix_duplicate_orders_keeps_earliest_and_annuls_rest(monkeypatch):
             return [
                 ("WC-1", "PC_VE_COM", "10", 1),
                 ("WC-1", "PC_VE_COM", "20", 1),
+                # 1 active + 1 already-cancelled-by-hand: still 2 documents
+                # for the same order, so still a live duplicate to clean
+                # up -- the actual scenario the user hit ("0 duplicates
+                # found" when this was still gated on "> 1 active row").
                 ("WC-2", "PC_VE_COM", "30", 1),
-                ("WC-2", "PC_VE_COM", "40", 0),  # already cancelled by hand -> not a live dup
-                ("WC-3", "PC_VE_B", "50", 1),
+                ("WC-2", "PC_VE_COM", "40", 0),
+                ("WC-3", "PC_VE_B", "50", 1),  # sole document -> untouched
             ]
         return None
 
@@ -526,15 +530,38 @@ def test_fix_duplicate_orders_keeps_earliest_and_annuls_rest(monkeypatch):
 
     report = order_importer.fix_duplicate_orders(_cfg(), dry_run=False)
 
-    assert report["total_deleted"] == 1
+    assert report["total_deleted"] == 2
     assert report["fixed"] == [
         {"refdoc": "WC-1", "code_type_piece": "PC_VE_COM", "kept": "10", "deleted": ["20"]},
+        {"refdoc": "WC-2", "code_type_piece": "PC_VE_COM", "kept": "30", "deleted": ["40"]},
     ]
-    piece_deletes = [p for sql, p in cur.executed if sql.startswith("DELETE FROM PIECE")]
-    item_deletes = [p for sql, p in cur.executed if sql.startswith("DELETE FROM ITEM")]
-    assert piece_deletes == [("20",)]
-    assert item_deletes == [("20",)]
+    piece_deletes = {p[0] for sql, p in cur.executed if sql.startswith("DELETE FROM PIECE")}
+    item_deletes = {p[0] for sql, p in cur.executed if sql.startswith("DELETE FROM ITEM")}
+    assert piece_deletes == {"20", "40"}
+    assert item_deletes == {"20", "40"}
     assert con.committed is True
+
+
+def test_fix_duplicate_orders_keeps_earliest_when_none_are_active(monkeypatch):
+    # Edge case: both copies still sitting cancelled (neither manually
+    # fixed yet). Nothing to prefer, so keep the earliest by NOPIECE.
+    from app.sync import order_importer
+
+    def responder(sql, params):
+        s = sql.upper()
+        if "REFDOC, CODE_TYPE_PIECE, NOPIECE, ANNULEE FROM PIECE" in s:
+            return [("WC-7", "PC_VE_COM", "70", 0), ("WC-7", "PC_VE_COM", "71", 0)]
+        return None
+
+    cur = FakeCursor(responder)
+    con = FakeConnection(cur)
+    monkeypatch.setattr(order_importer, "connect_firebird", lambda cfg: con)
+
+    report = order_importer.fix_duplicate_orders(_cfg(), dry_run=False)
+
+    assert report["fixed"] == [
+        {"refdoc": "WC-7", "code_type_piece": "PC_VE_COM", "kept": "70", "deleted": ["71"]},
+    ]
 
 
 def test_fix_duplicate_orders_dry_run_does_not_write(monkeypatch):

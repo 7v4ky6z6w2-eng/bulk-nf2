@@ -426,13 +426,18 @@ def run_order_import(cfg, dry_run=False, log_fn=None):
 
 
 def fix_duplicate_orders(cfg, dry_run=True, log_fn=None):
-    """One-off cleanup for orders that ended up with more than one still-
-    active PIECE document -- the historical duplicate-reimport bug (now
-    fixed in already_imported()/find_source_piece() above) let this
-    happen before the fix landed.
+    """One-off cleanup for orders that ended up with more than one PIECE
+    document for the same REFDOC ('WC-<order id>') + CODE_TYPE_PIECE --
+    the historical duplicate-reimport bug (now fixed in
+    already_imported()/find_source_piece() above) let this happen before
+    the fix landed.
 
-    For each REFDOC ('WC-<order id>') + CODE_TYPE_PIECE with more than one
-    active (non-cancelled) document, keeps the earliest (lowest NOPIECE)
+    Counts EVERY row regardless of ANNULEE, not just active ones: an
+    order the user already cancelled the extra copy of by hand (one
+    active + one cancelled reversal record) is still two documents for
+    one WooCommerce order, and the goal is exactly one document per
+    order -- not "at most one active document". Keeps one row per group
+    (prefers an active one if any exist, else the earliest by NOPIECE)
     and DELETES the rest -- their ITEM rows first (they reference
     NOPIECE), then the PIECE row itself. This is a real SQL DELETE, not
     an annul: the user confirmed these extra rows are pure duplicate-bug
@@ -454,15 +459,14 @@ def fix_duplicate_orders(cfg, dry_run=True, log_fn=None):
         )
         groups = {}
         for refdoc, doc_type, nopiece, annulee in cur.fetchall():
-            if _is_annulled(annulee):
-                continue
-            groups.setdefault((refdoc, doc_type), []).append(nopiece)
+            groups.setdefault((refdoc, doc_type), []).append((nopiece, annulee))
 
-        for (refdoc, doc_type), nopieces in groups.items():
-            if len(nopieces) <= 1:
+        for (refdoc, doc_type), rows in groups.items():
+            if len(rows) <= 1:
                 continue
-            ordered = sorted(nopieces, key=lambda n: int(n))
-            keep, extras = ordered[0], ordered[1:]
+            active = sorted((n for n, a in rows if not _is_annulled(a)), key=lambda n: int(n))
+            keep = active[0] if active else sorted((n for n, _a in rows), key=lambda n: int(n))[0]
+            extras = sorted((n for n, _a in rows if n != keep), key=lambda n: int(n))
             emit(f"{refdoc} / {doc_type}: keep {keep}, delete {extras}"
                  + (" [DRY]" if dry_run else ""))
             if not dry_run:
