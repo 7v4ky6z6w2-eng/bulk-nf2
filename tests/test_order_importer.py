@@ -97,10 +97,10 @@ def _responder(article_by_sku=None, already_imported=None, source_piece=None,
             key = (refdoc, doc_type)
             if key in already_imported:
                 val = already_imported[key]
-                return val if isinstance(val, list) else [(val, 0)]
+                return val if isinstance(val, list) else [(val, 1)]  # 1 = active
             if key in source_piece:
                 val = source_piece[key]
-                return val if isinstance(val, list) else [(val, 0)]
+                return val if isinstance(val, list) else [(val, 1)]  # 1 = active
             return []
         if "REF_ART, PRIXVENTEHT, PRIXVENTETTC, TAUX_TVA FROM ARTICLE" in s:
             (sku,) = params
@@ -116,20 +116,19 @@ def _make_importer(cfg, responder):
     return OrderImporter(con, cfg), con, cur
 
 
-def test_is_annulled_accepts_common_not_cancelled_encodings():
+def test_is_annulled_matches_confirmed_netfact2_convention():
+    # Confirmed directly against the live NetFact2 install: ANNULEE=1
+    # means NOT cancelled (the normal/valid state), ANNULEE=0 means
+    # cancelled -- the opposite of what the column's name suggests.
     from app.sync.order_importer import _is_annulled
 
-    for value in (None, 0, "0", "N", "n", "", False):
+    for value in (1, "1", True):
         assert _is_annulled(value) is False
-    for value in (1, "1", "O", "o", "Y", True):
+    for value in (0, "0", None, False):
         assert _is_annulled(value) is True
 
 
-def test_already_imported_recognizes_prior_doc_even_when_annulee_is_char_zero():
-    # Regression test: the original SQL-side "ANNULEE = 0" filter silently
-    # never matched when ANNULEE was stored as a CHAR '0' rather than an
-    # integer, which made already_imported() always return None and
-    # re-create every previously-imported order on every run.
+def test_already_imported_recognizes_prior_active_doc():
     cfg = _cfg()
 
     def responder(sql, params):
@@ -137,7 +136,7 @@ def test_already_imported_recognizes_prior_doc_even_when_annulee_is_char_zero():
         if "RAISON_SOCIALE FROM TIERS" in s:
             return ("Client",)
         if "NOPIECE, ANNULEE FROM PIECE WHERE REFDOC" in s:
-            return [("77", "0")]
+            return [("77", 1)]
         return None
 
     importer, con, cur = _make_importer(cfg, responder)
@@ -153,7 +152,7 @@ def test_already_imported_finds_active_row_even_when_cancelled_duplicate_listed_
     # creating yet another duplicate on the next run.
     cfg = _cfg()
     responder = _responder(already_imported={
-        ("WC-555", "PC_VE_COM"): [("41", 1), ("42", 0)],  # cancelled row first
+        ("WC-555", "PC_VE_COM"): [("41", 0), ("42", 1)],  # cancelled row first
     })
     importer, con, cur = _make_importer(cfg, responder)
     assert importer.already_imported(555, "PC_VE_COM") == "42"
@@ -162,7 +161,7 @@ def test_already_imported_finds_active_row_even_when_cancelled_duplicate_listed_
 def test_already_imported_returns_none_when_every_matching_row_is_cancelled():
     cfg = _cfg()
     responder = _responder(already_imported={
-        ("WC-555", "PC_VE_COM"): [("41", 1), ("42", 1)],
+        ("WC-555", "PC_VE_COM"): [("41", 0), ("42", 0)],
     })
     importer, con, cur = _make_importer(cfg, responder)
     assert importer.already_imported(555, "PC_VE_COM") is None
@@ -305,7 +304,7 @@ def test_run_order_import_tallies_skip_reasons(monkeypatch):
 
 def test_cancel_order_annuls_active_documents():
     cfg = _cfg()
-    responder = _responder(existing_docs={"WC-777": [("501", "PC_VE_COM", 0)]})
+    responder = _responder(existing_docs={"WC-777": [("501", "PC_VE_COM", 1)]})
     importer, con, cur = _make_importer(cfg, responder)
 
     status, msg, reason = importer.cancel_order(_wc_order(order_id=777, status="cancelled"))
@@ -326,7 +325,7 @@ def test_cancel_order_annuls_all_active_documents_for_the_order():
     # cancelling must annul all of them, not just one.
     cfg = _cfg()
     responder = _responder(existing_docs={
-        "WC-42": [("10", "PC_VE_COM", 0), ("11", "PC_VE_B", 0)],
+        "WC-42": [("10", "PC_VE_COM", 1), ("11", "PC_VE_B", 1)],
     })
     importer, con, cur = _make_importer(cfg, responder)
 
@@ -348,7 +347,7 @@ def test_cancel_order_with_no_existing_document_is_skipped():
 
 def test_cancel_order_already_cancelled_is_skipped_not_reannuled():
     cfg = _cfg()
-    responder = _responder(existing_docs={"WC-5": [("20", "PC_VE_COM", 1)]})
+    responder = _responder(existing_docs={"WC-5": [("20", "PC_VE_COM", 0)]})
     importer, con, cur = _make_importer(cfg, responder)
     status, msg, reason = importer.cancel_order(_wc_order(order_id=5, status="cancelled"))
     assert status == "skipped"
@@ -358,7 +357,7 @@ def test_cancel_order_already_cancelled_is_skipped_not_reannuled():
 
 def test_cancel_order_dry_run_does_not_write():
     cfg = _cfg()
-    responder = _responder(existing_docs={"WC-8": [("30", "PC_VE_COM", 0)]})
+    responder = _responder(existing_docs={"WC-8": [("30", "PC_VE_COM", 1)]})
     importer, con, cur = _make_importer(cfg, responder)
     status, msg, reason = importer.cancel_order(_wc_order(order_id=8, status="cancelled"), dry_run=True)
     assert status == "skipped"
@@ -375,7 +374,7 @@ def test_run_order_import_dispatches_cancel_statuses_to_cancel_order(monkeypatch
     cfg["woocommerce"]["consumer_key"] = "ck"
     cfg["woocommerce"]["consumer_secret"] = "cs"
 
-    responder = _responder(existing_docs={"WC-9": [("60", "PC_VE_COM", 0)]})
+    responder = _responder(existing_docs={"WC-9": [("60", "PC_VE_COM", 1)]})
     cur = FakeCursor(responder)
     con = FakeConnection(cur)
 
@@ -513,11 +512,11 @@ def test_fix_duplicate_orders_keeps_earliest_and_annuls_rest(monkeypatch):
         s = sql.upper()
         if "REFDOC, CODE_TYPE_PIECE, NOPIECE, ANNULEE FROM PIECE" in s:
             return [
-                ("WC-1", "PC_VE_COM", "10", 0),
-                ("WC-1", "PC_VE_COM", "20", 0),
-                ("WC-2", "PC_VE_COM", "30", 0),
-                ("WC-2", "PC_VE_COM", "40", 1),  # already cancelled by hand -> not a live dup
-                ("WC-3", "PC_VE_B", "50", 0),
+                ("WC-1", "PC_VE_COM", "10", 1),
+                ("WC-1", "PC_VE_COM", "20", 1),
+                ("WC-2", "PC_VE_COM", "30", 1),
+                ("WC-2", "PC_VE_COM", "40", 0),  # already cancelled by hand -> not a live dup
+                ("WC-3", "PC_VE_B", "50", 1),
             ]
         return None
 
@@ -527,14 +526,14 @@ def test_fix_duplicate_orders_keeps_earliest_and_annuls_rest(monkeypatch):
 
     report = order_importer.fix_duplicate_orders(_cfg(), dry_run=False)
 
-    assert report["total_annulled"] == 1
+    assert report["total_deleted"] == 1
     assert report["fixed"] == [
-        {"refdoc": "WC-1", "code_type_piece": "PC_VE_COM", "kept": "10", "annulled": ["20"]},
+        {"refdoc": "WC-1", "code_type_piece": "PC_VE_COM", "kept": "10", "deleted": ["20"]},
     ]
-    piece_updates = [p for sql, p in cur.executed if sql.startswith("UPDATE PIECE SET ANNULEE")]
-    item_updates = [p for sql, p in cur.executed if sql.startswith("UPDATE ITEM SET ANNULEE")]
-    assert piece_updates == [("20",)]
-    assert item_updates == [("20",)]
+    piece_deletes = [p for sql, p in cur.executed if sql.startswith("DELETE FROM PIECE")]
+    item_deletes = [p for sql, p in cur.executed if sql.startswith("DELETE FROM ITEM")]
+    assert piece_deletes == [("20",)]
+    assert item_deletes == [("20",)]
     assert con.committed is True
 
 
@@ -544,7 +543,7 @@ def test_fix_duplicate_orders_dry_run_does_not_write(monkeypatch):
     def responder(sql, params):
         s = sql.upper()
         if "REFDOC, CODE_TYPE_PIECE, NOPIECE, ANNULEE FROM PIECE" in s:
-            return [("WC-1", "PC_VE_COM", "10", 0), ("WC-1", "PC_VE_COM", "20", 0)]
+            return [("WC-1", "PC_VE_COM", "10", 1), ("WC-1", "PC_VE_COM", "20", 1)]
         return None
 
     cur = FakeCursor(responder)
@@ -553,9 +552,9 @@ def test_fix_duplicate_orders_dry_run_does_not_write(monkeypatch):
 
     report = order_importer.fix_duplicate_orders(_cfg(), dry_run=True)
 
-    assert report["total_annulled"] == 1
-    assert report["fixed"][0]["annulled"] == ["20"]
-    assert not any(sql.startswith("UPDATE") for sql, _ in cur.executed)
+    assert report["total_deleted"] == 1
+    assert report["fixed"][0]["deleted"] == ["20"]
+    assert not any(sql.startswith("DELETE") for sql, _ in cur.executed)
     assert con.committed is False
 
 
@@ -565,7 +564,7 @@ def test_fix_duplicate_orders_no_duplicates_is_a_noop(monkeypatch):
     def responder(sql, params):
         s = sql.upper()
         if "REFDOC, CODE_TYPE_PIECE, NOPIECE, ANNULEE FROM PIECE" in s:
-            return [("WC-1", "PC_VE_COM", "10", 0), ("WC-2", "PC_VE_COM", "30", 0)]
+            return [("WC-1", "PC_VE_COM", "10", 1), ("WC-2", "PC_VE_COM", "30", 1)]
         return None
 
     cur = FakeCursor(responder)
@@ -575,4 +574,4 @@ def test_fix_duplicate_orders_no_duplicates_is_a_noop(monkeypatch):
     report = order_importer.fix_duplicate_orders(_cfg(), dry_run=False)
 
     assert report["fixed"] == []
-    assert report["total_annulled"] == 0
+    assert report["total_deleted"] == 0

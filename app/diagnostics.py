@@ -73,6 +73,26 @@ def check_piece_annulee(cfg):
         con.close()
 
 
+def lookup_pieces_by_refdoc(cfg, refdoc):
+    """Returns [(nopiece, code_type_piece, datepiece, montantttc, annulee), ...]
+    for every PIECE with this exact REFDOC (e.g. "WC-18226") -- lets the
+    user cross-reference against what they see in the NetFact2 grid (same
+    REFDOC column) to nail down, with certainty, which raw ANNULEE value
+    corresponds to a document they can visually confirm is cancelled vs.
+    not, rather than inferring it from aggregate counts."""
+    con = connect_firebird(cfg)
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT NOPIECE, CODE_TYPE_PIECE, DATEPIECE, MONTANTTTC, ANNULEE "
+            "FROM PIECE WHERE REFDOC = ? ORDER BY NOPIECE",
+            (refdoc,),
+        )
+        return cur.fetchall()
+    finally:
+        con.close()
+
+
 def check_duplicate_wc_orders(cfg):
     """Returns [(refdoc, code_type_piece, count), ...] for WC-imported
     orders that ended up with more than one PIECE for the same order +

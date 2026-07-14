@@ -123,3 +123,13 @@ def test_check_duplicate_wc_orders_returns_grouped_rows(monkeypatch):
     result = diagnostics.check_duplicate_wc_orders(_cfg())
     assert result == rows
     assert con.closed is True
+
+
+def test_lookup_pieces_by_refdoc_returns_rows(monkeypatch):
+    rows = [("15", "PC_VE_B", "2026-07-06", 6900.0, 0),
+            ("45", "PC_VE_B", "2026-07-06", -6900.0, 1)]
+    con = _RowsConnection(rows)
+    monkeypatch.setattr(diagnostics, "connect_firebird", lambda cfg: con)
+    result = diagnostics.lookup_pieces_by_refdoc(_cfg(), "WC-18226")
+    assert result == rows
+    assert con.closed is True

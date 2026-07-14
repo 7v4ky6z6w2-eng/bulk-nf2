@@ -32,14 +32,17 @@ def _parse_wc_date(s):
         return datetime.datetime.now()
 
 
-# The exact "not cancelled" representation for PIECE.ANNULEE in this
-# install isn't confirmed yet (numeric 0/1 vs. CHAR 'N'/'O' are both common
-# in Firebird ERPs of this vintage). A SQL-side "ANNULEE = 0" filter was
-# found to silently never match real rows -- which made already_imported()
-# always return None and re-create every order on every run. Judging
-# "cancelled" in Python against this permissive allowlist of "not
-# cancelled" spellings is robust to either convention.
-_NOT_ANNULLED_VALUES = {None, 0, "0", "N", "n", "", False}
+# CONFIRMED against the live NetFact2 install (user cross-checked a raw
+# ANNULEE=0 count against NetFact2's own "cancelled documents" count --
+# exact match): ANNULEE=1 means NOT cancelled (the normal/valid state),
+# ANNULEE=0 means cancelled. This is the OPPOSITE of what the column's
+# name suggests and of every earlier assumption in this file -- every
+# document this tool created before this fix was inserted with ANNULEE=0
+# and so was cancelled from the moment of creation, and cancel_order()/
+# fix_duplicate_orders() writing ANNULEE=1 were doing the opposite of
+# cancelling. See repair_reversed_annulee() below for fixing rows
+# already written with the old, backwards value.
+_NOT_ANNULLED_VALUES = {1, "1", True}
 
 
 def _is_annulled(value):
@@ -263,7 +266,7 @@ class OrderImporter:
             "(NOPIECE, NOPIECE_O, CODE_TYPE_PIECE, CODE_TIERS, DATEPIECE, REFDOC, "
             " USERNAME, MONTANTHT, MONTANTTTC, TVA, CODE_DEPOT, NOM_CONTACT, "
             " LIVR_ADRESSE, LIVR_TELEPHONE, LIVR_DATE, ANNULEE) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
             (nopiece, source_nopiece, doc_type, self.cfg["client_code"], date_piece, refdoc,
              self.cfg["username"], total_ht, total_ttc, total_tva,
              self.cfg["code_depot"] or None,
@@ -281,7 +284,7 @@ class OrderImporter:
                 "INSERT INTO ITEM "
                 "(NOITEM, NOPIECE, REF_ART, QTE, PRIXHT, PRIXTTC, TVA, DATEPIECE, "
                 " CODE_TIERS, CODE_DEPOT, ANNULEE) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
                 (str(item_no), nopiece, lp["ref_art"], lp["qte"], lp["prixht"], lp["prixttc"],
                  lp["tva"], date_piece, self.cfg["client_code"], self.cfg["code_depot"] or None),
             )
@@ -300,10 +303,12 @@ class OrderImporter:
 
     # -- cancellation -----------------------------------------------------------
     def cancel_order(self, wc_order, dry_run=False):
-        """Annuls (ANNULEE=1) every still-active PIECE/ITEM document already
-        created for this order, instead of creating anything new. Used for
-        orders whose WooCommerce status is in cfg['cancel_statuses'] -- e.g.
-        an order that went processing (document created) -> cancelled.
+        """Annuls (ANNULEE=0 -- see the confirmed-convention note above
+        _NOT_ANNULLED_VALUES) every still-active PIECE/ITEM document
+        already created for this order, instead of creating anything new.
+        Used for orders whose WooCommerce status is in
+        cfg['cancel_statuses'] -- e.g. an order that went processing
+        (document created) -> cancelled.
 
         Returns ('cancelled'|'skipped'|'error', message, reason)."""
         order_id = wc_order["id"]
@@ -325,8 +330,8 @@ class OrderImporter:
             return "skipped", f"[DRY] would annul {docs}", "dry_run"
 
         for nopiece, _doc_type in active:
-            self.cur.execute("UPDATE PIECE SET ANNULEE = 1 WHERE NOPIECE = ?", (nopiece,))
-            self.cur.execute("UPDATE ITEM SET ANNULEE = 1 WHERE NOPIECE = ?", (nopiece,))
+            self.cur.execute("UPDATE PIECE SET ANNULEE = 0 WHERE NOPIECE = ?", (nopiece,))
+            self.cur.execute("UPDATE ITEM SET ANNULEE = 0 WHERE NOPIECE = ?", (nopiece,))
         self.con.commit()
         return "cancelled", f"annulled {docs}", None
 
@@ -428,19 +433,19 @@ def fix_duplicate_orders(cfg, dry_run=True, log_fn=None):
 
     For each REFDOC ('WC-<order id>') + CODE_TYPE_PIECE with more than one
     active (non-cancelled) document, keeps the earliest (lowest NOPIECE)
-    and annuls (ANNULEE=1, on both PIECE and ITEM) the rest -- the exact
-    same mechanism cancel_order() and the user's own manual NetFact2
-    cleanup already use, not a SQL DELETE (which risks orphaning rows or
-    breaking whatever bookkeeping NetFact2 itself does on cancellation).
+    and DELETES the rest -- their ITEM rows first (they reference
+    NOPIECE), then the PIECE row itself. This is a real SQL DELETE, not
+    an annul: the user confirmed these extra rows are pure duplicate-bug
+    artifacts they want gone, not kept around as cancelled records.
 
     Returns a report dict:
     {"fixed": [{"refdoc":.., "code_type_piece":.., "kept": nopiece,
-                 "annulled": [nopiece, ...]}, ...],
-     "total_annulled": N}
+                 "deleted": [nopiece, ...]}, ...],
+     "total_deleted": N}
     """
     emit = log_fn or (lambda msg: log.info(msg))
     con = connect_firebird(cfg)
-    report = {"fixed": [], "total_annulled": 0}
+    report = {"fixed": [], "total_deleted": 0}
     try:
         cur = con.cursor()
         cur.execute(
@@ -458,19 +463,19 @@ def fix_duplicate_orders(cfg, dry_run=True, log_fn=None):
                 continue
             ordered = sorted(nopieces, key=lambda n: int(n))
             keep, extras = ordered[0], ordered[1:]
-            emit(f"{refdoc} / {doc_type}: keep {keep}, annul {extras}"
+            emit(f"{refdoc} / {doc_type}: keep {keep}, delete {extras}"
                  + (" [DRY]" if dry_run else ""))
             if not dry_run:
                 for nopiece in extras:
-                    cur.execute("UPDATE PIECE SET ANNULEE = 1 WHERE NOPIECE = ?", (nopiece,))
-                    cur.execute("UPDATE ITEM SET ANNULEE = 1 WHERE NOPIECE = ?", (nopiece,))
+                    cur.execute("DELETE FROM ITEM WHERE NOPIECE = ?", (nopiece,))
+                    cur.execute("DELETE FROM PIECE WHERE NOPIECE = ?", (nopiece,))
                 con.commit()
             report["fixed"].append({"refdoc": refdoc, "code_type_piece": doc_type,
-                                     "kept": keep, "annulled": extras})
-            report["total_annulled"] += len(extras)
+                                     "kept": keep, "deleted": extras})
+            report["total_deleted"] += len(extras)
     finally:
         con.close()
 
     emit(f"Done. {len(report['fixed'])} order(s) with duplicates, "
-         f"{report['total_annulled']} duplicate document(s) annulled.")
+         f"{report['total_deleted']} duplicate document(s) deleted.")
     return report

@@ -183,6 +183,23 @@ class OrderDiagnosticsWorker(QThread):
             self.finished_error.emit(self.kind, str(exc))
 
 
+class LookupRefdocWorker(QThread):
+    finished_ok = Signal(str, list)
+    finished_error = Signal(str, str)
+
+    def __init__(self, cfg, refdoc):
+        super().__init__()
+        self.cfg = cfg
+        self.refdoc = refdoc
+
+    def run(self):
+        try:
+            rows = diagnostics.lookup_pieces_by_refdoc(self.cfg, self.refdoc)
+            self.finished_ok.emit(self.refdoc, rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(self.refdoc, str(exc))
+
+
 class FixDuplicatesWorker(QThread):
     line = Signal(str)
     finished_ok = Signal(dict)
@@ -219,6 +236,7 @@ class MainWindow(QMainWindow):
         self.type_piece_choices = []
         self.order_diag_worker = None
         self.fix_dup_worker = None
+        self.lookup_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
@@ -691,19 +709,33 @@ class MainWindow(QMainWindow):
         diag_btn_row.addStretch()
         diag_layout.addLayout(diag_btn_row)
 
+        lookup_row = QHBoxLayout()
+        self.lookup_refdoc_edit = QLineEdit()
+        self.lookup_refdoc_edit.setPlaceholderText("e.g. WC-18226")
+        self.lookup_refdoc_btn = QPushButton("Look up documents by REFDOC")
+        self.lookup_refdoc_btn.setToolTip(
+            "Shows every PIECE document with this exact REFDOC (NOPIECE, type,\n"
+            "date, amount, ANNULEE) -- cross-reference against what NetFact2's\n"
+            "grid shows for the same REFDOC column to check a specific order."
+        )
+        self.lookup_refdoc_btn.clicked.connect(self._start_lookup_refdoc)
+        lookup_row.addWidget(self.lookup_refdoc_edit)
+        lookup_row.addWidget(self.lookup_refdoc_btn)
+        diag_layout.addLayout(lookup_row)
+
         diag_layout.addWidget(QLabel(
             "\nFix duplicates: for any order with more than one active document,\n"
-            "keeps the earliest and annuls (ANNULEE=1 on PIECE + ITEM -- the same\n"
-            "mechanism the Cancel statuses feature and your own manual NetFact2\n"
-            "cleanup use) the rest. This does NOT delete anything from Firebird."
+            "keeps the earliest and DELETES the rest (their ITEM rows, then the\n"
+            "PIECE row itself) from Firebird. This is a real deletion, not a\n"
+            "cancellation -- preview first."
         ))
         fix_btn_row = QHBoxLayout()
         self.preview_fix_btn = QPushButton("Preview duplicate fix (dry run)")
         self.preview_fix_btn.clicked.connect(lambda: self._start_fix_duplicates(dry_run=True))
         self.fix_duplicates_btn = QPushButton("Fix duplicates now")
         self.fix_duplicates_btn.setToolTip(
-            "Writes to Firebird. Preview first to see exactly which documents\n"
-            "will be annulled before running this for real."
+            "Permanently deletes from Firebird. Preview first to see exactly\n"
+            "which documents will be deleted before running this for real."
         )
         self.fix_duplicates_btn.clicked.connect(lambda: self._confirm_fix_duplicates())
         fix_btn_row.addWidget(self.preview_fix_btn)
@@ -830,14 +862,42 @@ class MainWindow(QMainWindow):
         self.check_duplicates_btn.setEnabled(True)
         self.order_log_view.appendPlainText(f"'{kind}' check FAILED: {message}")
 
+    def _start_lookup_refdoc(self):
+        refdoc = self.lookup_refdoc_edit.text().strip()
+        if not refdoc:
+            return
+        if self.lookup_worker and self.lookup_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.lookup_refdoc_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(f"Looking up {refdoc}...")
+        self.lookup_worker = LookupRefdocWorker(cfg, refdoc)
+        self.lookup_worker.finished_ok.connect(self._lookup_refdoc_done)
+        self.lookup_worker.finished_error.connect(self._lookup_refdoc_failed)
+        self.lookup_worker.start()
+
+    def _lookup_refdoc_done(self, refdoc, rows):
+        self.lookup_refdoc_btn.setEnabled(True)
+        if not rows:
+            self.order_log_view.appendPlainText(f"  No PIECE found with REFDOC = {refdoc}")
+            return
+        for nopiece, doc_type, datepiece, montantttc, annulee in rows:
+            self.order_log_view.appendPlainText(
+                f"  NOPIECE={nopiece} {doc_type} {datepiece} MONTANTTTC={montantttc} ANNULEE={annulee!r}"
+            )
+
+    def _lookup_refdoc_failed(self, refdoc, message):
+        self.lookup_refdoc_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Lookup of {refdoc} FAILED: {message}")
+
     def _confirm_fix_duplicates(self):
         answer = QMessageBox.question(
             self, "Fix duplicate WC imports?",
-            "This will annul (ANNULEE=1 on PIECE and ITEM) the extra document(s) "
-            "for any order that has more than one active document, keeping only "
-            "the earliest. This writes to Firebird.\n\n"
+            "This will PERMANENTLY DELETE the extra document(s) (PIECE and "
+            "ITEM rows) for any order that has more than one active document, "
+            "keeping only the earliest. This cannot be undone.\n\n"
             "Run 'Preview duplicate fix (dry run)' first if you haven't already, "
-            "to see exactly what will change.\n\nProceed?",
+            "to see exactly what will be deleted.\n\nProceed?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
@@ -863,7 +923,7 @@ class MainWindow(QMainWindow):
         self.fix_duplicates_btn.setEnabled(True)
         self.order_log_view.appendPlainText(
             f"{len(report['fixed'])} order(s) with duplicates, "
-            f"{report['total_annulled']} document(s) annulled."
+            f"{report['total_deleted']} document(s) deleted."
         )
 
     def _fix_duplicates_failed(self, message):
