@@ -8,6 +8,15 @@ afterwards) instead of the old script's generic/untested generator-name
 guessing, which falls back to a bare MAX(NOPIECE)+1 that never advances
 the real generator -- risking an ID collision with the ERP software's own
 native document numbering later.
+
+Also sets PIECE.MONTANT/COEFF/COEFF_TR and ITEM.COEFF/COEFF_TR on every
+insert (see OrderImporter._type_piece_coefficients), which the old script
+never did. Confirmed from NetFact2's own embedded SQL that the client
+balance (TIERS "solde") is computed live as
+SUM(PIECE.MONTANT * PIECE.ANNULEE * (PIECE.COEFF + PIECE.COEFF_TR)) --
+without these fields every imported order silently contributed 0 to the
+client's balance, and to computed stock via the same COEFF pattern on
+ITEM, regardless of ANNULEE.
 """
 
 import datetime
@@ -65,6 +74,7 @@ class OrderImporter:
         self.cfg = cfg["order_import"]
         self.cur = con.cursor()
         self._codec = python_codec_for(cfg["firebird"].get("charset"))
+        self._coeff_cache = {}
 
     def _safe_text(self, s):
         """Replaces any character the connection's charset can't encode
@@ -155,6 +165,44 @@ class OrderImporter:
             float(prix_ttc) if prix_ttc is not None else None,
             float(tva) if tva is not None else 0.0,
         )
+
+    def _type_piece_coefficients(self, code_type_piece):
+        """Returns (coeff_piece, coeff_piece_tr, coeff_item, coeff_item_tr)
+        for this document type, cached per run.
+
+        NetFact2's TIERS balance is computed live as
+        SUM(PIECE.MONTANT * PIECE.ANNULEE * (PIECE.COEFF + PIECE.COEFF_TR))
+        -- confirmed from the application's own embedded SQL. PIECE.COEFF/
+        COEFF_TR (and ITEM.COEFF/COEFF_TR, used the same way by the stock
+        ledger) are per-document-type values NetFact2's own UI copies from
+        LOCAL_TYPE_PIECE.COEFF_PIECE/COEFF_PIECE_TR/COEFF_ITEM/COEFF_ITEM_TR
+        when creating a document -- our INSERT used to leave them at their
+        column default (0), which silently zeroed out both the balance and
+        stock effect of every imported order regardless of ANNULEE. Looking
+        this up live (instead of hardcoding an assumed sign) means it stays
+        correct even if the coefficients differ per document type or change
+        later, exactly mirroring what NetFact2 itself does on save.
+
+        Falls back to (0, 0, 0, 0) with a warning if the type isn't found in
+        LOCAL_TYPE_PIECE -- same as the previous (broken) behavior, so an
+        unrecognized type can't make things worse, just doesn't fix them."""
+        if code_type_piece in self._coeff_cache:
+            return self._coeff_cache[code_type_piece]
+        self.cur.execute(
+            "SELECT COEFF_PIECE, COEFF_PIECE_TR, COEFF_ITEM, COEFF_ITEM_TR "
+            "FROM LOCAL_TYPE_PIECE WHERE CODE_TYPE_PIECE = ?",
+            (code_type_piece,),
+        )
+        row = self.cur.fetchone()
+        if not row:
+            log.warning("LOCAL_TYPE_PIECE has no row for CODE_TYPE_PIECE=%s -- "
+                        "PIECE/ITEM COEFF will be 0, so this document won't affect "
+                        "the client's balance or stock", code_type_piece)
+            coeffs = (0, 0, 0, 0)
+        else:
+            coeffs = tuple(int(v) if v is not None else 0 for v in row)
+        self._coeff_cache[code_type_piece] = coeffs
+        return coeffs
 
     # -- main entry -----------------------------------------------------------
     def import_order(self, wc_order, dry_run=False, wc_orders_client=None):
@@ -259,17 +307,19 @@ class OrderImporter:
             return ("skipped", (f"[DRY] -> {doc_type}: {len(line_payloads)} line(s), "
                                  f"HT={total_ht}, TTC={total_ttc}{link}"), "dry_run")
 
+        coeff_piece, coeff_piece_tr, coeff_item, coeff_item_tr = self._type_piece_coefficients(doc_type)
+
         refdoc = f"WC-{order_id}"
         nopiece = str(self._next_base("NEXTPIECE", "PIECE", "NOPIECE") + 1)
         self.cur.execute(
             "INSERT INTO PIECE "
             "(NOPIECE, NOPIECE_O, CODE_TYPE_PIECE, CODE_TIERS, DATEPIECE, REFDOC, "
-            " USERNAME, MONTANTHT, MONTANTTTC, TVA, CODE_DEPOT, NOM_CONTACT, "
-            " LIVR_ADRESSE, LIVR_TELEPHONE, LIVR_DATE, ANNULEE) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+            " USERNAME, MONTANTHT, MONTANTTTC, MONTANT, COEFF, COEFF_TR, TVA, "
+            " CODE_DEPOT, NOM_CONTACT, LIVR_ADRESSE, LIVR_TELEPHONE, LIVR_DATE, ANNULEE) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
             (nopiece, source_nopiece, doc_type, self.cfg["client_code"], date_piece, refdoc,
-             self.cfg["username"], total_ht, total_ttc, total_tva,
-             self.cfg["code_depot"] or None,
+             self.cfg["username"], total_ht, total_ttc, total_ttc, coeff_piece, coeff_piece_tr,
+             total_tva, self.cfg["code_depot"] or None,
              full_name[:100] if full_name else None,
              address[:200] if address else None,
              phone[:50] if phone else None,
@@ -282,11 +332,12 @@ class OrderImporter:
             item_no += 1
             self.cur.execute(
                 "INSERT INTO ITEM "
-                "(NOITEM, NOPIECE, REF_ART, QTE, PRIXHT, PRIXTTC, TVA, DATEPIECE, "
-                " CODE_TIERS, CODE_DEPOT, ANNULEE) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                "(NOITEM, NOPIECE, REF_ART, QTE, PRIXHT, PRIXTTC, COEFF, COEFF_TR, TVA, "
+                " DATEPIECE, CODE_TIERS, CODE_DEPOT, ANNULEE) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
                 (str(item_no), nopiece, lp["ref_art"], lp["qte"], lp["prixht"], lp["prixttc"],
-                 lp["tva"], date_piece, self.cfg["client_code"], self.cfg["code_depot"] or None),
+                 coeff_item, coeff_item_tr, lp["tva"], date_piece, self.cfg["client_code"],
+                 self.cfg["code_depot"] or None),
             )
         self._advance_generator("NEXTITEM", item_no)
 

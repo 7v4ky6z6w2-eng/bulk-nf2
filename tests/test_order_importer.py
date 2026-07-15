@@ -71,11 +71,12 @@ def _wc_order(order_id=555, status="processing", sku="REF1", qty=2, price=24.0):
 
 def _responder(article_by_sku=None, already_imported=None, source_piece=None,
                 max_nopiece=100, max_noitem=500, gen_piece=0, gen_item=0,
-                existing_docs=None):
+                existing_docs=None, type_piece_coeffs=None):
     article_by_sku = article_by_sku or {"REF1": ("REF1", 20.0, 24.0, 19.0)}
     already_imported = already_imported or {}
     source_piece = source_piece or {}
     existing_docs = existing_docs or {}
+    type_piece_coeffs = type_piece_coeffs or {}
 
     def responder(sql, params):
         s = sql.upper()
@@ -89,6 +90,9 @@ def _responder(article_by_sku=None, already_imported=None, source_piece=None,
             return (max_nopiece,)
         if "MAX(CAST(NOITEM" in s:
             return (max_noitem,)
+        if "COEFF_PIECE, COEFF_PIECE_TR, COEFF_ITEM, COEFF_ITEM_TR FROM LOCAL_TYPE_PIECE" in s:
+            (code_type_piece,) = params
+            return type_piece_coeffs.get(code_type_piece)
         if "NOPIECE, CODE_TYPE_PIECE, ANNULEE FROM PIECE WHERE REFDOC" in s:
             (refdoc,) = params
             return list(existing_docs.get(refdoc, []))
@@ -225,7 +229,8 @@ def test_missing_sku_skip_line_policy_skips_just_that_line():
 
 def test_creates_piece_and_items_with_correct_generator_based_ids():
     cfg = _cfg()
-    responder = _responder(max_nopiece=100, gen_piece=250, max_noitem=500, gen_item=10)
+    responder = _responder(max_nopiece=100, gen_piece=250, max_noitem=500, gen_item=10,
+                            type_piece_coeffs={"PC_VE_COM": (1, 0, 1, 0)})
     importer, con, cur = _make_importer(cfg, responder)
 
     status, msg, reason = importer.import_order(_wc_order(order_id=999, sku="REF1", qty=3))
@@ -238,12 +243,42 @@ def test_creates_piece_and_items_with_correct_generator_based_ids():
     assert len(insert_piece) == 1
     assert insert_piece[0][0] == "251"  # NOPIECE
     assert insert_piece[0][5] == "WC-999"  # REFDOC
+    assert insert_piece[0][9] == 72.0  # MONTANT == MONTANTTTC (3 * 24.0)
+    assert insert_piece[0][10] == 1    # COEFF (from LOCAL_TYPE_PIECE.COEFF_PIECE)
+    assert insert_piece[0][11] == 0    # COEFF_TR (from LOCAL_TYPE_PIECE.COEFF_PIECE_TR)
 
     insert_items = [p for sql, p in cur.executed if "INSERT INTO ITEM" in sql]
     assert len(insert_items) == 1
     assert insert_items[0][0] == "501"  # NOITEM = max(500, 10) + 1
     assert insert_items[0][1] == "251"  # NOPIECE FK
     assert insert_items[0][3] == 3.0    # QTE
+    assert insert_items[0][6] == 1      # COEFF (from LOCAL_TYPE_PIECE.COEFF_ITEM)
+    assert insert_items[0][7] == 0      # COEFF_TR (from LOCAL_TYPE_PIECE.COEFF_ITEM_TR)
+
+
+def test_type_piece_coefficients_looked_up_from_local_type_piece():
+    cfg = _cfg()
+    responder = _responder(type_piece_coeffs={"PC_VE_COM": (1, -1, 2, -2)})
+    importer, con, cur = _make_importer(cfg, responder)
+    assert importer._type_piece_coefficients("PC_VE_COM") == (1, -1, 2, -2)
+
+
+def test_type_piece_coefficients_defaults_to_zero_when_type_not_found():
+    cfg = _cfg()
+    importer, con, cur = _make_importer(cfg, _responder())  # no type_piece_coeffs configured
+    assert importer._type_piece_coefficients("UNKNOWN_TYPE") == (0, 0, 0, 0)
+
+
+def test_type_piece_coefficients_cached_after_first_lookup():
+    cfg = _cfg()
+    responder = _responder(type_piece_coeffs={"PC_VE_COM": (1, 0, 1, 0)})
+    importer, con, cur = _make_importer(cfg, responder)
+
+    importer._type_piece_coefficients("PC_VE_COM")
+    importer._type_piece_coefficients("PC_VE_COM")
+
+    lookups = [sql for sql, _ in cur.executed if "COEFF_PIECE, COEFF_PIECE_TR" in sql]
+    assert len(lookups) == 1
 
 
 def test_transformation_links_to_source_piece():
