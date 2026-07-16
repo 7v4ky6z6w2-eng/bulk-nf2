@@ -187,6 +187,17 @@ def run_sync(cfg, dry_run=False, log_fn=None):
                 report["unchanged"] += 1
                 continue
 
+            if cfg["sync"].get("auto_sale_on_price_drop", True) and core.get("regular_price") is not None:
+                if last_price is None:
+                    emit(f"{ref}: no prior recorded price -- {core['regular_price']} recorded "
+                         f"as the new anchor (a drop can't be detected until next time)")
+                elif core.get("sale_price"):
+                    emit(f"{ref}: price dropped to {core['sale_price']} (anchor {core['regular_price']}) "
+                         f"-> showing as a WooCommerce sale price")
+                elif float(core["regular_price"]) != last_price:
+                    emit(f"{ref}: price {core['regular_price']} (was {last_price}) -- new anchor, "
+                         f"any previous auto-sale cleared")
+
             # Categories are deliberately not touched here -- the store runs
             # its own WordPress auto-categorizer plugin instead.
             payload = {k: v for k, v in core.items() if not k.startswith("_")}

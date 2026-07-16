@@ -308,18 +308,22 @@ def test_run_sync_auto_sale_price_across_runs(monkeypatch):
         # Run 1: establishes the anchor at 24.00, no discount yet.
         monkeypatch.setattr(engine.queries, "fetch_articles",
                              lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=24.0)])
-        report1 = engine.run_sync(cfg, dry_run=False)
+        log1 = []
+        report1 = engine.run_sync(cfg, dry_run=False, log_fn=log1.append)
         assert report1["created"] == ["REF1"]
+        assert any("no prior recorded price" in line for line in log1)
 
         # Run 2: price drops -> should push as a sale, keeping 24.00 as
         # regular_price and 18.00 as sale_price.
         monkeypatch.setattr(engine.queries, "fetch_articles",
                              lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=18.0)])
-        report2 = engine.run_sync(cfg, dry_run=False)
+        log2 = []
+        report2 = engine.run_sync(cfg, dry_run=False, log_fn=log2.append)
         assert report2["updated"] == ["REF1"]
         pushed = FakeWooCommerceClient.instances[-1].last_update[0]
         assert pushed["regular_price"] == "24.00"
         assert pushed["sale_price"] == "18.00"
+        assert any("showing as a WooCommerce sale price" in line for line in log2)
 
         # Re-running with the same (still discounted) price should be a
         # no-op -- confirms the anchor/sale state was persisted correctly.
@@ -332,8 +336,10 @@ def test_run_sync_auto_sale_price_across_runs(monkeypatch):
         # Run 3: price recovers above the anchor -> new anchor, sale cleared.
         monkeypatch.setattr(engine.queries, "fetch_articles",
                              lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=30.0)])
-        report3 = engine.run_sync(cfg, dry_run=False)
+        log3 = []
+        report3 = engine.run_sync(cfg, dry_run=False, log_fn=log3.append)
         assert report3["updated"] == ["REF1"]
+        assert any("new anchor, any previous auto-sale cleared" in line for line in log3)
         pushed3 = FakeWooCommerceClient.instances[-1].last_update[0]
         assert pushed3["regular_price"] == "30.00"
         assert pushed3["sale_price"] == ""
