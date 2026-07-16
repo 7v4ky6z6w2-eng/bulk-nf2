@@ -12,7 +12,6 @@ import logging
 from app.db import queries
 from app.db.firebird_client import connect as connect_firebird
 from app.images.blob_extractor import extract_image
-from app.sync.name_cleaner import clean_name
 from app.sync.state_store import StateStore
 from app.sync.woocommerce_client import WooCommerceClient, WooCommerceError
 
@@ -40,11 +39,9 @@ def build_core_fields(article, cfg):
     price_field = "prix_vente_ttc" if sync_cfg["price_field"] == "PRIXVENTETTC" else "prix_vente_ht"
     promo_field = "prix_ttc_promo" if sync_cfg["promo_price_field"] == "PRIXTTCPROMO" else "prix_ht_promo"
 
-    name = clean_name(article["designation"], sync_cfg.get("name_replacements"))
-
     fields = {
         "sku": article["ref_art"],
-        "name": name,
+        "name": article["designation"],
         "regular_price": _price_str(article[price_field]),
     }
 
@@ -63,11 +60,6 @@ def build_core_fields(article, cfg):
 
     barcodes = article["barcodes"]
     meta_data = []
-    if article["designation"] and article["designation"] != name:
-        # The cleaned name can drop trailing reference/packaging codes
-        # (see name_cleaner.strip_trailing_codes) -- keep the untouched
-        # ERP text around too, so nothing is lost even if it's not shown.
-        meta_data.append({"key": "_erp_designation", "value": article["designation"]})
     if barcodes:
         fields["global_unique_id"] = barcodes[0]
         meta_data.append({"key": "_barcode", "value": barcodes[0]})
@@ -182,7 +174,13 @@ def run_sync(cfg, dry_run=False, log_fn=None):
             if cfg["sync"]["sync_images"]:
                 image = extract_image(article["photo"], ref)
 
-            new_hash = content_hash(core, has_image=bool(image),
+            # Name is excluded from change detection entirely (not just from
+            # the update payload below) so an ERP-only rename can't
+            # spuriously flag an otherwise-unchanged article as changed --
+            # the hash has to stay stable across a product's whole lifetime,
+            # not just after the first sync.
+            hash_core = {k: v for k, v in core.items() if k != "name"}
+            new_hash = content_hash(hash_core, has_image=bool(image),
                                      image_bytes=image.data if image else None)
 
             if existing and existing["content_hash"] == new_hash:
@@ -192,6 +190,11 @@ def run_sync(cfg, dry_run=False, log_fn=None):
             # Categories are deliberately not touched here -- the store runs
             # its own WordPress auto-categorizer plugin instead.
             payload = {k: v for k, v in core.items() if not k.startswith("_")}
+            if existing and existing.get("wc_product_id"):
+                # Name is only ever set at creation -- never overwritten on
+                # later syncs, so a name edited by hand on the storefront
+                # (e.g. a different name than what's in the ERP) sticks.
+                payload.pop("name", None)
 
             if dry_run:
                 payload["images"] = ["<would upload ARTICLE.PHOTO>"] if image else []

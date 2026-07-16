@@ -100,8 +100,17 @@ def test_build_core_fields_does_not_set_category():
     article = _article(designation="STYL BIL BLU")
     cfg = _cfg("unused.sqlite3")
     core = engine.build_core_fields(article, cfg)
-    assert core["name"] == "Stylo Bille Bleu"
     assert "categories" not in core
+
+
+def test_build_core_fields_uses_raw_designation_as_name_unmodified():
+    # Name cleaning (abbreviation expansion / Title Case) was removed at
+    # the user's request -- it was stripping information they wanted kept.
+    # The ERP's DESIGNATION goes to WooCommerce verbatim.
+    article = _article(designation="STYL BIL BLU réf.42/A")
+    cfg = _cfg("unused.sqlite3")
+    core = engine.build_core_fields(article, cfg)
+    assert core["name"] == "STYL BIL BLU réf.42/A"
     assert not any(k.startswith("_category") for k in core)
 
 
@@ -223,6 +232,64 @@ def test_run_sync_real_run_then_unchanged_on_rerun(monkeypatch):
 
         report2 = engine.run_sync(cfg, dry_run=False)
         assert report2["created"] == []
+        assert report2["updated"] == []
+        assert report2["unchanged"] == 1
+
+
+def test_run_sync_sets_name_on_create_but_never_overwrites_it_on_update(monkeypatch):
+    # Name is only ever set once, at creation -- a name edited by hand on
+    # the storefront (or a different name than what's in the ERP) must
+    # never get clobbered by a later sync.
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = os.path.join(tmp, "state.sqlite3")
+        cfg = _cfg(state_path)
+
+        monkeypatch.setattr(engine, "connect_firebird", lambda cfg: DummyConnection())
+        monkeypatch.setattr(engine.queries, "fetch_familles", lambda con: {
+            "FAM1": {"intitule": "Stylos", "boutiq_visible": True}
+        })
+        monkeypatch.setattr(engine, "WooCommerceClient", FakeWooCommerceClient)
+
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(designation="Old Name")])
+        report1 = engine.run_sync(cfg, dry_run=False)
+        assert report1["created"] == ["REF1"]
+        created_payload = FakeWooCommerceClient.instances[-1].last_create[0]
+        assert created_payload["name"] == "Old Name"
+
+        # ERP name changes AND price changes -- only the price change
+        # should reach WooCommerce; name must be absent from the update.
+        monkeypatch.setattr(
+            engine.queries, "fetch_articles",
+            lambda con, familles, filter_boutique_visible: [
+                _article(designation="New Name From ERP", prix_vente_ttc=30.0)
+            ],
+        )
+        report2 = engine.run_sync(cfg, dry_run=False)
+        assert report2["updated"] == ["REF1"]
+        updated_payload = FakeWooCommerceClient.instances[-1].last_update[0]
+        assert "name" not in updated_payload
+        assert updated_payload["regular_price"] == "30.00"
+
+
+def test_run_sync_name_only_change_does_not_trigger_an_update(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = os.path.join(tmp, "state.sqlite3")
+        cfg = _cfg(state_path)
+
+        monkeypatch.setattr(engine, "connect_firebird", lambda cfg: DummyConnection())
+        monkeypatch.setattr(engine.queries, "fetch_familles", lambda con: {
+            "FAM1": {"intitule": "Stylos", "boutiq_visible": True}
+        })
+        monkeypatch.setattr(engine, "WooCommerceClient", FakeWooCommerceClient)
+
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(designation="Old Name")])
+        engine.run_sync(cfg, dry_run=False)
+
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(designation="New Name")])
+        report2 = engine.run_sync(cfg, dry_run=False)
         assert report2["updated"] == []
         assert report2["unchanged"] == 1
 
