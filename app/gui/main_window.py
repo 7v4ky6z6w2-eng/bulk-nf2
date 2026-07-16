@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from app import diagnostics
 from app.config import load_config, save_config
 from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
+from app.sync.name_resync import run_name_resync
 from app.sync.order_importer import fix_duplicate_orders, run_order_import
 from app.sync.stock_sync import run_stock_sync
 
@@ -62,6 +63,24 @@ class SyncWorker(QThread):
             report = run_sync(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
             self.finished_ok.emit(report)
         except Exception as exc:  # noqa: BLE001 - surface any failure to the GUI
+            self.finished_error.emit(str(exc))
+
+
+class NameResyncWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_name_resync(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
             self.finished_error.emit(str(exc))
 
 
@@ -249,6 +268,7 @@ class MainWindow(QMainWindow):
         self.config_path = config_path
         self.cfg = load_config(config_path)
         self.worker = None
+        self.name_resync_worker = None
 
         self.setWindowTitle("ERP -> WooCommerce Product Sync")
         self.resize(920, 720)
@@ -445,6 +465,26 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.sync_btn)
         layout.addLayout(btn_row)
 
+        resync_group = QGroupBox("Fix names")
+        resync_layout = QVBoxLayout(resync_group)
+        resync_layout.addWidget(QLabel(
+            "Normal syncs never touch a product's name once it exists in\n"
+            "WooCommerce (so names edited by hand on the site stick). Use this\n"
+            "to force-reset every already-synced product's name back to the\n"
+            "raw ERP designation -- e.g. to undo the old name-cleaning step\n"
+            "that stripped reference/packaging info from some names."
+        ))
+        resync_btn_row = QHBoxLayout()
+        self.name_resync_preview_btn = QPushButton("Preview name resync (dry run)")
+        self.name_resync_preview_btn.clicked.connect(lambda: self._start_name_resync(dry_run=True))
+        self.name_resync_btn = QPushButton("Resync all names now")
+        self.name_resync_btn.setToolTip("Writes to WooCommerce immediately for every already-synced product.")
+        self.name_resync_btn.clicked.connect(self._confirm_name_resync)
+        resync_btn_row.addWidget(self.name_resync_preview_btn)
+        resync_btn_row.addWidget(self.name_resync_btn)
+        resync_layout.addLayout(resync_btn_row)
+        layout.addWidget(resync_group)
+
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         layout.addWidget(self.log_view)
@@ -482,6 +522,56 @@ class MainWindow(QMainWindow):
         self.dry_run_btn.setEnabled(True)
         self.sync_btn.setEnabled(True)
         self.log_view.appendPlainText(f"FAILED: {message}")
+
+    def _confirm_name_resync(self):
+        answer = QMessageBox.question(
+            self, "Resync all names?",
+            "This will overwrite the name of every already-synced product in "
+            "WooCommerce with the raw ERP designation -- including any names "
+            "you've edited by hand on the site.\n\n"
+            "Run 'Preview name resync (dry run)' first if you haven't already, "
+            "to see what will change.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_name_resync(dry_run=False)
+
+    def _start_name_resync(self, dry_run):
+        if self.name_resync_worker and self.name_resync_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.name_resync_preview_btn.setEnabled(False)
+        self.name_resync_btn.setEnabled(False)
+        self.log_view.appendPlainText(
+            "Previewing name resync..." if dry_run else "Resyncing all names..."
+        )
+        self.name_resync_worker = NameResyncWorker(cfg, dry_run)
+        self.name_resync_worker.line.connect(self.log_view.appendPlainText)
+        self.name_resync_worker.finished_ok.connect(self._name_resync_done)
+        self.name_resync_worker.finished_error.connect(self._name_resync_failed)
+        self.name_resync_worker.start()
+
+    def _name_resync_done(self, report):
+        self.name_resync_preview_btn.setEnabled(True)
+        self.name_resync_btn.setEnabled(True)
+        if report.get("payloads"):
+            for item in report["payloads"][:self.PAYLOAD_PREVIEW_LIMIT]:
+                self.log_view.appendPlainText(f"  {item['ref_art']}: name -> {item['name']!r}")
+            if len(report["payloads"]) > self.PAYLOAD_PREVIEW_LIMIT:
+                self.log_view.appendPlainText(
+                    f"  ... and {len(report['payloads']) - self.PAYLOAD_PREVIEW_LIMIT} more"
+                )
+        self.log_view.appendPlainText(
+            f"updated={len(report['updated'])} not_tracked={report['not_tracked']} "
+            f"errors={len(report['errors'])}"
+        )
+        if report.get("errors"):
+            self.log_view.appendPlainText(f"Errors: {report['errors']}")
+
+    def _name_resync_failed(self, message):
+        self.name_resync_preview_btn.setEnabled(True)
+        self.name_resync_btn.setEnabled(True)
+        self.log_view.appendPlainText(f"Name resync FAILED: {message}")
 
     # -- Stock Sync tab -------------------------------------------------------
     def _build_stock_sync_tab(self):
