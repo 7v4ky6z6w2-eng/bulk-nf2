@@ -5,6 +5,7 @@ import tempfile
 
 from app.config import DEFAULT_CONFIG
 from app.sync import engine
+from app.sync.state_store import StateStore
 
 
 def _cfg(state_db_path):
@@ -346,6 +347,64 @@ def test_run_sync_auto_sale_price_across_runs(monkeypatch):
 
         dry2 = engine.run_sync(cfg, dry_run=True)
         assert dry2["payloads"] == []  # confirms 30.00 became the new stable anchor
+
+
+def test_run_sync_cold_start_on_legacy_row_cannot_detect_a_drop_yet(monkeypatch):
+    # Reproduces the exact situation a user hit: a product synced by an
+    # older build of this tool, before the auto-sale-on-price-drop
+    # feature (and its last_regular_price column) existed. The migration
+    # adds the column as NULL for every pre-existing row -- so the first
+    # sync run after upgrading has no anchor to compare against yet, and
+    # can only record whatever the current (already-lower) price is as
+    # the new baseline. This looks identical to "just updating the
+    # regular price with no sale" -- because, for this one run, that is
+    # correctly what happens; there's no prior price to compare against.
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = os.path.join(tmp, "state.sqlite3")
+        cfg = _cfg(state_path)
+
+        # Seed a row as if an older build (pre-dating last_regular_price)
+        # had already synced this product -- known WC id, some stored
+        # hash from that older run, but no anchor price recorded.
+        with StateStore(state_path) as store:
+            store.upsert("REF1", 1000, "some-old-hash-from-a-previous-build", "none",
+                         "2025-01-01T00:00:00")  # last_regular_price omitted -> NULL
+
+        monkeypatch.setattr(engine, "connect_firebird", lambda cfg: DummyConnection())
+        monkeypatch.setattr(engine.queries, "fetch_familles", lambda con: {
+            "FAM1": {"intitule": "Stylos", "boutiq_visible": True}
+        })
+        monkeypatch.setattr(engine, "WooCommerceClient", FakeWooCommerceClient)
+        # Price already dropped in the ERP (e.g. 24.00 -> 18.00) by the
+        # time this first post-upgrade sync runs.
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=18.0)])
+
+        log = []
+        report = engine.run_sync(cfg, dry_run=False, log_fn=log.append)
+
+        assert report["updated"] == ["REF1"]
+        pushed = FakeWooCommerceClient.instances[-1].last_update[0]
+        # Confirmed: regular_price just becomes 18.00 directly, sale_price
+        # explicitly cleared to "" -- exactly the reported symptom, and
+        # correct given no prior price was ever recorded to compare against.
+        assert pushed["regular_price"] == "18.00"
+        assert pushed["sale_price"] == ""
+        assert any("no prior recorded price" in line for line in log)
+
+        with StateStore(state_path) as store:
+            assert store.get("REF1")["last_regular_price"] == 18.0
+
+        # The NEXT drop, now that an anchor exists, must be detected correctly.
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article(prix_vente_ttc=12.0)])
+        log2 = []
+        report2 = engine.run_sync(cfg, dry_run=False, log_fn=log2.append)
+        assert report2["updated"] == ["REF1"]
+        pushed2 = FakeWooCommerceClient.instances[-1].last_update[0]
+        assert pushed2["regular_price"] == "18.00"
+        assert pushed2["sale_price"] == "12.00"
+        assert any("showing as a WooCommerce sale price" in line for line in log2)
 
 
 def test_run_sync_reports_orphans(monkeypatch):
