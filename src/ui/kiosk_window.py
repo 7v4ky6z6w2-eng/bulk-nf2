@@ -125,6 +125,7 @@ class KioskWindow:
         self._state = "idle"          # "idle" | "result"
         self._result: dict = {}
         self._current_scan_id: Optional[str] = None
+        self._last_code: str = ""
         self._idle_after: Optional[str] = None
         self._phase = 0.0
         self._glow_ids: list = []
@@ -291,6 +292,7 @@ class KioskWindow:
 
         scan_id = str(uuid.uuid4())
         self._current_scan_id = scan_id
+        self._last_code = code   # code-barres scanné (candidat SKU photo)
 
         cfg_fb = self._cfg.firebird
         t = threading.Thread(
@@ -309,18 +311,20 @@ class KioskWindow:
         finally:
             db.close()
 
-    def _start_image_fetch(self, ref_art: str, scan_id: str) -> None:
-        """Récupère la photo WooCommerce (par SKU) dans un thread."""
+    def _start_image_fetch(self, scan_id: str, candidates) -> None:
+        """Récupère la photo WooCommerce dans un thread, en essayant plusieurs
+        identifiants (réf. article, code-barres scanné) comme SKU."""
         woo = self._woo
         if woo is None or not getattr(woo, "configured", False):
             _cfgmod.log("PHOTO: fetch ignoré (WooCommerce non configuré)")
             return
 
-        _cfgmod.log(f"PHOTO: lancement fetch pour REF_ART={ref_art}")
+        cands = [c for c in candidates if c]
+        _cfgmod.log(f"PHOTO: lancement fetch, candidats={cands}")
 
         def _work():
             try:
-                path = woo.get_image(ref_art)
+                path = woo.get_image(*cands)
             except Exception as exc:  # noqa: BLE001 — jamais bruyant
                 _cfgmod.log(f"PHOTO: exception fetch : {exc!r}")
                 path = None
@@ -418,7 +422,8 @@ class KioskWindow:
         self._photo_state = "loading" if (configured and _HAS_PIL) else "none"
         self._render()
         if configured and _HAS_PIL:
-            self._start_image_fetch(article.ref_art, self._current_scan_id)
+            self._start_image_fetch(
+                self._current_scan_id, [article.ref_art, self._last_code])
         self._arm_idle_timer()
         self._refocus()
 
