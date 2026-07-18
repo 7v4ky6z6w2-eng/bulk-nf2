@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import json
 import logging
+import sqlite3
 
 from app.db import queries
 from app.db.firebird_client import connect as connect_firebird
@@ -251,11 +252,22 @@ def run_sync(cfg, dry_run=False, log_fn=None):
                         continue
                     new_hash, image_source, new_anchor = pending[ref]
                     if row.get("error"):
-                        store.record_error(ref, str(row["error"]), now)
+                        try:
+                            store.record_error(ref, str(row["error"]), now)
+                        except sqlite3.Error as exc:
+                            emit(f"{ref}: also failed to record the error locally ({exc})")
                         report["errors"].append({"ref_art": ref, "error": row["error"]})
                         continue
-                    store.upsert(ref, row.get("id"), new_hash, image_source, now,
-                                 last_regular_price=new_anchor)
+                    try:
+                        store.upsert(ref, row.get("id"), new_hash, image_source, now,
+                                     last_regular_price=new_anchor)
+                    except sqlite3.Error as exc:
+                        # WooCommerce already has this product -- losing the
+                        # local bookkeeping write just means this article
+                        # looks "changed" again next run (harmless re-push),
+                        # not a real failure of the sync itself.
+                        emit(f"{ref}: pushed to WooCommerce, but local tracking wasn't "
+                             f"recorded ({exc}) -- next run will simply resend it, no action needed.")
                     target_list.append(ref)
 
         # Orphans: articles the state store remembers syncing that no longer

@@ -1,5 +1,6 @@
 import copy
 import os
+import sqlite3
 import tempfile
 
 from app.config import DEFAULT_CONFIG
@@ -128,6 +129,25 @@ def test_dry_run_does_not_call_batch_update(monkeypatch):
         # dry run must not persist last_stock
         with StateStore(state_path) as store:
             assert store.get_stock_targets()["REF1"] == (1, 5)
+
+
+def test_local_tracking_write_failure_does_not_fail_the_run(monkeypatch):
+    # The WooCommerce batch call already succeeded by the time
+    # store.set_last_stocks() runs -- a local SQLite lock error there must
+    # not be reported as if the whole stock push failed.
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path, client = _setup(
+            monkeypatch, tmp, db_stock={"REF1": 10}, adopted={"REF1": (1, 5)},
+        )
+
+        def _boom(self, items, synced_at):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(StateStore, "set_last_stocks", _boom)
+        report = stock_sync.run_stock_sync(_cfg(state_path))
+        assert report["updated"] == ["REF1"]
+        assert report["errors"] == []
+        assert client.batch_calls == [[{"id": 1, "manage_stock": True, "stock_quantity": 10}]]
 
 
 def test_no_targets_does_nothing_gracefully(monkeypatch):

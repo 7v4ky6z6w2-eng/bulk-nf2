@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import sqlite3
 import tempfile
 
 from app.config import DEFAULT_CONFIG
@@ -271,6 +272,31 @@ def test_run_sync_sets_name_on_create_but_never_overwrites_it_on_update(monkeypa
         updated_payload = FakeWooCommerceClient.instances[-1].last_update[0]
         assert "name" not in updated_payload
         assert updated_payload["regular_price"] == "30.00"
+
+
+def test_run_sync_local_tracking_write_failure_does_not_fail_the_run(monkeypatch):
+    # The WooCommerce batch call already succeeded by the time store.upsert()
+    # runs for each row -- a local SQLite lock error there must not be
+    # reported as if the product wasn't actually pushed.
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = os.path.join(tmp, "state.sqlite3")
+        cfg = _cfg(state_path)
+
+        monkeypatch.setattr(engine, "connect_firebird", lambda cfg: DummyConnection())
+        monkeypatch.setattr(engine.queries, "fetch_familles", lambda con: {
+            "FAM1": {"intitule": "Stylos", "boutiq_visible": True}
+        })
+        monkeypatch.setattr(engine.queries, "fetch_articles",
+                             lambda con, familles, filter_boutique_visible: [_article()])
+        monkeypatch.setattr(engine, "WooCommerceClient", FakeWooCommerceClient)
+
+        def _boom(self, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(StateStore, "upsert", _boom)
+        report = engine.run_sync(cfg, dry_run=False)
+        assert report["created"] == ["REF1"]
+        assert report["errors"] == []
 
 
 def test_run_sync_name_only_change_does_not_trigger_an_update(monkeypatch):

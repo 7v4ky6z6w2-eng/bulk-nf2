@@ -16,6 +16,7 @@ manage_stock/stock_quantity.
 
 import datetime
 import logging
+import sqlite3
 
 from app.db import queries
 from app.db.firebird_client import connect as connect_firebird
@@ -95,17 +96,27 @@ def run_stock_sync(cfg, dry_run=False, log_fn=None):
             try:
                 result = wc_client.batch_products(update=batch, chunk_size=stock_cfg["batch_size"],
                                                     progress_fn=_batch_progress)
-                updated_ids = {row.get("id") for row in result["update"] if not row.get("error")}
-                confirmed = [(ref, qty) for ref, wc_id, qty in updates if wc_id in updated_ids]
-                store.set_last_stocks(confirmed, now)
-                report["updated"] = [ref for ref, _qty in confirmed]
-                for ref, wc_id, _qty in updates:
-                    if wc_id not in updated_ids:
-                        report["errors"].append({"sku": ref, "error": "update not confirmed"})
             except WooCommerceError as exc:
                 emit(f"Batch stock update failed: {exc}")
                 for ref, _wc_id, _qty in updates:
                     report["errors"].append({"sku": ref, "error": str(exc)})
+            else:
+                updated_ids = {row.get("id") for row in result["update"] if not row.get("error")}
+                confirmed = [(ref, qty) for ref, wc_id, qty in updates if wc_id in updated_ids]
+                report["updated"] = [ref for ref, _qty in confirmed]
+                for ref, wc_id, _qty in updates:
+                    if wc_id not in updated_ids:
+                        report["errors"].append({"sku": ref, "error": "update not confirmed"})
+                try:
+                    store.set_last_stocks(confirmed, now)
+                except sqlite3.Error as exc:
+                    # The WooCommerce side already succeeded (we're past the
+                    # batch call) -- losing the local bookkeeping write just
+                    # means the next run re-sends these as "changed" again,
+                    # which is harmless. Don't let this turn a successful
+                    # push into a reported hard failure.
+                    emit(f"Stock update reached WooCommerce, but local tracking wasn't "
+                         f"recorded ({exc}) -- next run will simply re-send it, no action needed.")
 
     emit(f"Done. updated={len(report['updated'])} unchanged={report['unchanged']} "
          f"not_tracked={report['not_tracked']} missing_in_db={report['missing_in_db']} "

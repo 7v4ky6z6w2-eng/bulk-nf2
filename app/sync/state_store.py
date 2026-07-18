@@ -25,7 +25,13 @@ CREATE TABLE IF NOT EXISTS sync_map (
 class StateStore:
     def __init__(self, path):
         self.path = path
-        self.con = sqlite3.connect(path)
+        # A generous busy timeout plus WAL (readers don't block the writer
+        # and vice versa) so a scheduled sync/stock-sync/order-import
+        # overlapping another run against the same file waits out a brief
+        # lock instead of raising "database is locked" almost immediately
+        # (sqlite3's default timeout is only 5s, no WAL).
+        self.con = sqlite3.connect(path, timeout=30)
+        self.con.execute("PRAGMA journal_mode=WAL")
         self.con.execute(SCHEMA)
         self._migrate()
         self.con.commit()
