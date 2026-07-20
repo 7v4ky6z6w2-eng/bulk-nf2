@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
@@ -430,6 +431,19 @@ def pending_ops_recent(con: sqlite3.Connection, limit: int = 50) -> list:
     return [dict(r) for r in rows]
 
 
+# SQL du match_key réutilisé partout où l'on regroupe un article multi-magasin
+# (article_search, price_sync_candidates) : priorité à un lien manuel confirmé
+# (article_link — cf. confirm_article_link), puis au code-barres équivalent
+# partagé (EQUIV_CBARRES), puis à la référence brute en dernier recours.
+_MATCH_KEY_SQL = (
+    "COALESCE("
+    "  (SELECT link_key FROM article_link l WHERE l.store_id=a.store_id AND l.ref_art=a.ref_art), "
+    "  (SELECT MIN(e.code_barres) FROM equiv_cbarres e WHERE e.store_id=a.store_id AND e.ref_art=a.ref_art), "
+    "  a.ref_art"
+    ") AS match_key"
+)
+
+
 def article_search(con: sqlite3.Connection, query: str = "", limit: int = 200) -> list:
     """Articles correspondant à la recherche, une ligne par (article, magasin).
 
@@ -437,20 +451,18 @@ def article_search(con: sqlite3.Connection, query: str = "", limit: int = 200) -
     de l'article ET les codes-barres équivalents (EQUIV_CBARRES — la table que
     le logiciel scanne réellement).
 
-    Chaque ligne porte aussi `match_key` : le plus petit code-barres équivalent
-    de l'article, ou à défaut sa référence. Deux magasins qui vendent le MÊME
-    produit sous des références différentes partagent ainsi la même clé (via le
-    code-barres commun) et les clients peuvent regrouper leurs lignes en un
-    seul article multi-magasins.
+    Chaque ligne porte aussi `match_key` (cf. _MATCH_KEY_SQL) : un lien manuel
+    confirmé (article_link) ou un code-barres équivalent partagé, ou à défaut
+    la référence. Deux magasins qui vendent le MÊME produit sous des
+    références différentes partagent ainsi la même clé et les clients peuvent
+    regrouper leurs lignes en un seul article multi-magasins.
     """
     q = "%" + (query or "") + "%"
     rows = con.execute(
         "SELECT a.ref_art, a.designation, a.store_id, a.prixventeht, "
         "       a.prixventettc, a.prixttcpromo, a.activepromo, "
         "       a.datedebpromo, a.datefinpromo, "
-        "       COALESCE((SELECT MIN(e.code_barres) FROM equiv_cbarres e "
-        "                  WHERE e.store_id=a.store_id AND e.ref_art=a.ref_art), "
-        "                a.ref_art) AS match_key "
+        "       " + _MATCH_KEY_SQL + " "
         "FROM article a "
         "WHERE a.ref_art LIKE ? OR a.designation LIKE ? OR a.code_barres LIKE ? "
         "   OR EXISTS (SELECT 1 FROM equiv_cbarres e WHERE e.store_id=a.store_id "
@@ -462,21 +474,152 @@ def article_search(con: sqlite3.Connection, query: str = "", limit: int = 200) -
 def refs_for_match_key(con: sqlite3.Connection, match_key: str) -> dict:
     """Référence de CHAQUE magasin pour une clé de regroupement d'article.
 
-    `match_key` est soit un code-barres équivalent partagé, soit directement
-    une référence (cf. article_search). Le même produit pouvant porter une
-    référence différente selon le magasin, une mise à jour multi-magasins doit
-    cibler la référence propre à chacun."""
+    `match_key` est un lien manuel confirmé, un code-barres équivalent
+    partagé, ou directement une référence (cf. _MATCH_KEY_SQL). Le même
+    produit pouvant porter une référence différente selon le magasin, une
+    mise à jour multi-magasins doit cibler la référence propre à chacun."""
     out: dict = {}
+    rows = con.execute(
+        "SELECT store_id, ref_art FROM article_link WHERE link_key=?",
+        (match_key,)).fetchall()
+    for r in rows:
+        out[r["store_id"]] = r["ref_art"]
     rows = con.execute(
         "SELECT store_id, MIN(ref_art) AS ref_art FROM equiv_cbarres "
         "WHERE code_barres=? GROUP BY store_id", (match_key,)).fetchall()
     for r in rows:
-        out[r["store_id"]] = r["ref_art"]
+        out.setdefault(r["store_id"], r["ref_art"])
     rows = con.execute(
         "SELECT store_id, ref_art FROM article WHERE ref_art=?",
         (match_key,)).fetchall()
     for r in rows:
         out.setdefault(r["store_id"], r["ref_art"])
+    return out
+
+
+def name_match_suggestions(con: sqlite3.Connection, limit: int = 100) -> list:
+    """Groupes d'articles qui portent la MÊME désignation dans au moins 2
+    magasins mais ne partagent PAS encore de match_key (ni lien manuel, ni
+    code-barres commun) — candidats à confirm_article_link().
+
+    Ne mélange rien automatiquement : c'est une liste de suggestions à faire
+    valider par l'utilisateur (deux magasins peuvent nommer deux produits
+    différents de la même façon)."""
+    rows = con.execute(
+        "SELECT a.ref_art, a.designation, a.store_id, a.prixventeht, "
+        "       " + _MATCH_KEY_SQL + ", "
+        "       UPPER(TRIM(a.designation)) AS norm_name "
+        "FROM article a "
+        "WHERE a.designation IS NOT NULL AND TRIM(a.designation) <> ''"
+    ).fetchall()
+    by_name: dict = {}
+    for r in rows:
+        by_name.setdefault(r["norm_name"], []).append(dict(r))
+
+    out = []
+    for items in by_name.values():
+        if len({it["store_id"] for it in items}) < 2:
+            continue
+        if len({it["match_key"] for it in items}) < 2:
+            continue   # déjà unifiés (lien manuel ou code-barres commun)
+        for it in items:
+            it.pop("norm_name", None)
+            it.pop("match_key", None)
+        out.append({"designation": items[0]["designation"], "items": items})
+        if len(out) >= limit:
+            break
+    return out
+
+
+class ArticleLinkConflict(Exception):
+    """Le lien demandé collerait deux articles DIFFÉRENTS du même magasin sous
+    une seule clé de regroupement — refusé (sinon la référence/le prix
+    « source » de ce magasin deviendrait ambigu pour price_sync_candidates)."""
+
+
+def confirm_article_link(con: sqlite3.Connection, members: list) -> str | None:
+    """Déclare que plusieurs (store_id, ref_art) sont le MÊME produit.
+
+    `members` : liste de {"store_id":, "ref_art":}. Si l'un des membres a déjà
+    un link_key (ajout d'un 3e magasin à un lien existant), il est réutilisé
+    pour tous ; sinon une nouvelle clé est générée. Renvoie le link_key.
+
+    Lève ArticleLinkConflict si `members` contient deux références différentes
+    du même magasin, ou si le groupe visé contient déjà un article différent
+    pour un magasin de `members` — un même magasin ne peut avoir qu'UN article
+    par groupe."""
+    members = [m for m in (members or []) if m.get("store_id") and m.get("ref_art")]
+    if not members:
+        return None
+
+    wanted: dict = {}
+    for m in members:
+        prev = wanted.setdefault(m["store_id"], m["ref_art"])
+        if prev != m["ref_art"]:
+            raise ArticleLinkConflict(
+                "Deux références différentes du magasin %s (%s et %s) ne "
+                "peuvent pas être liées comme un seul produit."
+                % (m["store_id"], prev, m["ref_art"]))
+
+    link_key = None
+    for m in members:
+        row = con.execute(
+            "SELECT link_key FROM article_link WHERE store_id=? AND ref_art=?",
+            (m["store_id"], m["ref_art"])).fetchone()
+        if row:
+            link_key = row["link_key"]
+            break
+    if not link_key:
+        link_key = "lnk-" + uuid.uuid4().hex[:16]
+
+    for row in con.execute(
+            "SELECT store_id, ref_art FROM article_link WHERE link_key=?", (link_key,)):
+        sid, ref = row["store_id"], row["ref_art"]
+        if sid in wanted and wanted[sid] != ref:
+            raise ArticleLinkConflict(
+                "Le magasin %s a déjà l'article %s dans ce groupe : "
+                "impossible d'y ajouter aussi %s." % (sid, ref, wanted[sid]))
+
+    now = now_iso()
+    for m in members:
+        con.execute(
+            "INSERT INTO article_link (store_id, ref_art, link_key, created_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(store_id, ref_art) DO UPDATE SET link_key=excluded.link_key",
+            (m["store_id"], m["ref_art"], link_key, now))
+    con.commit()
+    return link_key
+
+
+def price_sync_candidates(con: sqlite3.Connection, source_store_id: int) -> list:
+    """Écarts de prix de vente entre `source_store_id` et les autres magasins,
+    pour chaque groupe d'articles unifié (match_key). Sert à « synchroniser les
+    prix depuis un magasin » : chaque groupe où la source a un prix connu et un
+    autre magasin a un prix DIFFÉRENT (ou absent) devient un candidat."""
+    rows = con.execute(
+        "SELECT a.ref_art, a.designation, a.store_id, a.prixventeht, "
+        "       " + _MATCH_KEY_SQL +
+        " FROM article a").fetchall()
+    by_key: dict = {}
+    for r in rows:
+        by_key.setdefault(r["match_key"], []).append(dict(r))
+
+    out = []
+    for key, items in by_key.items():
+        source = next((it for it in items if it["store_id"] == source_store_id), None)
+        if not source or source["prixventeht"] is None:
+            continue
+        targets = [
+            {"store_id": it["store_id"], "ref_art": it["ref_art"],
+             "current_price": it["prixventeht"]}
+            for it in items
+            if it["store_id"] != source_store_id
+            and it["prixventeht"] != source["prixventeht"]
+        ]
+        if targets:
+            out.append({"match_key": key, "designation": source["designation"],
+                        "source_ref": source["ref_art"],
+                        "source_price": source["prixventeht"], "targets": targets})
     return out
 
 

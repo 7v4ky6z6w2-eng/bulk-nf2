@@ -14,7 +14,8 @@ from hub.central_db import (
     sync_logs, pending_ops_recent, article_search,
 )
 from hub.central_db import article_barcodes, replace_snapshot, \
-    apply_price_changes_local
+    apply_price_changes_local, name_match_suggestions, confirm_article_link, \
+    price_sync_candidates, ArticleLinkConflict
 from hub.ops import submit_op as _submit_op, OP_TYPES
 
 bp = Blueprint("api", __name__)
@@ -262,6 +263,38 @@ def data_article_barcodes():
     if not ref:
         return jsonify(rows=[])
     return jsonify(rows=article_barcodes(_db(), ref))
+
+
+@bp.get("/api/data/name_match_suggestions")
+def data_name_match_suggestions():
+    err = _check_key()
+    if err:
+        return err
+    return jsonify(groups=name_match_suggestions(_db()))
+
+
+@bp.post("/api/data/confirm_link")
+def data_confirm_link():
+    err = _check_key()
+    if err:
+        return err
+    data = request.get_json(force=True) or {}
+    try:
+        link_key = confirm_article_link(_db(), data.get("members") or [])
+    except ArticleLinkConflict as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(ok=True, link_key=link_key)
+
+
+@bp.get("/api/data/price_sync_candidates")
+def data_price_sync_candidates():
+    err = _check_key()
+    if err:
+        return err
+    source = int(request.args.get("source_store_id", 0))
+    if not source:
+        return jsonify(error="source_store_id manquant"), 400
+    return jsonify(groups=price_sync_candidates(_db(), source))
 
 
 # ── Soumission d'une opération d'écriture (BDR / prix) ───────────────────────

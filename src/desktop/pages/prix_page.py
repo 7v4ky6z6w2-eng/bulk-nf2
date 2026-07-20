@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from stores import StoreRegistry
+from desktop.pages.price_sync import MatchSuggestionsDialog, PriceSyncDialog
 
 
 def _parse_date_input(text: str) -> str | None:
@@ -95,6 +96,11 @@ class PrixPage(QWidget):
         for s in registry.stores:
             self._filter.addItem("Disponibles : %s" % s.name, s.id)
         self._filter.currentIndexChanged.connect(self._render_groups)
+
+        suggest_btn = QPushButton("Suggestions de correspondance…")
+        suggest_btn.clicked.connect(self._open_suggestions)
+        sync_btn = QPushButton("Synchroniser depuis un magasin…")
+        sync_btn.clicked.connect(self._open_sync)
 
         # Colonnes de prix generees dynamiquement (une par magasin connu de
         # stores.json) : pas de limite fixe, un magasin ajoute plus tard
@@ -176,8 +182,14 @@ class PrixPage(QWidget):
         action_row.addStretch()
         action_row.addWidget(self._apply_btn)
 
+        tools_row = QHBoxLayout()
+        tools_row.addWidget(suggest_btn)
+        tools_row.addWidget(sync_btn)
+        tools_row.addStretch()
+
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<h3>Éditeur de prix</h3>"))
+        layout.addLayout(tools_row)
         layout.addLayout(search_row)
         layout.addWidget(self._results)
         layout.addWidget(price_box)
@@ -189,6 +201,20 @@ class PrixPage(QWidget):
 
     def _log_msg(self, msg: str) -> None:
         self._log.append(msg)
+
+    def _open_suggestions(self) -> None:
+        dlg = MatchSuggestionsDialog(self._registry, self._data, self)
+        dlg.exec()
+        # Une correspondance confirmée pendant le dialogue change le
+        # regroupement : on relance la recherche en cours pour la refléter.
+        if self._search.text().strip():
+            self._do_search()
+
+    def _open_sync(self) -> None:
+        dlg = PriceSyncDialog(self._registry, self._data, self)
+        dlg.exec()
+        if self._search.text().strip():
+            self._do_search()
 
     # ── recherche & regroupement ──────────────────────────────────────────
     def _do_search(self) -> None:

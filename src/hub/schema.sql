@@ -209,3 +209,18 @@ CREATE TABLE IF NOT EXISTS equiv_cbarres (
 );
 CREATE INDEX IF NOT EXISTS idx_equiv_ref ON equiv_cbarres (store_id, ref_art);
 CREATE INDEX IF NOT EXISTS idx_equiv_bc  ON equiv_cbarres (code_barres);
+
+-- Correspondances manuelles entre articles de magasins différents qui sont le
+-- MÊME produit mais n'ont ni référence ni code-barres commun (ex. matché par
+-- désignation puis confirmé par l'utilisateur). link_key est une clé de
+-- regroupement arbitraire, égale pour tous les (store_id, ref_art) liés — voir
+-- COALESCE dans article_search / price_sync_candidates de central_db.py.
+CREATE TABLE IF NOT EXISTS article_link (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id     INTEGER NOT NULL,
+    ref_art      TEXT    NOT NULL,
+    link_key     TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL,
+    UNIQUE (store_id, ref_art)
+);
+CREATE INDEX IF NOT EXISTS idx_article_link_key ON article_link (link_key);

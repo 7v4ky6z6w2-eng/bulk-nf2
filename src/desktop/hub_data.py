@@ -79,6 +79,30 @@ class HubData:
     def article_barcodes(self, ref_art: str) -> list:
         return self._get("/api/data/article_barcodes", {"ref": ref_art}).get("rows", [])
 
+    def name_match_suggestions(self) -> list:
+        return self._get("/api/data/name_match_suggestions").get("groups", [])
+
+    def confirm_link(self, members: list) -> str | None:
+        try:
+            r = self._sess.post(self.base + "/api/data/confirm_link",
+                                json={"members": members}, headers=self._headers(),
+                                timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise HubUnavailable(str(exc)) from exc
+        if r.status_code == 400:
+            # Conflit métier (ArticleLinkConflict côté hub) : message clair
+            # dans le corps JSON, pas une erreur HTTP générique.
+            try:
+                raise HubUnavailable(r.json().get("error") or r.text)
+            except ValueError:
+                raise HubUnavailable(r.text) from None
+        r.raise_for_status()
+        return r.json().get("link_key")
+
+    def price_sync_candidates(self, source_store_id: int) -> list:
+        return self._get("/api/data/price_sync_candidates",
+                         {"source_store_id": source_store_id}).get("groups", [])
+
     # -- écriture (BDR / prix / codes-barres) -------------------------------
     def submit_op(self, store_id: int, op_type: str, payload: dict,
                   timeout: float | None = None, op_uid: str | None = None) -> dict:
