@@ -21,6 +21,20 @@ CREATE TABLE IF NOT EXISTS sync_map (
 );
 """
 
+# Tracks which source PIECE documents (Bons de Livraison made for the WC
+# "livraison" placeholder client) have already been folded into a
+# consolidated cost-basis document by profit_consolidation.py, so a later
+# run only picks up NEW deliveries instead of double-counting ones already
+# consolidated.
+CONSOLIDATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS consolidated_source_docs (
+    source_nopiece TEXT PRIMARY KEY,
+    code_type_piece TEXT,
+    consolidated_into_nopiece TEXT,
+    consolidated_at TEXT
+);
+"""
+
 
 class StateStore:
     def __init__(self, path):
@@ -33,6 +47,7 @@ class StateStore:
         self.con = sqlite3.connect(path, timeout=30)
         self.con.execute("PRAGMA journal_mode=WAL")
         self.con.execute(SCHEMA)
+        self.con.execute(CONSOLIDATION_SCHEMA)
         self._migrate()
         self.con.commit()
 
@@ -138,5 +153,24 @@ class StateStore:
         self.con.executemany(
             "UPDATE sync_map SET last_stock = ?, last_synced_at = ? WHERE ref_art = ?",
             [(qty, synced_at, ref) for ref, qty in items],
+        )
+        self.con.commit()
+
+    # -- profit consolidation --------------------------------------------
+    def get_consolidated_source_nopieces(self):
+        """Every source PIECE.NOPIECE already folded into a previous
+        consolidated cost-basis document -- profit_consolidation.py
+        excludes these so a repeat run only picks up new deliveries."""
+        return {r[0] for r in self.con.execute("SELECT source_nopiece FROM consolidated_source_docs")}
+
+    def mark_consolidated(self, nopieces, code_type_piece, consolidated_into_nopiece, when):
+        self.con.executemany(
+            "INSERT INTO consolidated_source_docs "
+            "(source_nopiece, code_type_piece, consolidated_into_nopiece, consolidated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(source_nopiece) DO UPDATE SET "
+            "  consolidated_into_nopiece=excluded.consolidated_into_nopiece, "
+            "  consolidated_at=excluded.consolidated_at",
+            [(n, code_type_piece, consolidated_into_nopiece, when) for n in nopieces],
         )
         self.con.commit()

@@ -20,6 +20,7 @@ from app.config import load_config, save_config
 from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
 from app.sync.name_resync import run_name_resync
 from app.sync.order_importer import fix_duplicate_orders, run_order_import
+from app.sync.profit_consolidation import list_source_document_types, run_consolidation
 from app.sync.stock_sync import run_stock_sync
 
 try:
@@ -262,6 +263,52 @@ class FixDuplicatesWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class ProfitTypesWorker(QThread):
+    """Loads the document-type breakdown (counts/totals per CODE_TYPE_PIECE)
+    for the source client -- the first, informational step of the profit
+    consolidation workflow, so the user can identify the real Bon de
+    Livraison type before consolidating anything."""
+    finished_ok = Signal(list)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, source_client_code):
+        super().__init__()
+        self.cfg = cfg
+        self.source_client_code = source_client_code
+
+    def run(self):
+        try:
+            rows = list_source_document_types(self.cfg, self.source_client_code)
+            self.finished_ok.emit(rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class ProfitConsolidationWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, source_client_code, doc_type_code, target_client_code, since, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.source_client_code = source_client_code
+        self.doc_type_code = doc_type_code
+        self.target_client_code = target_client_code
+        self.since = since
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_consolidation(
+                self.cfg, self.source_client_code, self.doc_type_code, self.target_client_code,
+                since=self.since, dry_run=self.dry_run, log_fn=self.line.emit,
+            )
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -283,12 +330,15 @@ class MainWindow(QMainWindow):
         self.fix_dup_worker = None
         self.lookup_worker = None
         self.schema_worker = None
+        self.profit_types_worker = None
+        self.profit_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
         tabs.addTab(self._build_sync_tab(), "Sync")
         tabs.addTab(self._build_stock_sync_tab(), "Stock Sync")
         tabs.addTab(self._build_orders_tab(), "Orders")
+        tabs.addTab(self._build_profit_tab(), "Profit")
         tabs.addTab(self._build_schedule_tab(), "Schedule")
         self.setCentralWidget(tabs)
         self.statusBar().showMessage("Ready.")
@@ -1210,6 +1260,184 @@ class MainWindow(QMainWindow):
         self.order_dry_run_btn.setEnabled(True)
         self.order_import_btn.setEnabled(True)
         self.order_log_view.appendPlainText(f"FAILED: {message}")
+
+    # -- Profit tab -----------------------------------------------------------
+    def _build_profit_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        note = QLabel(
+            "Every WooCommerce order becomes a Bon de Livraison under one\n"
+            "dedicated client (the 'livraison' client, same CODE_TIERS as the\n"
+            "Orders tab), priced at the normal sale price. This consolidates\n"
+            "every one of those documents that hasn't been consolidated yet\n"
+            "into ONE new document, aggregated by article, under a client of\n"
+            "your choice -- priced at PURCHASE price (0% margin) instead. Its\n"
+            "total, compared against the original sale total, is your real\n"
+            "profit for that period. Running this again later only picks up\n"
+            "NEW deliveries -- it never re-includes ones already consolidated.\n\n"
+            "This new document does not affect stock or the chosen client's\n"
+            "balance -- it exists only to be viewed/printed for its totals."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        cfg_group = QGroupBox("What to consolidate")
+        form = QFormLayout(cfg_group)
+        self.profit_source_client = QLineEdit(self.cfg["order_import"]["client_code"])
+        self.profit_source_client.setToolTip(
+            "TIERS.CODE_TIERS of the 'livraison' client every WC order is "
+            "imported under -- normally the same as the Orders tab's "
+            "'Client CODE_TIERS'."
+        )
+        form.addRow("Source client CODE_TIERS:", self.profit_source_client)
+
+        list_types_row = QHBoxLayout()
+        self.list_doc_types_btn = QPushButton("List document types for this client")
+        self.list_doc_types_btn.setToolTip(
+            "Shows every CODE_TYPE_PIECE found under the source client, with "
+            "counts -- an order usually creates BOTH a Commande and a Bon de "
+            "Livraison under the same client, so pick the real BL type below, "
+            "not the Commande (consolidating the Commande too would double-"
+            "count every item)."
+        )
+        self.list_doc_types_btn.clicked.connect(self._start_profit_types)
+        list_types_row.addWidget(self.list_doc_types_btn)
+        list_types_row.addStretch()
+        form.addRow(list_types_row)
+
+        self.profit_doc_type_combo = self._type_piece_combo()
+        form.addRow("Bon de Livraison document type:", self.profit_doc_type_combo)
+
+        self.profit_target_client = QLineEdit()
+        self.profit_target_client.setPlaceholderText("CODE_TIERS to bill the consolidated document to")
+        form.addRow("Consolidate into client CODE_TIERS:", self.profit_target_client)
+
+        since_row = QHBoxLayout()
+        self.profit_use_since = QCheckBox("Only include deliveries on/after:")
+        self.profit_since_date = QDateEdit()
+        self.profit_since_date.setCalendarPopup(True)
+        self.profit_since_date.setDisplayFormat("yyyy-MM-dd")
+        self.profit_since_date.setDate(QDate.currentDate().addMonths(-1))
+        self.profit_since_date.setEnabled(False)
+        self.profit_use_since.toggled.connect(self.profit_since_date.setEnabled)
+        since_row.addWidget(self.profit_use_since)
+        since_row.addWidget(self.profit_since_date)
+        since_row.addStretch()
+        form.addRow(since_row)
+        layout.addWidget(cfg_group)
+
+        btn_row = QHBoxLayout()
+        self.profit_preview_btn = QPushButton("Preview consolidation (dry run)")
+        self.profit_preview_btn.clicked.connect(lambda: self._start_profit_consolidation(dry_run=True))
+        self.profit_run_btn = QPushButton("Create consolidated BL now")
+        self.profit_run_btn.setToolTip(
+            "Writes one new PIECE/ITEM document to Firebird. Preview first to "
+            "see exactly what will be included and what's held back."
+        )
+        self.profit_run_btn.clicked.connect(self._confirm_profit_consolidation)
+        btn_row.addWidget(self.profit_preview_btn)
+        btn_row.addWidget(self.profit_run_btn)
+        layout.addLayout(btn_row)
+
+        self.profit_log_view = QPlainTextEdit()
+        self.profit_log_view.setReadOnly(True)
+        layout.addWidget(self.profit_log_view)
+        return widget
+
+    def _start_profit_types(self):
+        source_client = self.profit_source_client.text().strip()
+        if not source_client:
+            return
+        if self.profit_types_worker and self.profit_types_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.list_doc_types_btn.setEnabled(False)
+        self.profit_log_view.appendPlainText(f"Listing document types for {source_client}...")
+        self.profit_types_worker = ProfitTypesWorker(cfg, source_client)
+        self.profit_types_worker.finished_ok.connect(self._profit_types_done)
+        self.profit_types_worker.finished_error.connect(self._profit_types_failed)
+        self.profit_types_worker.start()
+
+    def _profit_types_done(self, rows):
+        self.list_doc_types_btn.setEnabled(True)
+        if not rows:
+            self.profit_log_view.appendPlainText("  No active documents found for this client.")
+            return
+        for e in rows:
+            self.profit_log_view.appendPlainText(
+                f"  {e['code_type_piece']} ({e['intitule'] or 'no label'}): {e['count']} document(s), "
+                f"total {round(e['total_montant'], 2)}, {e['already_consolidated']} already consolidated"
+            )
+
+    def _profit_types_failed(self, message):
+        self.list_doc_types_btn.setEnabled(True)
+        self.profit_log_view.appendPlainText(f"Listing document types FAILED: {message}")
+
+    def _confirm_profit_consolidation(self):
+        target = self.profit_target_client.text().strip()
+        if not target:
+            QMessageBox.warning(self, "Missing client", "Enter the client CODE_TIERS to consolidate into.")
+            return
+        answer = QMessageBox.question(
+            self, "Create consolidated Bon de Livraison?",
+            f"This will create ONE new document under client {target!r}, priced "
+            "at purchase price (0% margin), from every not-yet-consolidated "
+            "delivery under the source client. This writes to Firebird.\n\n"
+            "Run 'Preview consolidation (dry run)' first if you haven't "
+            "already, to see exactly what will be included and what's held "
+            "back.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_profit_consolidation(dry_run=False)
+
+    def _start_profit_consolidation(self, dry_run):
+        source_client = self.profit_source_client.text().strip()
+        doc_type = _combo_value(self.profit_doc_type_combo)
+        target_client = self.profit_target_client.text().strip()
+        if not source_client or not doc_type or not target_client:
+            QMessageBox.warning(
+                self, "Missing information",
+                "Source client, document type, and target client are all required."
+            )
+            return
+        if self.profit_worker and self.profit_worker.isRunning():
+            return
+        since = (
+            self.profit_since_date.date().toString("yyyy-MM-dd")
+            if self.profit_use_since.isChecked() else None
+        )
+        cfg = self._collect_config()
+        self.profit_log_view.clear()
+        self.profit_preview_btn.setEnabled(False)
+        self.profit_run_btn.setEnabled(False)
+        self.profit_worker = ProfitConsolidationWorker(
+            cfg, source_client, doc_type, target_client, since, dry_run
+        )
+        self.profit_worker.line.connect(self.profit_log_view.appendPlainText)
+        self.profit_worker.finished_ok.connect(self._profit_consolidation_done)
+        self.profit_worker.finished_error.connect(self._profit_consolidation_failed)
+        self.profit_worker.start()
+
+    def _profit_consolidation_done(self, report):
+        self.profit_preview_btn.setEnabled(True)
+        self.profit_run_btn.setEnabled(True)
+        if report["held_back"]:
+            self.profit_log_view.appendPlainText(f"\n{len(report['held_back'])} document(s) held back:")
+            for h in report["held_back"]:
+                reasons = ", ".join(f"{f['ref_art']} ({f['reason']})" for f in h["flags"])
+                self.profit_log_view.appendPlainText(f"  doc #{h['nopiece']} ({h['date']}): {reasons}")
+        if report["created_nopiece"]:
+            self.statusBar().showMessage(
+                f"Created consolidated document NOPIECE={report['created_nopiece']}.", 8000
+            )
+
+    def _profit_consolidation_failed(self, message):
+        self.profit_preview_btn.setEnabled(True)
+        self.profit_run_btn.setEnabled(True)
+        self.profit_log_view.appendPlainText(f"FAILED: {message}")
 
     # -- Schedule tab -------------------------------------------------------
     # Each mode gets its own independent Task Scheduler entry, since they
