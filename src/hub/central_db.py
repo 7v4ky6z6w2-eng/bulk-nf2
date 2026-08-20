@@ -381,6 +381,49 @@ def tresorerie_caisses(con: sqlite3.Connection) -> list:
     return [dict(r) for r in rows]
 
 
+def tresorerie_days(con: sqlite3.Connection) -> list:
+    """Dates disponibles dans l'historique trésorerie, plus récentes d'abord —
+    sert à peupler un sélecteur/calendrier de dates passées."""
+    rows = con.execute(
+        "SELECT DISTINCT snap_date FROM tresorerie_snapshot "
+        "ORDER BY snap_date DESC").fetchall()
+    return [r["snap_date"] for r in rows]
+
+
+def tresorerie_range(con: sqlite3.Connection, date_from: str, date_to: str,
+                     caisse: str | None = None, store_id: int | None = None) -> list:
+    """Totaux entrée/sortie PAR JOUR sur une période [date_from, date_to]
+    (bornes incluses) — l'historique complet, un jour = une ligne, magasins et
+    modes de paiement cumulés (filtrable par caisse et/ou magasin). Sert à
+    parcourir les dates passées et à obtenir le total sur N jours (somme des
+    lignes renvoyées, faite côté client)."""
+    sql = ("SELECT snap_date, sens, SUM(total_encaisse) AS total, "
+           "SUM(nb_transactions) AS nb_transactions "
+           "FROM tresorerie_snapshot WHERE snap_date BETWEEN ? AND ?")
+    params: list = [date_from, date_to]
+    if caisse and caisse.lower() not in ("globale", "(globale)", "toutes", ""):
+        sql += " AND caisse=?"
+        params.append(caisse)
+    if store_id:
+        sql += " AND store_id=?"
+        params.append(store_id)
+    sql += " GROUP BY snap_date, sens"
+    rows = con.execute(sql, params).fetchall()
+
+    by_day: dict = {}
+    for r in rows:
+        d = by_day.setdefault(r["snap_date"], {
+            "snap_date": r["snap_date"], "entree": 0.0, "sortie": 0.0,
+            "nb_transactions": 0})
+        d["sortie" if r["sens"] == "sortie" else "entree"] += r["total"] or 0.0
+        d["nb_transactions"] += r["nb_transactions"] or 0
+    out = list(by_day.values())
+    for d in out:
+        d["solde"] = d["entree"] - d["sortie"]
+    out.sort(key=lambda d: d["snap_date"])
+    return out
+
+
 def stock_rows(con: sqlite3.Connection, search: str = "", limit: int = 500,
               offset: int = 0) -> list:
     q = "%" + (search or "") + "%"

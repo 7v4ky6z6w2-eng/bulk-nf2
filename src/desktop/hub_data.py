@@ -61,6 +61,19 @@ class HubData:
     def caisses(self) -> list:
         return self._get("/api/data/caisses").get("rows", [])
 
+    def tresorerie_days(self) -> list:
+        return self._get("/api/data/tresorerie_days").get("days", [])
+
+    def tresorerie_range(self, date_from: str, date_to: str,
+                         caisse: str | None = None,
+                         store_id: int | None = None) -> list:
+        params = {"from": date_from, "to": date_to}
+        if caisse:
+            params["caisse"] = caisse
+        if store_id:
+            params["store_id"] = store_id
+        return self._get("/api/data/tresorerie_range", params).get("rows", [])
+
     def stock_rows(self, search: str = "") -> list:
         return self._get("/api/data/stock", {"q": search}).get("rows", [])
 

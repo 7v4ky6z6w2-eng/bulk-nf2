@@ -416,12 +416,20 @@ class FirebirdReader:
         caisse_sel = "P.%s AS caisse, " % caisse_col if caisse_col else "'(globale)' AS caisse, "
         caisse_grp = ", P.%s" % caisse_col if caisse_col else ""
 
-        # Sens dérivé directement du type de pièce (fiable, confirmé par
-        # l'utilisateur) plutôt que du signe d'un champ dont la sémantique
-        # varie (COEFF/COEFF_TR se sont révélés peu fiables sur des cas réels).
+        # Sens dérivé du type de pièce (fiable, confirmé par l'utilisateur) ET
+        # du signe du montant : Netfact2 enregistre parfois un RETOUR/AVOIR
+        # comme une pièce de type "entrée" (PC_DV_VRS_EN) mais avec un montant
+        # NÉGATIF (ex. -1200.00 DA) — le signe du champ, PAS le type, indique
+        # alors que l'argent est réellement ressorti. Sans ce test, SUM(ABS())
+        # ci-dessous effaçait le signe et comptait le retour comme une
+        # RECETTE supplémentaire au lieu de le déduire (confirmé par
+        # l'utilisateur sur sa base réelle). Un type "sortie" reste "sortie"
+        # quel que soit le signe (une dépense est déjà positive côté Netfact2).
         entree_list = ",".join("'%s'" % t for t in self._TRESO_TYPES_ENTREE)
         type_in = ",".join("'%s'" % t for t in self._TRESO_TYPES_ENTREE + self._TRESO_TYPES_SORTIE)
-        sens_expr = "CASE WHEN P.CODE_TYPE_PIECE IN (%s) THEN 'entree' ELSE 'sortie' END" % entree_list
+        sens_expr = (
+            "CASE WHEN P.CODE_TYPE_PIECE IN (%s) AND P.%s >= 0 THEN 'entree' "
+            "ELSE 'sortie' END" % (entree_list, montant_col))
 
         sql = (
             "SELECT %s%s AS mode_paiement, %s AS sens, "

@@ -12,6 +12,7 @@ from hub.central_db import (
     pending_ops_for, mark_op, enqueue_op, SYNC_TABLES,
     store_status, tresorerie_today, tresorerie_caisses, stock_rows, ventes_rows,
     sync_logs, pending_ops_recent, article_search,
+    tresorerie_days, tresorerie_range,
 )
 from hub.central_db import article_barcodes, replace_snapshot, \
     apply_price_changes_local, name_match_suggestions, confirm_article_link, \
@@ -204,6 +205,29 @@ def data_tresorerie():
     day = request.args.get("day") or None
     caisse = request.args.get("caisse") or None
     return jsonify(rows=tresorerie_today(_db(), day, caisse))
+
+
+@bp.get("/api/data/tresorerie_days")
+def data_tresorerie_days():
+    err = _check_key()
+    if err:
+        return err
+    return jsonify(days=tresorerie_days(_db()))
+
+
+@bp.get("/api/data/tresorerie_range")
+def data_tresorerie_range():
+    err = _check_key()
+    if err:
+        return err
+    date_from = request.args.get("from", "")
+    date_to = request.args.get("to", "")
+    if not date_from or not date_to:
+        return jsonify(error="from/to manquants"), 400
+    caisse = request.args.get("caisse") or None
+    store_id_arg = request.args.get("store_id")
+    store_id = int(store_id_arg) if store_id_arg else None
+    return jsonify(rows=tresorerie_range(_db(), date_from, date_to, caisse, store_id))
 
 
 @bp.get("/api/data/caisses")

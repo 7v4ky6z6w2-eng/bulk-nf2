@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QComboBox, QDateEdit, QGroupBox, QHBoxLayout, QLabel, QPushButton,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from desktop.format import fmt_da
@@ -34,7 +34,7 @@ class TresoreriePage(QWidget):
 
         self._caisse = QComboBox()
         self._caisse.addItem(_GLOBALE)
-        self._caisse.currentIndexChanged.connect(self.refresh)
+        self._caisse.currentIndexChanged.connect(self._on_caisse_changed)
         self._caisses_loaded = False
 
         self._table = QTableWidget(0, 4)
@@ -60,16 +60,95 @@ class TresoreriePage(QWidget):
         totals.addWidget(QLabel("Solde :")); totals.addWidget(self._solde_lbl)
         totals.addStretch()
 
+        # ── Historique : dates passées + total sur une période ──
+        self._hist_from = QDateEdit(QDate.currentDate().addDays(-6))
+        self._hist_from.setCalendarPopup(True)
+        self._hist_to = QDateEdit(QDate.currentDate())
+        self._hist_to.setCalendarPopup(True)
+        hist_load_btn = QPushButton("Charger")
+        hist_load_btn.clicked.connect(self._load_history)
+
+        self._hist_total_lbl = QLabel("")
+        self._hist_total_lbl.setStyleSheet("font-weight:bold;")
+
+        self._hist_table = QTableWidget(0, 5)
+        self._hist_table.setHorizontalHeaderLabels(
+            ["Date", "Entrées (DA)", "Sorties (DA)", "Solde (DA)", "Transactions"])
+        self._hist_table.horizontalHeader().setStretchLastSection(True)
+        self._hist_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._hist_table.setSortingEnabled(True)
+
+        hist_row = QHBoxLayout()
+        hist_row.addWidget(QLabel("Du :"))
+        hist_row.addWidget(self._hist_from)
+        hist_row.addWidget(QLabel("Au :"))
+        hist_row.addWidget(self._hist_to)
+        hist_row.addWidget(hist_load_btn)
+        hist_row.addStretch()
+
+        hist_layout = QVBoxLayout()
+        hist_layout.addLayout(hist_row)
+        hist_layout.addWidget(self._hist_table)
+        hist_layout.addWidget(self._hist_total_lbl)
+        hist_box = QGroupBox("Historique — toutes les dates passées")
+        hist_box.setLayout(hist_layout)
+
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addLayout(totals)
         layout.addWidget(self._table)
+        layout.addWidget(hist_box)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
         self._timer.start(60_000)
         self._load_caisses()
         self.refresh()
+        self._load_history()
+
+    def _on_caisse_changed(self) -> None:
+        self.refresh()
+        self._load_history()
+
+    def _load_history(self) -> None:
+        date_from = self._hist_from.date().toString("yyyy-MM-dd")
+        date_to = self._hist_to.date().toString("yyyy-MM-dd")
+        if date_from > date_to:
+            date_from, date_to = date_to, date_from
+        caisse = self._caisse.currentText()
+        caisse_arg = None if caisse == _GLOBALE else caisse
+        try:
+            rows = self._data.tresorerie_range(date_from, date_to, caisse_arg)
+        except Exception:  # noqa: BLE001
+            return
+
+        self._hist_table.setSortingEnabled(False)
+        self._hist_table.setRowCount(len(rows))
+        tot_e = tot_s = 0.0
+        tot_n = 0
+        for i, r in enumerate(rows):
+            e, s = float(r.get("entree") or 0), float(r.get("sortie") or 0)
+            n = int(r.get("nb_transactions") or 0)
+            tot_e += e; tot_s += s; tot_n += n
+            self._hist_table.setItem(i, 0, QTableWidgetItem(r.get("snap_date") or ""))
+            ei = QTableWidgetItem(fmt_da(e, suffix="")); ei.setForeground(Qt.green)
+            ei.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._hist_table.setItem(i, 1, ei)
+            si = QTableWidgetItem(fmt_da(s, suffix=""))
+            if s:
+                si.setForeground(Qt.red)
+            si.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._hist_table.setItem(i, 2, si)
+            sol = QTableWidgetItem(fmt_da(e - s, suffix=""))
+            sol.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._hist_table.setItem(i, 3, sol)
+            self._hist_table.setItem(i, 4, QTableWidgetItem(str(n)))
+        self._hist_table.setSortingEnabled(True)
+
+        self._hist_total_lbl.setText(
+            "Total période (%s → %s, %d jour(s)) : Entrées %s — Sorties %s — Solde %s — %d transaction(s)"
+            % (date_from, date_to, len(rows), fmt_da(tot_e), fmt_da(tot_s),
+               fmt_da(tot_e - tot_s), tot_n))
 
     def _load_caisses(self) -> None:
         try:
