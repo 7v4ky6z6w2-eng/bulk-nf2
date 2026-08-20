@@ -1,5 +1,6 @@
-"""Pages mobiles : upload direct d'un Bon de Réception (Excel/PDF) et édition de
-prix depuis le téléphone, sans passer par l'application bureau.
+"""Pages mobiles : upload direct d'un Bon de Réception (Excel/PDF), édition de
+prix, consultation du stock par magasin, correspondances par nom et
+synchronisation de prix entre magasins — sans passer par l'application bureau.
 
 Le téléphone envoie le FICHIER au hub (formulaire HTML classique) ; c'est le hub
 qui le lit (openpyxl / pikepdf+pdfplumber, déjà nécessaires côté serveur) et
@@ -25,7 +26,10 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
-from hub.central_db import article_search, refs_for_match_key
+from hub.central_db import (
+    article_search, refs_for_match_key, stock_search, name_match_suggestions,
+    confirm_article_link, price_sync_candidates, ArticleLinkConflict,
+)
 from hub.ops import submit_op
 
 _VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
@@ -310,3 +314,94 @@ def prix_apply():
 
     return render_template("mobile/prix_result.html", ref=ref, price=new_price,
                            results=results)
+
+
+# ── Stock par magasin (jamais un total combiné) ───────────────────────────────
+@bp.get("/stock")
+def stock_view():
+    q = request.args.get("q", "").strip()
+    reg = _registry()
+    store_ids = [s.id for s in reg.stores] if reg else []
+    results = []
+    if q:
+        rows = stock_search(_db(), q, limit=200)
+        by_key: dict = {}
+        for r in rows:
+            key = r.get("match_key") or r["ref_art"]
+            g = by_key.setdefault(key, {"ref": r["ref_art"], "designation": r.get("designation"),
+                                        "qty": {}})
+            g["qty"][r["store_id"]] = r.get("qte_stock")
+        results = list(by_key.values())
+    return render_template("mobile/stock.html", q=q, results=results,
+                           store_ids=store_ids, store_names=_store_names())
+
+
+# ── Suggestions de correspondance par nom ─────────────────────────────────────
+@bp.get("/correspondances")
+def correspondances():
+    groups = name_match_suggestions(_db())
+    return render_template("mobile/correspondances.html", groups=groups,
+                           store_names=_store_names(), error=None)
+
+
+@bp.post("/correspondances/confirmer")
+def correspondances_confirm():
+    members = [{"store_id": int(sid), "ref_art": ref}
+              for sid, ref in zip(request.form.getlist("store_id"),
+                                  request.form.getlist("ref_art"))
+              if sid and ref]
+    error = None
+    try:
+        confirm_article_link(_db(), members)
+    except ArticleLinkConflict as exc:
+        error = str(exc)
+    groups = name_match_suggestions(_db())
+    return render_template("mobile/correspondances.html", groups=groups,
+                           store_names=_store_names(), error=error)
+
+
+# ── Synchroniser les prix depuis un magasin ───────────────────────────────────
+def _price_sync_rows(con, source_store_id: int) -> list:
+    rows = []
+    for g in price_sync_candidates(con, source_store_id):
+        for t in g["targets"]:
+            rows.append({"designation": g["designation"], "source_price": g["source_price"],
+                         "store_id": t["store_id"], "ref_art": t["ref_art"],
+                         "current_price": t["current_price"]})
+    return rows
+
+
+@bp.get("/prix/sync")
+def prix_sync():
+    reg = _registry()
+    stores = reg.stores if reg else []
+    source_arg = request.args.get("source")
+    source = int(source_arg) if source_arg else (stores[0].id if stores else None)
+    rows = _price_sync_rows(_db(), source) if source else []
+    return render_template("mobile/prix_sync.html", stores=stores, source=source,
+                           rows=rows, store_names=_store_names(), results=None)
+
+
+@bp.post("/prix/sync/appliquer")
+def prix_sync_apply():
+    source = int(request.form.get("source") or 0)
+    reg = _registry()
+    names = _store_names()
+    con = _db()
+    results = []
+    for idx in request.form.getlist("rows"):
+        sid_s = request.form.get("store_id_%s" % idx)
+        ref = request.form.get("ref_art_%s" % idx)
+        price_s = request.form.get("price_%s" % idx)
+        if not sid_s or not ref or not price_s:
+            continue
+        sid, price = int(sid_s), float(price_s)
+        changes = [{"ref0": ref, "values": {"PRIXVENTEHT": price, "PRIXVENTETTC": price}}]
+        res = submit_op(con, reg, sid, "price_update", {"changes": changes})
+        res.update(store_id=sid, store_name=names.get(sid, "Magasin %s" % sid), ref_art=ref)
+        results.append(res)
+
+    stores = reg.stores if reg else []
+    rows = _price_sync_rows(con, source) if source else []
+    return render_template("mobile/prix_sync.html", stores=stores, source=source,
+                           rows=rows, store_names=names, results=results)

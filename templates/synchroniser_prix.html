@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Synchro prix — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Synchroniser les prix depuis un magasin</h4>
+<p class="text-muted small">
+  Les prix du magasin source sont copiés sur chaque ligne cochée ci-dessous, pour
+  les articles déjà reconnus comme le même produit (référence commune, code-barres
+  partagé, ou correspondance confirmée).
+</p>
+
+{% if results %}
+<div class="mb-3">
+  {% for r in results %}
+    {% if r.status == 'applied' %}
+      <div class="alert alert-success py-2 mb-1">✅ {{ r.store_name }} — {{ r.ref_art }} : appliqué.</div>
+    {% elif r.status == 'queued' %}
+      <div class="alert alert-warning py-2 mb-1">⏳ {{ r.store_name }} — {{ r.ref_art }} : hors ligne, mis en file (op #{{ r.op_id }}).</div>
+    {% else %}
+      <div class="alert alert-danger py-2 mb-1">❌ {{ r.store_name }} — {{ r.ref_art }} : {{ r.error }}</div>
+    {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
+<form method="get" class="d-flex align-items-center gap-2 mb-3">
+  <label class="text-muted small mb-0">Magasin source :</label>
+  <select name="source" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+    {% for s in stores %}
+    <option value="{{ s.id }}" {% if source == s.id %}selected{% endif %}>{{ s.name }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+{% if source %}
+  {% if not rows %}
+  <p class="text-muted">Aucun écart : les prix sont déjà alignés.</p>
+  {% else %}
+  <form method="post" action="{{ url_for('dashboard.synchroniser_prix_appliquer') }}">
+    <input type="hidden" name="source" value="{{ source }}">
+    <div class="table-responsive mb-3">
+      <table class="table table-sm table-hover align-middle">
+        <thead class="table-dark">
+          <tr><th></th><th>Désignation</th><th>Magasin cible</th>
+              <th class="text-end">Prix actuel</th><th class="text-end">Nouveau prix</th></tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td>
+              <input type="checkbox" name="rows" value="{{ loop.index0 }}" checked>
+              <input type="hidden" name="store_id_{{ loop.index0 }}" value="{{ r.store_id }}">
+              <input type="hidden" name="ref_art_{{ loop.index0 }}" value="{{ r.ref_art }}">
+              <input type="hidden" name="price_{{ loop.index0 }}" value="{{ r.source_price }}">
+            </td>
+            <td>{{ r.designation }}</td>
+            <td>{{ store_names.get(r.store_id, r.store_id) }}</td>
+            <td class="text-end">
+              {{ r.current_price|fmt_da if r.current_price is not none else "—" }}
+            </td>
+            <td class="text-end">{{ r.source_price|fmt_da }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <button type="submit" class="btn btn-primary"
+            onclick="return confirm('Appliquer les changements de prix cochés ?');">
+      Appliquer les changements cochés
+    </button>
+  </form>
+  {% endif %}
+{% endif %}
+{% endblock %}

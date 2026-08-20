@@ -1,0 +1,36 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Correspondances — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-3">Suggestions de correspondance</h5>
+<p class="text-muted small">
+  Même nom dans plusieurs magasins, pas encore reliés. Rien n'est fusionné
+  automatiquement : vérifiez puis confirmez.
+</p>
+{% if error %}<div class="alert alert-danger py-2">{{ error }}</div>{% endif %}
+{% if not groups %}
+<p class="text-muted">Aucune suggestion pour le moment.</p>
+{% endif %}
+
+{% for g in groups %}
+<div class="card bg-dark m-card">
+  <div class="card-body">
+    <div class="fw-bold mb-2">{{ g.designation }}</div>
+    {% for it in g['items'] %}
+    <div class="d-flex justify-content-between small text-muted">
+      <span>{{ store_names.get(it.store_id, it.store_id) }} — {{ it.ref_art }}</span>
+      <span>{{ it.prixventeht|fmt_da if it.prixventeht is not none else "—" }}</span>
+    </div>
+    {% endfor %}
+    <form method="post" action="{{ url_for('mobile.correspondances_confirm') }}"
+          class="mt-2"
+          onsubmit="return confirm('Confirmer que ces {{ g['items']|length }} articles sont le MÊME produit ?');">
+      {% for it in g['items'] %}
+      <input type="hidden" name="store_id" value="{{ it.store_id }}">
+      <input type="hidden" name="ref_art" value="{{ it.ref_art }}">
+      {% endfor %}
+      <button type="submit" class="btn btn-success btn-lg-block">Confirmer : même article</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

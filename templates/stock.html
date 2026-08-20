@@ -2,52 +2,42 @@
 {% block title %}Stock — PrimeNF Hub{% endblock %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="mb-0">Stock</h4>
+  <h4 class="mb-0">Stock par magasin</h4>
   <form method="get" class="d-flex gap-2">
     <input type="search" name="q" value="{{ q }}" class="form-control form-control-sm"
-           placeholder="Référence ou désignation…" style="width:260px">
+           placeholder="Référence, désignation ou code-barres…" style="width:280px">
     <button type="submit" class="btn btn-sm btn-primary">Chercher</button>
   </form>
 </div>
-<div class="text-muted small mb-2">
-  {% if total %}
-    {{ total }} article(s) — page {{ page }}/{{ pages }}
-    ({{ (page - 1) * page_size + 1 }}–{{ [page * page_size, total] | min }})
-  {% endif %}
-</div>
+<p class="text-muted small">
+  Une ligne par produit (regroupé par code-barres commun ou correspondance confirmée),
+  une colonne par magasin — jamais un total combiné entre magasins.
+  Sans recherche, les 300 premières lignes sont affichées.
+</p>
 <div class="table-responsive">
   <table class="table table-sm table-hover align-middle">
     <thead class="table-dark">
       <tr>
-        <th>Magasin</th><th>Référence</th><th>Désignation</th><th>Dépôt</th><th class="text-end">Qté</th>
+        <th>Référence</th><th>Désignation</th>
+        {% for sid in store_ids %}<th class="text-end">{{ store_names.get(sid, sid) }}</th>{% endfor %}
       </tr>
     </thead>
     <tbody>
-      {% for r in rows %}
+      {% for g in groups %}
       <tr>
-        <td><span class="badge bg-secondary">{{ store_names.get(r.store_id, r.store_id) }}</span></td>
-        <td class="font-monospace small">{{ r.ref_art }}</td>
-        <td>{{ r.designation }}</td>
-        <td>{{ r.code_depot }}</td>
-        <td class="text-end {% if r.qte_stock|float <= 0 %}text-danger fw-bold{% endif %}">{{ r.qte_stock|fmt_qty }}</td>
+        <td class="font-monospace small">{{ g.ref_txt }}</td>
+        <td>{{ g.desig }}</td>
+        {% for sid in store_ids %}
+        {% set qty = g.qty.get(sid) %}
+        <td class="text-end {% if qty is not none and qty|float <= 0 %}text-danger fw-bold{% endif %}">
+          {{ qty|fmt_qty if qty is not none else "—" }}
+        </td>
+        {% endfor %}
       </tr>
       {% else %}
-      <tr><td colspan="5" class="text-muted text-center">Aucune donnée</td></tr>
+      <tr><td colspan="{{ 2 + store_ids|length }}" class="text-muted text-center">Aucune donnée</td></tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
-{% if pages and pages > 1 %}
-<nav>
-  <ul class="pagination pagination-sm">
-    <li class="page-item {% if page <= 1 %}disabled{% endif %}">
-      <a class="page-link" href="?q={{ q }}&page={{ page - 1 }}">Précédent</a>
-    </li>
-    <li class="page-item disabled"><span class="page-link">{{ page }} / {{ pages }}</span></li>
-    <li class="page-item {% if page >= pages %}disabled{% endif %}">
-      <a class="page-link" href="?q={{ q }}&page={{ page + 1 }}">Suivant</a>
-    </li>
-  </ul>
-</nav>
-{% endif %}
 {% endblock %}

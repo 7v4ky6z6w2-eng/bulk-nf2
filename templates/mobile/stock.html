@@ -1,0 +1,36 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Stock — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-3">Stock par magasin</h5>
+<form method="get" class="d-flex gap-2 mb-3">
+  <input type="text" name="q" value="{{ q }}" class="form-control form-control-lg"
+         placeholder="Référence ou désignation…" autofocus>
+  <button type="submit" class="btn btn-primary">🔍</button>
+</form>
+
+{% if q and not results %}
+<p class="text-muted">Aucun article trouvé.</p>
+{% endif %}
+
+<div class="list-group">
+  {% for item in results %}
+  <div class="list-group-item bg-dark m-card">
+    <div class="fw-bold">{{ item.ref }}</div>
+    <div class="text-muted mb-2">{{ item.designation }}</div>
+    <table class="table table-sm table-borderless mb-0">
+      <tbody>
+        {% for sid in store_ids %}
+        {% set qty = item.qty.get(sid) %}
+        <tr>
+          <td>{{ store_names.get(sid, sid) }}</td>
+          <td class="text-end {% if qty is not none and qty|float <= 0 %}text-danger fw-bold{% endif %}">
+            {{ qty|fmt_qty if qty is not none else "—" }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

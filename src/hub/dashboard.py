@@ -1,4 +1,10 @@
-"""Routes Flask du tableau de bord web (lecture seule).
+"""Routes Flask du tableau de bord web.
+
+Surtout de la lecture (vue d'ensemble, stock, ventes, trésorerie, historique),
+plus deux écritures ciblées : confirmer une correspondance manuelle entre
+articles (aucune donnée métier modifiée, juste un regroupement d'affichage)
+et synchroniser des prix de vente entre magasins, via le même submit_op que
+l'app bureau et les pages mobiles.
 
 Protégé par la MÊME session que les pages mobiles (/m/login, code d'accès) :
 un navigateur non connecté est redirigé vers l'écran de connexion. Les agents
@@ -14,9 +20,11 @@ from flask import Blueprint, jsonify, redirect, render_template, request, \
     session, url_for, current_app
 
 from hub.central_db import (
-    tresorerie_today, tresorerie_caisses, store_status, stock_rows, stock_count,
-    ops_history,
+    tresorerie_today, tresorerie_caisses, store_status, stock_search,
+    ops_history, name_match_suggestions, confirm_article_link,
+    price_sync_candidates, ArticleLinkConflict,
 )
+from hub.ops import submit_op
 
 bp = Blueprint("dashboard", __name__)
 
@@ -38,6 +46,10 @@ def _db() -> sqlite3.Connection:
 
 def _store_names() -> dict:
     return current_app.config.get("store_names", {})
+
+
+def _registry():
+    return current_app.config.get("registry")
 
 
 def _ago(ts: str | None) -> str:
@@ -118,20 +130,100 @@ def tresorerie():
 
 @bp.get("/stock")
 def stock():
+    # Une ligne par PRODUIT (regroupé par match_key, comme l'Éditeur de prix),
+    # une colonne par MAGASIN — jamais un total combiné entre magasins : le
+    # but est justement de voir le détail par magasin.
     q = request.args.get("q", "").strip()
-    page_size = 500
-    try:
-        page = max(1, int(request.args.get("page", 1)))
-    except ValueError:
-        page = 1
     con = _db()
-    total = stock_count(con, q)
-    pages = max(1, -(-total // page_size))  # ceil
-    page = min(page, pages)
-    rows = stock_rows(con, q, limit=page_size, offset=(page - 1) * page_size)
+    rows = stock_search(con, q, limit=300)
     names = _store_names()
-    return render_template("stock.html", rows=rows, store_names=names, q=q,
-                           page=page, pages=pages, total=total, page_size=page_size)
+    reg = _registry()
+    store_ids = [s.id for s in reg.stores] if reg else \
+        sorted({r["store_id"] for r in rows})
+
+    by_key: dict = {}
+    for r in rows:
+        key = r.get("match_key") or r["ref_art"]
+        g = by_key.setdefault(key, {"desig": r.get("designation"), "refs": {}, "qty": {}})
+        g["refs"][r["store_id"]] = r["ref_art"]
+        g["qty"][r["store_id"]] = r.get("qte_stock")
+    groups = []
+    for g in by_key.values():
+        refs = sorted({g["refs"][sid] for sid in store_ids if sid in g["refs"]})
+        g["ref_txt"] = refs[0] if len(refs) == 1 else " / ".join(refs)
+        groups.append(g)
+    groups.sort(key=lambda g: g["ref_txt"])
+    return render_template("stock.html", groups=groups, store_ids=store_ids,
+                           store_names=names, q=q)
+
+
+@bp.get("/correspondances")
+def correspondances():
+    groups = name_match_suggestions(_db())
+    return render_template("correspondances.html", groups=groups,
+                           store_names=_store_names(), error=None)
+
+
+@bp.post("/correspondances/confirmer")
+def correspondances_confirm():
+    members = [{"store_id": int(sid), "ref_art": ref}
+              for sid, ref in zip(request.form.getlist("store_id"),
+                                  request.form.getlist("ref_art"))
+              if sid and ref]
+    error = None
+    try:
+        confirm_article_link(_db(), members)
+    except ArticleLinkConflict as exc:
+        error = str(exc)
+    groups = name_match_suggestions(_db())
+    return render_template("correspondances.html", groups=groups,
+                           store_names=_store_names(), error=error)
+
+
+def _price_sync_rows(con, source_store_id: int) -> list:
+    rows = []
+    for g in price_sync_candidates(con, source_store_id):
+        for t in g["targets"]:
+            rows.append({"designation": g["designation"], "source_price": g["source_price"],
+                         "store_id": t["store_id"], "ref_art": t["ref_art"],
+                         "current_price": t["current_price"]})
+    return rows
+
+
+@bp.get("/synchroniser-prix")
+def synchroniser_prix():
+    reg = _registry()
+    stores = reg.stores if reg else []
+    source_arg = request.args.get("source")
+    source = int(source_arg) if source_arg else (stores[0].id if stores else None)
+    rows = _price_sync_rows(_db(), source) if source else []
+    return render_template("synchroniser_prix.html", stores=stores, source=source,
+                           rows=rows, store_names=_store_names(), results=None)
+
+
+@bp.post("/synchroniser-prix/appliquer")
+def synchroniser_prix_appliquer():
+    source = int(request.form.get("source") or 0)
+    reg = _registry()
+    names = _store_names()
+    con = _db()
+    results = []
+    for idx in request.form.getlist("rows"):
+        sid_s = request.form.get("store_id_%s" % idx)
+        ref = request.form.get("ref_art_%s" % idx)
+        price_s = request.form.get("price_%s" % idx)
+        if not sid_s or not ref or not price_s:
+            continue
+        sid, price = int(sid_s), float(price_s)
+        changes = [{"ref0": ref, "values": {"PRIXVENTEHT": price, "PRIXVENTETTC": price}}]
+        res = submit_op(con, reg, sid, "price_update", {"changes": changes})
+        res.update(store_id=sid, store_name=names.get(sid, "Magasin %s" % sid), ref_art=ref)
+        results.append(res)
+
+    stores = reg.stores if reg else []
+    rows = _price_sync_rows(con, source) if source else []
+    return render_template("synchroniser_prix.html", stores=stores, source=source,
+                           rows=rows, store_names=names, results=results)
 
 
 @bp.get("/ventes")
