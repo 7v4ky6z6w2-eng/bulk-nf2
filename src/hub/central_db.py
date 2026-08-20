@@ -446,6 +446,28 @@ def stock_count(con: sqlite3.Connection, search: str = "") -> int:
     return row["n"] if row else 0
 
 
+def stock_search(con: sqlite3.Connection, query: str = "", limit: int = 200) -> list:
+    """Stock par PRODUIT et par MAGASIN — une ligne par (article, magasin),
+    quantité cumulée sur tous les dépôts de ce magasin (jamais cumulée entre
+    magasins : le but est justement de voir le détail par magasin, pas un
+    total global). Porte aussi `match_key` (cf. _MATCH_KEY_SQL, même logique
+    que article_search) pour que le client regroupe les lignes d'un même
+    produit vendu sous des références différentes selon le magasin."""
+    q = "%" + (query or "") + "%"
+    rows = con.execute(
+        "SELECT a.ref_art, a.designation, a.store_id, "
+        "       " + _MATCH_KEY_SQL + ", "
+        "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
+        "FROM article a LEFT JOIN stock_snapshot s "
+        "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+        "WHERE a.ref_art LIKE ? OR a.designation LIKE ? OR a.code_barres LIKE ? "
+        "   OR EXISTS (SELECT 1 FROM equiv_cbarres e WHERE e.store_id=a.store_id "
+        "              AND e.ref_art=a.ref_art AND e.code_barres LIKE ?) "
+        "GROUP BY a.store_id, a.ref_art "
+        "ORDER BY a.ref_art, a.store_id LIMIT ?", (q, q, q, q, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def ventes_rows(con: sqlite3.Connection, days: int = 7, limit: int = 300) -> list:
     rows = con.execute(
         "SELECT p.store_id, p.datepiece, p.nopiece, "

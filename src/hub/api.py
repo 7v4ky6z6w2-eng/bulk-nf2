@@ -12,7 +12,7 @@ from hub.central_db import (
     pending_ops_for, mark_op, enqueue_op, SYNC_TABLES,
     store_status, tresorerie_today, tresorerie_caisses, stock_rows, ventes_rows,
     sync_logs, pending_ops_recent, article_search,
-    tresorerie_days, tresorerie_range,
+    tresorerie_days, tresorerie_range, stock_search,
 )
 from hub.central_db import article_barcodes, replace_snapshot, \
     apply_price_changes_local, name_match_suggestions, confirm_article_link, \
@@ -236,6 +236,14 @@ def data_caisses():
     if err:
         return err
     return jsonify(rows=tresorerie_caisses(_db()))
+
+
+@bp.get("/api/data/stock_search")
+def data_stock_search():
+    err = _check_key()
+    if err:
+        return err
+    return jsonify(rows=stock_search(_db(), request.args.get("q", "")))
 
 
 @bp.get("/api/data/stock")

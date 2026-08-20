@@ -77,6 +77,9 @@ class HubData:
     def stock_rows(self, search: str = "") -> list:
         return self._get("/api/data/stock", {"q": search}).get("rows", [])
 
+    def stock_search(self, query: str) -> list:
+        return self._get("/api/data/stock_search", {"q": query}).get("rows", [])
+
     def ventes_rows(self) -> list:
         return self._get("/api/data/ventes").get("rows", [])
 

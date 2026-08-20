@@ -30,7 +30,7 @@ from desktop.pages.cbarre_page import CbarrePage
 # (label, classe, besoin_du_registre)
 _PAGES = [
     ("Vue d'ensemble", OverviewPage, False),
-    ("Stock", StockPage, False),
+    ("Stock", StockPage, True),
     ("Ventes", VentesPage, False),
     ("Trésorerie", TresoreriePage, False),
     ("Import BDR", BdrPage, True),
