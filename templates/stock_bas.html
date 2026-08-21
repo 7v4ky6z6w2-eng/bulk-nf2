@@ -10,8 +10,10 @@
   </form>
 </div>
 <p class="text-muted small">
-  {{ rows|length }} ligne(s) à ≤ {{ seuil }} unité(s), par magasin (dépôts cumulés dans ce magasin).
+  {{ rows|length }} ligne(s) entre 0 et {{ seuil }} unité(s), par magasin (dépôts cumulés dans ce magasin).
   {% if seuil == 0 %}Inclut tout article jamais reçu dans ce magasin (jamais de mouvement de stock).{% endif %}
+  Le stock <strong>négatif</strong> (toujours une anomalie de données) est sur une page séparée :
+  <a href="{{ url_for('dashboard.stock_negatif') }}">Stock négatif (anomalie)</a>.
 </p>
 <div class="table-responsive">
   <table class="table table-sm table-hover align-middle">

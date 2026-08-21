@@ -25,6 +25,7 @@
       <li class="nav-item"><a class="nav-link {% if request.path=='/stock' %}active{% endif %}" href="/stock">Stock</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/stock-valeur' %}active{% endif %}" href="/stock-valeur">Valeur du stock</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/stock-bas' %}active{% endif %}" href="/stock-bas">Rupture / stock bas</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock-negatif' %}active{% endif %}" href="/stock-negatif">Stock négatif (anomalie)</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/stock-mort' %}active{% endif %}" href="/stock-mort">Stock dormant</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/transferts' %}active{% endif %}" href="/transferts">Transferts suggérés</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/correspondances' %}active{% endif %}" href="/correspondances">Correspondances</a></li>
@@ -32,6 +33,7 @@
       <li class="nav-item"><a class="nav-link {% if request.path=='/ventes' %}active{% endif %}" href="/ventes">Ventes</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/ventes-produits' %}active{% endif %}" href="/ventes-produits">Top / flop produits</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/ventes-comparaison' %}active{% endif %}" href="/ventes-comparaison">Comparaison magasins</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/diagnostic-types' %}active{% endif %}" href="/diagnostic-types">Diagnostic types de pièce</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/tresorerie' %}active{% endif %}" href="/tresorerie">Trésorerie</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/sync' %}active{% endif %}" href="/sync">Synchronisation</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/historique' %}active{% endif %}" href="/historique">Historique</a></li>

@@ -23,8 +23,9 @@ from hub.central_db import (
     tresorerie_today, tresorerie_caisses, store_status, stock_search,
     ops_history, name_match_suggestions, confirm_article_link,
     price_sync_candidates, ArticleLinkConflict,
-    stock_value, stock_value_top, low_stock, transfer_suggestions,
+    stock_value, stock_value_top, low_stock, negative_stock, transfer_suggestions,
     sales_by_product, dead_stock, ventes_range, NON_VENTE_TYPES,
+    piece_type_breakdown,
 )
 from hub.ops import submit_op
 
@@ -257,6 +258,13 @@ def stock_bas():
                            store_names=_store_names())
 
 
+@bp.get("/stock-negatif")
+def stock_negatif():
+    con = _db()
+    rows = negative_stock(con)
+    return render_template("stock_negatif.html", rows=rows, store_names=_store_names())
+
+
 @bp.get("/transferts")
 def transferts():
     con = _db()
@@ -336,6 +344,14 @@ def ventes_comparaison():
     return render_template("ventes_comparaison.html", days=days_sorted, store_ids=store_ids,
                            totals=totals, date_from=date_from, date_to=date_to,
                            store_names=names)
+
+
+@bp.get("/diagnostic-types")
+def diagnostic_types():
+    rows = piece_type_breakdown(_db())
+    non_vente = list(NON_VENTE_TYPES)
+    return render_template("diagnostic_types.html", rows=rows, non_vente=non_vente,
+                           store_names=_store_names())
 
 
 @bp.get("/sync")

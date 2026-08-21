@@ -528,17 +528,38 @@ def stock_value_top(con: sqlite3.Connection, store_id: int | None = None,
 
 
 def low_stock(con: sqlite3.Connection, threshold: int = 3, limit: int = 300) -> list:
-    """Produits en rupture ou proches (quantité cumulée du magasin <= threshold),
-    les plus bas d'abord."""
+    """Produits réellement proches de la rupture : quantité cumulée du magasin
+    entre 0 et threshold (bornes incluses), les plus bas d'abord. Exclut le
+    stock NÉGATIF (toujours une anomalie de données, cf. negative_stock) : le
+    mélanger ici noyait les produits à réapprovisionner sous des écarts pouvant
+    atteindre des milliers d'unités."""
     rows = con.execute(
         "SELECT a.store_id, a.ref_art, a.designation, "
         "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
         "FROM article a LEFT JOIN stock_snapshot s "
         "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
         "GROUP BY a.store_id, a.ref_art "
-        "HAVING qte_stock <= ? "
+        "HAVING qte_stock >= 0 AND qte_stock <= ? "
         "ORDER BY qte_stock ASC, a.designation LIMIT ?",
         (threshold, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def negative_stock(con: sqlite3.Connection, limit: int = 300) -> list:
+    """Stock NÉGATIF cumulé par magasin — toujours une ANOMALIE de données
+    (retour non rapproché, inventaire mal saisi, mouvement de stock au
+    mauvais sens...), jamais un vrai niveau à réapprovisionner. Séparé de
+    low_stock() pour ne pas noyer les produits réellement proches de zéro
+    sous des écarts qui peuvent atteindre des milliers d'unités."""
+    rows = con.execute(
+        "SELECT a.store_id, a.ref_art, a.designation, "
+        "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
+        "FROM article a LEFT JOIN stock_snapshot s "
+        "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+        "GROUP BY a.store_id, a.ref_art "
+        "HAVING qte_stock < 0 "
+        "ORDER BY qte_stock ASC, a.designation LIMIT ?",
+        (limit,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -629,21 +650,30 @@ def dead_stock(con: sqlite3.Connection, days: int = 30, store_id: int | None = N
               limit: int = 200) -> list:
     """Produits en stock mais SANS aucune vente (qte > 0 sur une ligne non
     annulée, hors BDR/mouvements de caisse — cf. NON_VENTE_TYPES) depuis N
-    jours, dans ce magasin — pièces/lignes annulées exclues."""
-    sql = ("SELECT a.store_id, a.ref_art, a.designation, "
-           "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
-           "FROM article a LEFT JOIN stock_snapshot s "
-           "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
-           "WHERE NOT EXISTS ("
-           "  SELECT 1 FROM item i JOIN piece p "
+    jours, dans ce magasin — pièces/lignes annulées exclues.
+
+    Calcule l'ensemble « vendu récemment » en UNE passe (CTE), puis fait un
+    anti-join dessus — plutôt qu'une sous-requête NOT EXISTS corrélée exécutée
+    pour chaque article un par un, bien plus lente sur un catalogue réel de
+    plusieurs milliers de références."""
+    sql = ("WITH sold AS ("
+           "  SELECT DISTINCT i.store_id, i.ref_art "
+           "  FROM item i JOIN piece p "
            "    ON i.store_id=p.store_id AND i.nopiece=p.nopiece "
-           "  WHERE i.store_id=a.store_id AND i.ref_art=a.ref_art "
-           "    AND p.datepiece >= date('now', ?) "
+           "  WHERE p.datepiece >= date('now', ?) "
            "    AND (i.annulee IS NULL OR i.annulee=0) "
            "    AND (p.annulee IS NULL OR p.annulee=0) "
            "    AND p.code_type_piece NOT IN " + _NON_VENTE_SQL + " "
            "    AND i.qte > 0"
-           ") ")
+           ") "
+           "SELECT a.store_id, a.ref_art, a.designation, "
+           "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
+           "FROM article a "
+           "LEFT JOIN stock_snapshot s "
+           "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+           "LEFT JOIN sold "
+           "  ON sold.store_id=a.store_id AND sold.ref_art=a.ref_art "
+           "WHERE sold.store_id IS NULL ")
     params: list = ["-%d days" % days]
     if store_id:
         sql += "AND a.store_id=? "
@@ -674,6 +704,39 @@ def ventes_range(con: sqlite3.Connection, date_from: str, date_to: str,
     sql += "GROUP BY store_id, jour ORDER BY jour DESC, store_id"
     rows = con.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def piece_type_breakdown(con: sqlite3.Connection) -> list:
+    """Chaque (magasin, code_type_piece) réellement présent dans les données
+    synchronisées (tout historique), avec son nombre de pièces, combien ont un
+    MONTANTTTC non-nul (nb_avec_montant) contre le total (nb_pieces), le
+    montant TTC cumulé, sa désignation (mirror TYPE_PIECE si connue), et si ce
+    code est actuellement traité comme une VENTE (NON_VENTE_TYPES).
+
+    Groupé PAR MAGASIN (pas seulement par type) : deux magasins peuvent avoir
+    le même type de pièce mais un MONTANTTTC synchronisé pour l'un et pas
+    l'autre (variante de schéma Firebird selon l'installation/version), ce qui
+    produirait un magasin à 0,00 DA de CA malgré des pièces bien présentes —
+    invisible si on agrège tous les magasins ensemble."""
+    rows = con.execute(
+        "SELECT p.store_id, p.code_type_piece, "
+        "       MAX(tp.designation) AS designation, "
+        "       COUNT(*) AS nb_pieces, "
+        "       SUM(CASE WHEN p.montantttc IS NOT NULL AND p.montantttc <> 0 "
+        "                THEN 1 ELSE 0 END) AS nb_avec_montant, "
+        "       SUM(p.montantttc) AS total_montantttc, "
+        "       MIN(p.datepiece) AS premiere_date, "
+        "       MAX(p.datepiece) AS derniere_date "
+        "FROM piece p LEFT JOIN type_piece tp "
+        "  ON tp.store_id = p.store_id AND tp.code_type_piece = p.code_type_piece "
+        "GROUP BY p.store_id, p.code_type_piece "
+        "ORDER BY p.store_id, nb_pieces DESC").fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["is_vente"] = d["code_type_piece"] not in NON_VENTE_TYPES
+        out.append(d)
+    return out
 
 
 def sync_logs(con: sqlite3.Connection, limit: int = 50) -> list:
