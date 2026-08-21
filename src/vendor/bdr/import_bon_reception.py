@@ -1002,12 +1002,21 @@ class Importer:
 
         if self.exists("SELECT 1 FROM ARTICLE WHERE REF_ART = ?", (ref,)):
             # Article existant : on n'y touche pas, SAUF demande explicite de mise
-            # a jour du prix d'achat, et/ou ajout d'un code-barres absent.
+            # a jour du prix d'achat, du prix de vente, et/ou ajout d'un
+            # code-barres absent.
             state = "exists"
             if line.get("maj_prix_achat") and prix_achat_ht > 0:
                 self.cur.execute(
                     "UPDATE ARTICLE SET PRIXACHATHT = ?, PRIXACHATTTC = ? WHERE REF_ART = ?",
                     (prix_achat_ht, prix_achat_ttc, ref))
+                state = "updated"
+            override = line.get("prix_vente")
+            if override is not None and float(override) > 0:
+                prix_vente_ht = round(float(override), 4)
+                prix_vente_ttc = round(prix_vente_ht * (1 + tva / 100.0), 4)
+                self.cur.execute(
+                    "UPDATE ARTICLE SET PRIXVENTEHT = ?, PRIXVENTETTC = ? WHERE REF_ART = ?",
+                    (prix_vente_ht, prix_vente_ttc, ref))
                 state = "updated"
             if barcode and cfg.get("maj_code_barres", True):
                 self.sync_barcode(ref, barcode)
@@ -1124,8 +1133,13 @@ def _write_json(out_path, data):
         json.dump(data, fh, ensure_ascii=False)
 
 
-def mode_match(cfg, lines, out_path):
-    """Calcule les correspondances par designation et ecrit le JSON augmente."""
+def reconcile_lines(cfg, lines):
+    """Ajoute a chaque ligne son rapprochement avec les articles EXISTANTS du
+    magasin (connexion live) : {ref_exists, match_ref, match_designation,
+    match_score, match_prix_achat, status}. status = 'exact' (la reference de
+    l'Excel existe telle quelle), 'matched' (designation proche d'un article
+    existant sous une AUTRE reference — a confirmer avant de fusionner) ou
+    'new' (aucune correspondance, sera cree)."""
     auto = cfg.get("match_par_designation", True)
     con = connect(cfg)
     try:
@@ -1145,8 +1159,63 @@ def mode_match(cfg, lines, out_path):
                 m = {"ref_exists": False, "match_ref": None, "match_designation": None,
                      "match_score": 0.0, "match_prix_achat": None, "status": "new"}
             row = dict(ln); row.update(m); result.append(row)
+        return result
     finally:
         con.close()
+
+
+def list_tiers(cfg):
+    """Fournisseurs (sous-arbre FO) et depots (sous-arbre DP) du magasin —
+    connexion live. Renvoie {"fournisseurs": [...], "depots": [...]}."""
+    con = connect(cfg)
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT CODE_FAM_TIERS, CODE_FAM_TIERS_M, INTITULE FROM FAM_TIERS")
+        fam = cur.fetchall()
+        kids = {}
+        for code, parent, lib in fam:
+            kids.setdefault(parent, []).append(code)
+
+        def descendants(root):
+            seen, stack = set(), [root]
+            while stack:
+                c = stack.pop()
+                if c in seen:
+                    continue
+                seen.add(c)
+                stack.extend(kids.get(c, []))
+            return seen
+
+        def find_root(contains, default):
+            starts = [(code, lib) for code, _p, lib in fam
+                      if lib and lib.upper().startswith(contains)]
+            if starts:
+                return starts[0][0]
+            for code, _p, lib in fam:
+                if lib and contains in lib.upper():
+                    return code
+            return default
+        fo = find_root("FOURNISSEUR", "FO")
+        dp = find_root("DEP", "DP")
+        fo_set, dp_set = descendants(fo), descendants(dp)
+
+        def fetch(fam_codes):
+            if not fam_codes:
+                return []
+            qs = ",".join("?" * len(fam_codes))
+            cur.execute("SELECT CODE_TIERS, RAISON_SOCIALE FROM TIERS "
+                        "WHERE CODE_FAM_TIERS IN (%s) ORDER BY RAISON_SOCIALE" % qs,
+                        tuple(fam_codes))
+            return [{"code": c, "raison": r or c} for c, r in cur.fetchall()]
+        return {"fournisseurs": fetch(fo_set), "depots": fetch(dp_set),
+                "code_fam_fournisseur": fo, "code_fam_depot": dp}
+    finally:
+        con.close()
+
+
+def mode_match(cfg, lines, out_path):
+    """Calcule les correspondances par designation et ecrit le JSON augmente."""
+    result = reconcile_lines(cfg, lines)
     _write_json(out_path, result)
     ne = sum(r["status"] == "exact" for r in result)
     nm = sum(r["status"] == "matched" for r in result)
@@ -1224,56 +1293,8 @@ def mode_list_familles(cfg, out_path):
 
 
 def mode_list_tiers(cfg, out_path):
-    """Liste fournisseurs (sous-arbre FO) et depots (sous-arbre DP)."""
-    con = connect(cfg)
-    try:
-        cur = con.cursor()
-        cur.execute("SELECT CODE_FAM_TIERS, CODE_FAM_TIERS_M, INTITULE FROM FAM_TIERS")
-        fam = cur.fetchall()
-        kids = {}
-        root_by_intit = {}
-        for code, parent, lib in fam:
-            kids.setdefault(parent, []).append(code)
-            if lib:
-                root_by_intit[code] = lib
-
-        def descendants(root):
-            seen, stack = set(), [root]
-            while stack:
-                c = stack.pop()
-                if c in seen:
-                    continue
-                seen.add(c)
-                stack.extend(kids.get(c, []))
-            return seen
-
-        def find_root(contains, default):
-            # Prefere le noeud dont l'intitule COMMENCE par le mot-cle (plus specifique)
-            # plutot qu'un noeud parent dont l'intitule le CONTIENT (ex: CF vs FO).
-            starts = [(code, lib) for code, _p, lib in fam
-                      if lib and lib.upper().startswith(contains)]
-            if starts:
-                return starts[0][0]
-            for code, _p, lib in fam:
-                if lib and contains in lib.upper():
-                    return code
-            return default
-        fo = find_root("FOURNISSEUR", "FO")
-        dp = find_root("DEP", "DP")
-        fo_set, dp_set = descendants(fo), descendants(dp)
-
-        def fetch(fam_codes):
-            if not fam_codes:
-                return []
-            qs = ",".join("?" * len(fam_codes))
-            cur.execute("SELECT CODE_TIERS, RAISON_SOCIALE FROM TIERS "
-                        "WHERE CODE_FAM_TIERS IN (%s) ORDER BY RAISON_SOCIALE" % qs,
-                        tuple(fam_codes))
-            return [{"code": c, "raison": r or c} for c, r in cur.fetchall()]
-        data = {"fournisseurs": fetch(fo_set), "depots": fetch(dp_set),
-                "code_fam_fournisseur": fo, "code_fam_depot": dp}
-    finally:
-        con.close()
+    """Liste fournisseurs (sous-arbre FO) et depots (sous-arbre DP) et ecrit le JSON."""
+    data = list_tiers(cfg)
     _write_json(out_path, data)
     print("Fournisseurs : %d, Depots : %d -> %s"
           % (len(data["fournisseurs"]), len(data["depots"]), out_path))

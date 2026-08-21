@@ -73,6 +73,34 @@ def write_bdr(connect_kwargs: dict, config: dict, lines: list) -> None:
             sys.argv = old_argv
 
 
+def _bdr_cfg(connect_kwargs: dict) -> dict:
+    return {
+        "host": connect_kwargs.get("host", "localhost"),
+        "port": connect_kwargs.get("port", 3050),
+        "database": connect_kwargs["database"],
+        "user": connect_kwargs.get("user", "SYSDBA"),
+        "password": connect_kwargs.get("password", ""),
+        "charset": connect_kwargs.get("charset", "WIN1256"),
+    }
+
+
+def bdr_tiers(connect_kwargs: dict) -> dict:
+    """Fournisseurs/dépôts du magasin cible (connexion Firebird live — le
+    magasin doit être en ligne). Sert à peupler le sélecteur fournisseur de
+    l'aperçu BDR avant confirmation."""
+    import import_bon_reception as bdr  # type: ignore
+    return bdr.list_tiers(_bdr_cfg(connect_kwargs))
+
+
+def bdr_reconcile(connect_kwargs: dict, lines: list) -> list:
+    """Rapprochement de chaque ligne d'un Excel/PDF fournisseur avec les
+    articles EXISTANTS du magasin cible (connexion live) — voir
+    import_bon_reception.best_match_for_line. Ne modifie rien : sert à
+    afficher les correspondances dans l'aperçu avant confirmation."""
+    import import_bon_reception as bdr  # type: ignore
+    return bdr.reconcile_lines(_bdr_cfg(connect_kwargs), lines)
+
+
 def write_prices(connect_kwargs: dict, changes: list) -> None:
     """Met à jour les prix directement sur le magasin (host = IP Tailscale ou localhost)."""
     import article_db  # type: ignore

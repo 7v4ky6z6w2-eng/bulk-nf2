@@ -8,22 +8,117 @@
   ⚠ {{ bad_count }} ligne(s) avec Qté × Prix ≠ Montant — vérifiez avant de confirmer.
 </div>
 {% endif %}
-
-<div class="list-group mb-3" style="max-height:50vh; overflow-y:auto;">
-  {% for l in lines %}
-  <div class="list-group-item bg-dark {% if l.recon == False %}border-warning{% endif %}">
-    <div class="d-flex justify-content-between">
-      <strong>{{ l.ref_art }}</strong>
-      <span>{{ "%.2f"|format(l.qte|float) }} × {{ "%.2f"|format(l.prix|float) }} DA</span>
-    </div>
-    <div class="text-muted small">{{ l.designation }}</div>
-  </div>
-  {% endfor %}
+{% if not online %}
+<div class="alert alert-warning py-2">
+  ⚠ Magasin hors ligne : impossible de vérifier les articles déjà existants ni de
+  charger la liste des fournisseurs. Saisissez le fournisseur manuellement ci-dessous
+  — l'import restera possible (mis en file si le magasin reste hors ligne).
 </div>
+{% endif %}
 
-<form method="post" action="{{ url_for('mobile.bdr_confirm') }}" class="d-grid gap-2">
+<form method="post" action="{{ url_for('mobile.bdr_confirm') }}">
   <input type="hidden" name="token" value="{{ token }}">
-  <button type="submit" class="btn btn-success btn-lg-block">Confirmer l'import</button>
+
+  <div class="card bg-dark m-card">
+    <div class="card-body">
+      <div class="fw-bold mb-2">Fournisseur</div>
+      {% if tiers %}
+      <div class="mb-2">
+        <select name="code_tiers_select" class="form-select">
+          <option value="">— Nouveau fournisseur (saisir ci-dessous) —</option>
+          {% for f in tiers.fournisseurs %}
+          <option value="{{ f.code }}">{{ f.raison }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endif %}
+      <div class="row g-2">
+        <div class="col-6">
+          <label class="form-label small mb-0">{{ "Nouveau code" if tiers else "Code fournisseur" }}</label>
+          <input type="text" name="code_tiers_manual" class="form-control form-control-sm">
+        </div>
+        <div class="col-6">
+          <label class="form-label small mb-0">Nom</label>
+          <input type="text" name="raison_sociale" class="form-control form-control-sm">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="max-height:60vh; overflow-y:auto;">
+    {% for l in lines %}
+    <div class="card bg-dark m-card {% if l.recon == False %}border-warning{% endif %}">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-start mb-1">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="keep_{{ loop.index0 }}"
+                   id="keep{{ loop.index0 }}" checked>
+            <label class="form-check-label fw-bold" for="keep{{ loop.index0 }}">{{ l.ref_art }}</label>
+          </div>
+          {% if l.status == 'exact' %}
+            <span class="badge bg-success">Article existant</span>
+          {% elif l.status == 'matched' %}
+            <span class="badge bg-warning text-dark">Ressemble à un article existant</span>
+          {% elif l.status == 'unknown' %}
+            <span class="badge bg-secondary">Magasin hors ligne</span>
+          {% else %}
+            <span class="badge bg-primary">Nouvel article</span>
+          {% endif %}
+        </div>
+        <div class="text-muted small mb-2">{{ l.designation }}</div>
+
+        {% if l.status == 'matched' %}
+        <div class="alert alert-warning py-2 small mb-2">
+          Correspond peut-être à <strong>{{ l.match_ref }}</strong> — « {{ l.match_designation }} »
+          (score {{ "%.0f"|format(l.match_score * 100) }}%{% if l.match_prix_achat is not none %},
+          prix achat actuel {{ l.match_prix_achat|fmt_da }}{% endif %}).
+          <div class="form-check mt-1">
+            <input class="form-check-input" type="checkbox" name="lier_{{ loop.index0 }}"
+                   id="lier{{ loop.index0 }}">
+            <label class="form-check-label" for="lier{{ loop.index0 }}">
+              Lier à cet article existant (au lieu de créer un doublon)
+            </label>
+          </div>
+        </div>
+        {% endif %}
+
+        <div class="row g-2">
+          <div class="col-4">
+            <label class="form-label small mb-0">Qté</label>
+            <input type="number" step="0.01" name="qte_{{ loop.index0 }}" value="{{ l.qte }}"
+                   class="form-control form-control-sm">
+          </div>
+          <div class="col-4">
+            <label class="form-label small mb-0">Prix achat</label>
+            <input type="number" step="0.01" name="prix_{{ loop.index0 }}" value="{{ l.prix }}"
+                   class="form-control form-control-sm">
+          </div>
+          <div class="col-4">
+            <label class="form-label small mb-0">Prix vente</label>
+            <input type="number" step="0.01" name="prix_vente_{{ loop.index0 }}" placeholder="auto"
+                   class="form-control form-control-sm">
+          </div>
+        </div>
+        {% if l.status == 'exact' %}
+        <div class="form-check mt-1">
+          <input class="form-check-input" type="checkbox" name="maj_prix_achat_{{ loop.index0 }}"
+                 id="maj{{ loop.index0 }}">
+          <label class="form-check-label small" for="maj{{ loop.index0 }}">
+            Mettre à jour le prix d'achat de l'article existant
+          </label>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="d-grid gap-2 mt-3">
+    <button type="submit" class="btn btn-success btn-lg-block"
+            onclick="return confirm('Confirmer l\'import de ce bon de réception ?');">
+      Confirmer l'import
+    </button>
+  </div>
 </form>
 <form method="post" action="{{ url_for('mobile.bdr_cancel') }}" class="mt-2">
   <input type="hidden" name="token" value="{{ token }}">

@@ -31,6 +31,7 @@ from hub.central_db import (
     confirm_article_link, price_sync_candidates, ArticleLinkConflict,
 )
 from hub.ops import submit_op
+from hub.write_back import is_reachable, bdr_tiers, bdr_reconcile
 
 _VENDOR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor")
 _BDR_DIR = os.path.join(_VENDOR, "bdr")
@@ -184,6 +185,10 @@ def bdr_upload_form():
                            error=None)
 
 
+_MISSING_RECON = {"ref_exists": None, "match_ref": None, "match_designation": None,
+                  "match_score": None, "match_prix_achat": None, "status": "unknown"}
+
+
 @bp.post("/bdr/upload")
 def bdr_upload():
     reg = _registry()
@@ -217,12 +222,33 @@ def bdr_upload():
         return render_template("mobile/bdr_upload.html", stores=reg.stores if reg else [],
                                error="Aucune ligne trouvée dans le fichier.")
 
+    # Rapprochement par désignation + liste des fournisseurs : nécessite une
+    # connexion LIVE au magasin cible (Tailscale), donc seulement s'il est en
+    # ligne. Hors ligne (ou en cas d'erreur), on dégrade proprement : toutes
+    # les lignes passent en statut 'unknown', le sélecteur fournisseur devient
+    # une simple saisie manuelle (cf. bdr_preview.html) — l'import reste
+    # possible, juste sans aide au rapprochement pour cette fois.
+    store = reg.get(store_id) if reg else None
+    online = bool(store and is_reachable(store.host, store.port))
+    tiers = None
+    if online:
+        try:
+            kw = store.connect_kwargs()
+            lines = bdr_reconcile(kw, lines)
+            tiers = bdr_tiers(kw)
+        except Exception:  # noqa: BLE001
+            online = False
+            lines = [dict(l, **_MISSING_RECON) for l in lines]
+    else:
+        lines = [dict(l, **_MISSING_RECON) for l in lines]
+
     token = _save_preview({"store_id": store_id, "config": cfg, "lines": lines,
                            "filename": file.filename})
     store_name = reg.get(store_id).name if reg else str(store_id)
     bad = sum(1 for l in lines if l.get("recon") is False)
     return render_template("mobile/bdr_preview.html", token=token, lines=lines,
-                           store_name=store_name, filename=file.filename, bad_count=bad)
+                           store_name=store_name, filename=file.filename, bad_count=bad,
+                           tiers=tiers, online=online)
 
 
 @bp.post("/bdr/confirm")
@@ -235,8 +261,44 @@ def bdr_confirm():
         return render_template("mobile/bdr_result.html", ok=False,
                                message="Aperçu expiré ou déjà confirmé (recommencez l'envoi "
                                        "si l'import n'a pas eu lieu).")
+
+    cfg = dict(data["config"])
+    code_tiers = (request.form.get("code_tiers_select") or "").strip() \
+        or (request.form.get("code_tiers_manual") or "").strip()
+    cfg["code_tiers"] = code_tiers
+    cfg["raison_sociale"] = (request.form.get("raison_sociale") or "").strip()
+
+    final_lines = []
+    for i, orig in enumerate(data["lines"]):
+        if request.form.get("keep_%d" % i) != "on":
+            continue
+        line = {k: orig[k] for k in
+               ("ref_art", "designation", "qte", "prix", "tva", "famille", "code_barres")}
+        for form_key, line_key in (("qte_%d" % i, "qte"), ("prix_%d" % i, "prix")):
+            raw = request.form.get(form_key)
+            if raw not in (None, ""):
+                try:
+                    line[line_key] = float(raw.replace(",", "."))
+                except ValueError:
+                    pass
+        pv_raw = request.form.get("prix_vente_%d" % i)
+        if pv_raw not in (None, ""):
+            try:
+                line["prix_vente"] = float(pv_raw.replace(",", "."))
+            except ValueError:
+                pass
+        if orig.get("status") == "matched" and request.form.get("lier_%d" % i) == "on":
+            line["ref_art"] = orig["match_ref"]
+        if request.form.get("maj_prix_achat_%d" % i) == "on":
+            line["maj_prix_achat"] = True
+        final_lines.append(line)
+
+    if not final_lines:
+        return render_template("mobile/bdr_result.html", ok=False,
+                               message="Aucune ligne à importer (toutes décochées).")
+
     result = submit_op(_db(), _registry(), data["store_id"], "bdr_import",
-                       {"config": data["config"], "lines": data["lines"]},
+                       {"config": cfg, "lines": final_lines},
                        op_uid="mobile-" + secure_filename(token))
     names = _store_names()
     store_name = names.get(data["store_id"], "Magasin %s" % data["store_id"])
