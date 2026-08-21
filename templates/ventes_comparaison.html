@@ -2,12 +2,32 @@
 {% block title %}Comparaison magasins — PrimeNF Hub{% endblock %}
 {% block content %}
 <h4 class="mb-3">Comparaison des ventes entre magasins</h4>
-<p class="text-muted small">Chiffre d'affaires TTC par jour, pièces annulées exclues.</p>
-<form method="get" class="d-flex flex-wrap align-items-center gap-2 mb-3">
-  <label class="text-muted small mb-0">Du :</label>
-  <input type="date" name="from" value="{{ date_from }}" class="form-control form-control-sm" style="width:auto">
-  <label class="text-muted small mb-0">Au :</label>
-  <input type="date" name="to" value="{{ date_to }}" class="form-control form-control-sm" style="width:auto">
+<p class="text-muted small">
+  Entrées de caisse par jour — même source et même méthode que la Vue d'ensemble
+  (trésorerie réelle, pas un total de pièces). Chaque magasin peut être restreint à
+  UNE caisse précise ci-dessous (utile si plusieurs caisses sont suivies mais une
+  seule est fiable) ; laissé sur « Globale » il cumule toutes ses caisses.
+</p>
+<form method="get" class="d-flex flex-wrap align-items-end gap-2 mb-3">
+  <div>
+    <label class="text-muted small mb-0 d-block">Du :</label>
+    <input type="date" name="from" value="{{ date_from }}" class="form-control form-control-sm">
+  </div>
+  <div>
+    <label class="text-muted small mb-0 d-block">Au :</label>
+    <input type="date" name="to" value="{{ date_to }}" class="form-control form-control-sm">
+  </div>
+  {% for sid in store_ids %}
+  <div>
+    <label class="text-muted small mb-0 d-block">{{ store_names.get(sid, sid) }} — caisse :</label>
+    <select name="caisse_{{ sid }}" class="form-select form-select-sm" style="width:auto">
+      <option value="" {% if not selected_caisse.get(sid) %}selected{% endif %}>Globale (toutes)</option>
+      {% for c in caisses_by_store.get(sid, []) %}
+      <option value="{{ c }}" {% if selected_caisse.get(sid) == c %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  {% endfor %}
   <button type="submit" class="btn btn-sm btn-primary">Afficher</button>
 </form>
 
@@ -34,7 +54,7 @@
         {% for sid in store_ids %}
         {% set c = d.par_magasin.get(sid) %}
         <td class="text-end">
-          {% if c %}{{ c.ca|fmt_da }} <span class="text-muted small">({{ c.nb }})</span>{% else %}—{% endif %}
+          {% if c %}{{ c.entree|fmt_da }} <span class="text-muted small">({{ c.nb }})</span>{% else %}—{% endif %}
         </td>
         {% endfor %}
       </tr>

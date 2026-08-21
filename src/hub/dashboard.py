@@ -24,8 +24,8 @@ from hub.central_db import (
     ops_history, name_match_suggestions, confirm_article_link,
     price_sync_candidates, ArticleLinkConflict,
     stock_value, stock_value_top, low_stock, negative_stock, transfer_suggestions,
-    sales_by_product, dead_stock, ventes_range, VENTE_TYPES,
-    piece_type_breakdown,
+    sales_by_product, dead_stock, VENTE_TYPES,
+    piece_type_breakdown, tresorerie_range_by_store,
 )
 from hub.ops import submit_op
 
@@ -323,27 +323,40 @@ def stock_mort():
 
 @bp.get("/ventes-comparaison")
 def ventes_comparaison():
+    # Même source et même méthode que la Vue d'ensemble (tresorerie_snapshot,
+    # entrées/sorties de caisse réelles) — pas la table PIECE — étalée sur une
+    # période au lieu d'aujourd'hui seulement. Chaque magasin peut avoir sa
+    # propre caisse à retenir (ex. un magasin où une seule caisse sur
+    # plusieurs est fiable) via le sélecteur par magasin.
     con = _db()
     reg = _registry()
     names = _store_names()
     today = datetime.now().strftime("%Y-%m-%d")
     date_from = request.args.get("from") or (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
     date_to = request.args.get("to") or today
-    rows = ventes_range(con, date_from, date_to)
 
-    by_day: dict = {}
-    for r in rows:
-        d = by_day.setdefault(r["jour"], {"jour": r["jour"], "par_magasin": {}})
-        d["par_magasin"][r["store_id"]] = {"ca": r["ca"] or 0.0, "nb": r["nb_pieces"] or 0}
-    days_sorted = sorted(by_day.values(), key=lambda d: d["jour"], reverse=True)
+    store_ids = [s.id for s in reg.stores] if reg else []
+    caisses_by_store: dict = {}
+    for row in tresorerie_caisses(con):
+        caisses_by_store.setdefault(row["store_id"], []).append(row["caisse"])
+    if not store_ids:
+        store_ids = sorted(caisses_by_store)
 
-    store_ids = [s.id for s in reg.stores] if reg else \
-        sorted({r["store_id"] for r in rows})
-    totals = {sid: sum(d["par_magasin"].get(sid, {}).get("ca", 0) for d in days_sorted)
+    selected_caisse: dict = {}
+    caisse_by_store: dict = {}
+    for sid in store_ids:
+        val = (request.args.get("caisse_%d" % sid) or "").strip()
+        selected_caisse[sid] = val
+        if val:
+            caisse_by_store[sid] = val
+
+    days_sorted = tresorerie_range_by_store(con, date_from, date_to, caisse_by_store)
+    totals = {sid: sum(d["par_magasin"].get(sid, {}).get("entree", 0) for d in days_sorted)
              for sid in store_ids}
     return render_template("ventes_comparaison.html", days=days_sorted, store_ids=store_ids,
                            totals=totals, date_from=date_from, date_to=date_to,
-                           store_names=names)
+                           store_names=names, caisses_by_store=caisses_by_store,
+                           selected_caisse=selected_caisse)
 
 
 @bp.get("/diagnostic-types")

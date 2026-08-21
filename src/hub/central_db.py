@@ -451,6 +451,47 @@ def tresorerie_range(con: sqlite3.Connection, date_from: str, date_to: str,
     return out
 
 
+def tresorerie_range_by_store(con: sqlite3.Connection, date_from: str, date_to: str,
+                              caisse_by_store: dict | None = None) -> list:
+    """Entrées/sorties PAR JOUR ET PAR MAGASIN sur une période — même source et
+    même méthode que la Vue d'ensemble (tresorerie_snapshot, PAS la table
+    PIECE) : entrées/sorties de caisse réelles, pas un total de pièces.
+
+    `caisse_by_store` : {store_id: nom_de_caisse} pour restreindre UN magasin
+    donné à UNE caisse précise (ex. un magasin où plusieurs caisses sont
+    suivies mais une seule est fiable) ; un magasin absent du dict, ou une
+    valeur vide/'Globale', cumule TOUTES ses caisses — comme le sélecteur
+    « Globale (toutes) » de la page Trésorerie.
+
+    Renvoie une liste triée par jour décroissant, un élément par jour :
+    {"jour": ..., "par_magasin": {store_id: {"entree", "sortie", "nb"}}}."""
+    caisse_by_store = caisse_by_store or {}
+    rows = con.execute(
+        "SELECT store_id, snap_date, caisse, sens, "
+        "       SUM(total_encaisse) AS total, SUM(nb_transactions) AS nb "
+        "FROM tresorerie_snapshot WHERE snap_date BETWEEN ? AND ? "
+        "GROUP BY store_id, snap_date, caisse, sens",
+        (date_from, date_to)).fetchall()
+
+    by_day: dict = {}
+    for r in rows:
+        sid = r["store_id"]
+        wanted = (caisse_by_store.get(sid) or "").strip()
+        row_caisse = (r["caisse"] or "").strip()
+        if wanted and wanted.lower() not in ("globale", "(globale)", "toutes") \
+           and row_caisse != wanted:
+            continue
+        d = by_day.setdefault(r["snap_date"], {"jour": r["snap_date"], "par_magasin": {}})
+        pm = d["par_magasin"].setdefault(sid, {"entree": 0.0, "sortie": 0.0, "nb": 0})
+        val = r["total"] or 0.0
+        if r["sens"] == "sortie":
+            pm["sortie"] += val
+        else:
+            pm["entree"] += val
+            pm["nb"] += r["nb"] or 0
+    return sorted(by_day.values(), key=lambda d: d["jour"], reverse=True)
+
+
 def stock_rows(con: sqlite3.Connection, search: str = "", limit: int = 500,
               offset: int = 0) -> list:
     q = "%" + (search or "") + "%"
