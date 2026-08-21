@@ -13,8 +13,8 @@
   « Avec montant » pour repérer ce cas.
 </p>
 <div class="alert alert-secondary py-2 small">
-  Actuellement exclus du chiffre d'affaires : {{ non_vente|join(", ") }}
-  (bons de réception fournisseur + mouvements de caisse).
+  Seuls ces types comptent comme une vente : {{ vente_types|join(", ") }}
+  (bon de livraison + ticket point de vente). Tout le reste est exclu du chiffre d'affaires.
 </div>
 <div class="table-responsive">
   <table class="table table-sm table-hover align-middle">
