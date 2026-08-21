@@ -46,6 +46,17 @@ COLUMN_MAP = {
 
 SYNC_TABLES = set(COLUMN_MAP)
 
+# Types de PIECE qui ne sont PAS des ventes : bons de réception fournisseur
+# (achat, cf. import_bon_reception.py DEFAULT_CONFIG["code_type_piece"]) et
+# mouvements de caisse (encaissement/décaissement/dépense, cf.
+# sync/reader.py _TRESO_TYPES_ENTREE/_TRESO_TYPES_SORTIE). La table PIECE
+# mélange TOUS les types de pièce sans distinction : un rapport de chiffre
+# d'affaires qui ne filtre pas dessus compte un bon de réception (souvent un
+# gros montant) comme une vente, et gonfle massivement le total du magasin qui
+# importe le plus de BDR. Tous les rapports de ventes ci-dessous les excluent.
+NON_VENTE_TYPES = ("PC_AC_B", "PC_DV_VRS_EN", "PC_DV_VRS_SO", "PC_DV_DEP")
+_NON_VENTE_SQL = "(" + ",".join("'%s'" % t for t in NON_VENTE_TYPES) + ")"
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -580,6 +591,7 @@ def ventes_rows(con: sqlite3.Connection, days: int = 7, limit: int = 300) -> lis
         "FROM piece p LEFT JOIN tiers t "
         "  ON p.store_id=t.store_id AND p.code_tiers=t.code_tiers "
         "WHERE p.datepiece >= date('now', ?) "
+        "  AND p.code_type_piece NOT IN " + _NON_VENTE_SQL + " "
         "ORDER BY p.datepiece DESC LIMIT ?", ("-%d days" % days, limit)).fetchall()
     return [dict(r) for r in rows]
 
@@ -589,6 +601,7 @@ def sales_by_product(con: sqlite3.Connection, days: int = 30, store_id: int | No
     """Quantité (et CA brut avant remise) vendue par produit sur les N derniers
     jours — ventes NETTES (une ligne de retour, qte négative, réduit le total,
     cf. le -1200 DA d'entrée constaté sur les retours). Pièces/lignes annulées
+    et pièces non-ventes (BDR, mouvements de caisse — cf. NON_VENTE_TYPES)
     exclues. order='desc' = meilleures ventes, 'asc' = ventes les plus faibles
     (produits toujours vendus, mais peu)."""
     sql = ("SELECT i.store_id, i.ref_art, "
@@ -599,7 +612,8 @@ def sales_by_product(con: sqlite3.Connection, days: int = 30, store_id: int | No
            "LEFT JOIN article a ON a.store_id=i.store_id AND a.ref_art=i.ref_art "
            "WHERE p.datepiece >= date('now', ?) "
            "  AND (i.annulee IS NULL OR i.annulee=0) "
-           "  AND (p.annulee IS NULL OR p.annulee=0) ")
+           "  AND (p.annulee IS NULL OR p.annulee=0) "
+           "  AND p.code_type_piece NOT IN " + _NON_VENTE_SQL + " ")
     params: list = ["-%d days" % days]
     if store_id:
         sql += "AND i.store_id=? "
@@ -614,7 +628,8 @@ def sales_by_product(con: sqlite3.Connection, days: int = 30, store_id: int | No
 def dead_stock(con: sqlite3.Connection, days: int = 30, store_id: int | None = None,
               limit: int = 200) -> list:
     """Produits en stock mais SANS aucune vente (qte > 0 sur une ligne non
-    annulée) depuis N jours, dans ce magasin — pièces/lignes annulées exclues."""
+    annulée, hors BDR/mouvements de caisse — cf. NON_VENTE_TYPES) depuis N
+    jours, dans ce magasin — pièces/lignes annulées exclues."""
     sql = ("SELECT a.store_id, a.ref_art, a.designation, "
            "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
            "FROM article a LEFT JOIN stock_snapshot s "
@@ -626,6 +641,7 @@ def dead_stock(con: sqlite3.Connection, days: int = 30, store_id: int | None = N
            "    AND p.datepiece >= date('now', ?) "
            "    AND (i.annulee IS NULL OR i.annulee=0) "
            "    AND (p.annulee IS NULL OR p.annulee=0) "
+           "    AND p.code_type_piece NOT IN " + _NON_VENTE_SQL + " "
            "    AND i.qte > 0"
            ") ")
     params: list = ["-%d days" % days]
@@ -642,13 +658,15 @@ def dead_stock(con: sqlite3.Connection, days: int = 30, store_id: int | None = N
 def ventes_range(con: sqlite3.Connection, date_from: str, date_to: str,
                  store_id: int | None = None) -> list:
     """Chiffre d'affaires PAR JOUR ET PAR MAGASIN sur une période [date_from,
-    date_to] (bornes incluses) — pièces annulées exclues. Sert à comparer les
+    date_to] (bornes incluses) — pièces annulées et pièces non-ventes (BDR,
+    mouvements de caisse — cf. NON_VENTE_TYPES) exclues. Sert à comparer les
     magasins entre eux jour par jour."""
     sql = ("SELECT store_id, substr(datepiece, 1, 10) AS jour, "
            "       SUM(montantttc) AS ca, COUNT(*) AS nb_pieces "
            "FROM piece "
            "WHERE datepiece BETWEEN ? AND ? "
-           "  AND (annulee IS NULL OR annulee=0) ")
+           "  AND (annulee IS NULL OR annulee=0) "
+           "  AND code_type_piece NOT IN " + _NON_VENTE_SQL + " ")
     params: list = [date_from, date_to + " 23:59:59"]
     if store_id:
         sql += "AND store_id=? "
@@ -761,7 +779,14 @@ def name_match_suggestions(con: sqlite3.Connection, limit: int = 100) -> list:
 
     out = []
     for items in by_name.values():
-        if len({it["store_id"] for it in items}) < 2:
+        store_ids = [it["store_id"] for it in items]
+        if len(set(store_ids)) < 2:
+            continue
+        if len(store_ids) != len(set(store_ids)):
+            # Un même magasin a PLUSIEURS articles sous ce nom (doublon interne
+            # à corriger côté Netfact2, pas une correspondance entre magasins) :
+            # impossible à confirmer proprement (article_link n'accepte qu'UN
+            # article par magasin et par lien) — on n'affiche pas ce groupe.
             continue
         if len({it["match_key"] for it in items}) < 2:
             continue   # déjà unifiés (lien manuel ou code-barres commun)

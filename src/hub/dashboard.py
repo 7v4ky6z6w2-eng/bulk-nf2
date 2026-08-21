@@ -24,7 +24,7 @@ from hub.central_db import (
     ops_history, name_match_suggestions, confirm_article_link,
     price_sync_candidates, ArticleLinkConflict,
     stock_value, stock_value_top, low_stock, transfer_suggestions,
-    sales_by_product, dead_stock, ventes_range,
+    sales_by_product, dead_stock, ventes_range, NON_VENTE_TYPES,
 )
 from hub.ops import submit_op
 
@@ -267,12 +267,14 @@ def transferts():
 @bp.get("/ventes")
 def ventes():
     con = _db()
+    non_vente = "(" + ",".join("'%s'" % t for t in NON_VENTE_TYPES) + ")"
     rows = con.execute(
         "SELECT p.store_id, p.datepiece, p.code_tiers, t.raison_sociale, "
         "       p.montantttc, p.code_mode_regl, p.nopiece "
         "FROM piece p LEFT JOIN tiers t "
         "  ON p.store_id=t.store_id AND p.code_tiers=t.code_tiers "
         "WHERE p.datepiece >= date('now','-7 days') "
+        "  AND p.code_type_piece NOT IN " + non_vente + " "
         "ORDER BY p.datepiece DESC LIMIT 300").fetchall()
     names = _store_names()
     return render_template("ventes.html", rows=[dict(r) for r in rows], store_names=names)
