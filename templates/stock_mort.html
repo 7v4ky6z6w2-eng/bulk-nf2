@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Stock dormant — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Stock dormant</h4>
+<p class="text-muted small">
+  En stock mais AUCUNE vente sur la période, dans ce magasin (pièces/lignes annulées exclues).
+</p>
+<form method="get" class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <label class="text-muted small mb-0">Période :</label>
+  <select name="days" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+    {% for d in (14, 30, 60, 90) %}
+    <option value="{{ d }}" {% if days == d %}selected{% endif %}>{{ d }} jours</option>
+    {% endfor %}
+  </select>
+  <label class="text-muted small mb-0">Magasin :</label>
+  <select name="store_id" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+    <option value="">Tous</option>
+    {% for s in stores %}
+    <option value="{{ s.id }}" {% if store_id == s.id %}selected{% endif %}>{{ s.name }}</option>
+    {% endfor %}
+  </select>
+</form>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr><th>Magasin</th><th>Référence</th><th>Désignation</th><th class="text-end">Qté en stock</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ store_names.get(r.store_id, r.store_id) }}</td>
+        <td class="font-monospace small">{{ r.ref_art }}</td>
+        <td>{{ r.designation }}</td>
+        <td class="text-end">{{ r.qte_stock|fmt_qty }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-muted text-center">Aucun stock dormant sur cette période</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

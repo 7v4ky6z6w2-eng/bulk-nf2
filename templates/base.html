@@ -23,9 +23,15 @@
     <ul class="nav flex-column gap-1">
       <li class="nav-item"><a class="nav-link {% if request.path=='/' %}active{% endif %}" href="/">Vue d'ensemble</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/stock' %}active{% endif %}" href="/stock">Stock</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock-valeur' %}active{% endif %}" href="/stock-valeur">Valeur du stock</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock-bas' %}active{% endif %}" href="/stock-bas">Rupture / stock bas</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock-mort' %}active{% endif %}" href="/stock-mort">Stock dormant</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/transferts' %}active{% endif %}" href="/transferts">Transferts suggérés</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/correspondances' %}active{% endif %}" href="/correspondances">Correspondances</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/synchroniser-prix' %}active{% endif %}" href="/synchroniser-prix">Synchro prix</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/ventes' %}active{% endif %}" href="/ventes">Ventes</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/ventes-produits' %}active{% endif %}" href="/ventes-produits">Top / flop produits</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/ventes-comparaison' %}active{% endif %}" href="/ventes-comparaison">Comparaison magasins</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/tresorerie' %}active{% endif %}" href="/tresorerie">Trésorerie</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/sync' %}active{% endif %}" href="/sync">Synchronisation</a></li>
       <li class="nav-item"><a class="nav-link {% if request.path=='/historique' %}active{% endif %}" href="/historique">Historique</a></li>

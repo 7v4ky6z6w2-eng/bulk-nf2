@@ -80,6 +80,38 @@ def create_app(db_path: str, api_key: str = "",
         t = threading.Thread(target=_notify_loop, daemon=True, name="notifier")
         t.start()
 
+    # Thread de fond : digest quotidien des ruptures de stock (une seule fois
+    # par jour — digest_log empêche un doublon si le hub redémarre). Vérifie
+    # toutes les 30 min, envoie seulement si le digest du jour n'est pas déjà parti.
+    if notifier and notifier.enabled:
+        def _low_stock_digest_loop():
+            import time
+            from datetime import datetime as _dt
+            from hub.central_db import low_stock, digest_already_sent, mark_digest_sent
+            while True:
+                try:
+                    con = connect(db_path)
+                    today = _dt.now().strftime("%Y-%m-%d")
+                    if not digest_already_sent(con, "low_stock", today):
+                        rows = low_stock(con, threshold=3, limit=500)
+                        if rows:
+                            names = store_names or {}
+                            lines = ["⚠️ Stock bas (%d ligne(s), seuil ≤3) :" % len(rows)]
+                            for r in rows[:15]:
+                                sname = names.get(r["store_id"], "Magasin %s" % r["store_id"])
+                                lines.append("- %s : %s (%s)" % (
+                                    sname, r.get("designation") or r["ref_art"], r["qte_stock"]))
+                            if len(rows) > 15:
+                                lines.append("… et %d autre(s)." % (len(rows) - 15))
+                            notifier.send("\n".join(lines))
+                        mark_digest_sent(con, "low_stock", today)
+                    con.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(1800)
+        threading.Thread(target=_low_stock_digest_loop, daemon=True,
+                         name="low-stock-digest").start()
+
     # Thread de fond : purge les aperçus BDR mobiles abandonnés (jamais
     # confirmés ni annulés) — sinon ils s'accumulent indéfiniment dans le
     # dossier temporaire du système.

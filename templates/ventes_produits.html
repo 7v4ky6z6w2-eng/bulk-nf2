@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Top / flop produits — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Top / flop produits</h4>
+<p class="text-muted small">
+  Ventes NETTES (les retours, en quantité négative, réduisent le total) sur la période, pièces
+  et lignes annulées exclues.
+</p>
+<form method="get" class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <label class="text-muted small mb-0">Période :</label>
+  <select name="days" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+    {% for d in (7, 14, 30, 90) %}
+    <option value="{{ d }}" {% if days == d %}selected{% endif %}>{{ d }} jours</option>
+    {% endfor %}
+  </select>
+  <label class="text-muted small mb-0">Magasin :</label>
+  <select name="store_id" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+    <option value="">Tous</option>
+    {% for s in stores %}
+    <option value="{{ s.id }}" {% if store_id == s.id %}selected{% endif %}>{{ s.name }}</option>
+    {% endfor %}
+  </select>
+  <div class="btn-group btn-group-sm" role="group">
+    <a href="?days={{ days }}&order=desc{% if store_id %}&store_id={{ store_id }}{% endif %}"
+       class="btn {% if order == 'desc' %}btn-primary{% else %}btn-outline-secondary{% endif %}">Top ventes</a>
+    <a href="?days={{ days }}&order=asc{% if store_id %}&store_id={{ store_id }}{% endif %}"
+       class="btn {% if order == 'asc' %}btn-primary{% else %}btn-outline-secondary{% endif %}">Ventes faibles</a>
+  </div>
+</form>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr><th>Magasin</th><th>Référence</th><th>Désignation</th>
+          <th class="text-end">Qté vendue</th><th class="text-end">CA brut</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ store_names.get(r.store_id, r.store_id) }}</td>
+        <td class="font-monospace small">{{ r.ref_art }}</td>
+        <td>{{ r.designation }}</td>
+        <td class="text-end {% if r.qte_total|float < 0 %}text-danger{% endif %}">{{ r.qte_total|fmt_qty }}</td>
+        <td class="text-end">{{ r.ca_brut|fmt_da if r.ca_brut is not none else "—" }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="text-muted text-center">Aucune vente sur cette période</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -224,3 +224,12 @@ CREATE TABLE IF NOT EXISTS article_link (
     UNIQUE (store_id, ref_art)
 );
 CREATE INDEX IF NOT EXISTS idx_article_link_key ON article_link (link_key);
+
+-- Empêche de renvoyer deux fois le même digest (ex. rupture de stock) le même
+-- jour si le hub redémarre entre-temps.
+CREATE TABLE IF NOT EXISTS digest_log (
+    digest_type  TEXT NOT NULL,
+    digest_date  TEXT NOT NULL,
+    sent_at      TEXT NOT NULL,
+    PRIMARY KEY (digest_type, digest_date)
+);

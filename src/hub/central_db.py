@@ -344,6 +344,20 @@ def mark_notified(con: sqlite3.Connection, op_id: int) -> None:
     con.commit()
 
 
+def digest_already_sent(con: sqlite3.Connection, digest_type: str, digest_date: str) -> bool:
+    row = con.execute(
+        "SELECT 1 FROM digest_log WHERE digest_type=? AND digest_date=?",
+        (digest_type, digest_date)).fetchone()
+    return row is not None
+
+
+def mark_digest_sent(con: sqlite3.Connection, digest_type: str, digest_date: str) -> None:
+    con.execute(
+        "INSERT OR IGNORE INTO digest_log (digest_type, digest_date, sent_at) "
+        "VALUES (?, ?, ?)", (digest_type, digest_date, now_iso()))
+    con.commit()
+
+
 # --------------------------------------------------------------------------- #
 #  Lectures pour le tableau de bord
 # --------------------------------------------------------------------------- #
@@ -468,6 +482,96 @@ def stock_search(con: sqlite3.Connection, query: str = "", limit: int = 200) -> 
     return [dict(r) for r in rows]
 
 
+def stock_value(con: sqlite3.Connection) -> list:
+    """Valeur du stock (quantité × prix d'achat HT) par magasin — un résumé,
+    pas un détail par produit (cf. stock_value_top pour ça)."""
+    rows = con.execute(
+        "SELECT s.store_id, "
+        "       SUM(s.qte_stock * COALESCE(a.prixachatht, 0)) AS valeur, "
+        "       SUM(s.qte_stock) AS qte_totale, "
+        "       COUNT(DISTINCT s.ref_art) AS nb_refs "
+        "FROM stock_snapshot s JOIN article a "
+        "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+        "GROUP BY s.store_id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def stock_value_top(con: sqlite3.Connection, store_id: int | None = None,
+                    limit: int = 30) -> list:
+    """Produits qui pèsent le plus dans la valeur du stock (qté × prix d'achat),
+    dépôts cumulés par magasin."""
+    sql = ("SELECT a.store_id, a.ref_art, a.designation, "
+           "       SUM(s.qte_stock) AS qte_stock, a.prixachatht, "
+           "       (SUM(s.qte_stock) * COALESCE(a.prixachatht, 0)) AS valeur "
+           "FROM stock_snapshot s JOIN article a "
+           "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art ")
+    params: list = []
+    if store_id:
+        sql += "WHERE a.store_id=? "
+        params.append(store_id)
+    sql += ("GROUP BY a.store_id, a.ref_art HAVING SUM(s.qte_stock) > 0 "
+           "ORDER BY valeur DESC LIMIT ?")
+    params.append(limit)
+    rows = con.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def low_stock(con: sqlite3.Connection, threshold: int = 3, limit: int = 300) -> list:
+    """Produits en rupture ou proches (quantité cumulée du magasin <= threshold),
+    les plus bas d'abord."""
+    rows = con.execute(
+        "SELECT a.store_id, a.ref_art, a.designation, "
+        "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
+        "FROM article a LEFT JOIN stock_snapshot s "
+        "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+        "GROUP BY a.store_id, a.ref_art "
+        "HAVING qte_stock <= ? "
+        "ORDER BY qte_stock ASC, a.designation LIMIT ?",
+        (threshold, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def transfer_suggestions(con: sqlite3.Connection, min_surplus: int = 4,
+                         limit: int = 200) -> list:
+    """Suggestions de transfert : un magasin en rupture d'un produit alors qu'un
+    AUTRE magasin a un surplus du MÊME produit (regroupé via match_key — voir
+    stock_search). Purement basé sur le déséquilibre de stock actuel (pas sur
+    l'historique de ventes) : une piste à vérifier, pas une décision automatique."""
+    rows = con.execute(
+        "SELECT a.ref_art, a.designation, a.store_id, "
+        "       " + _MATCH_KEY_SQL + ", "
+        "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
+        "FROM article a LEFT JOIN stock_snapshot s "
+        "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+        "GROUP BY a.store_id, a.ref_art").fetchall()
+
+    by_key: dict = {}
+    for r in rows:
+        by_key.setdefault(r["match_key"], []).append(dict(r))
+
+    out = []
+    for items in by_key.values():
+        if len(items) < 2:
+            continue
+        low = [it for it in items if (it["qte_stock"] or 0) <= 0]
+        high = [it for it in items if (it["qte_stock"] or 0) >= min_surplus]
+        if not low or not high:
+            continue
+        high.sort(key=lambda it: it["qte_stock"], reverse=True)
+        source = high[0]
+        for target in low:
+            suggested = max(1, (source["qte_stock"] - 2) // 2)
+            out.append({
+                "designation": items[0]["designation"],
+                "from_store_id": source["store_id"], "from_ref": source["ref_art"],
+                "from_qty": source["qte_stock"],
+                "to_store_id": target["store_id"], "to_ref": target["ref_art"],
+                "suggested_qty": suggested,
+            })
+    out.sort(key=lambda r: -r["from_qty"])
+    return out[:limit]
+
+
 def ventes_rows(con: sqlite3.Connection, days: int = 7, limit: int = 300) -> list:
     rows = con.execute(
         "SELECT p.store_id, p.datepiece, p.nopiece, "
@@ -477,6 +581,80 @@ def ventes_rows(con: sqlite3.Connection, days: int = 7, limit: int = 300) -> lis
         "  ON p.store_id=t.store_id AND p.code_tiers=t.code_tiers "
         "WHERE p.datepiece >= date('now', ?) "
         "ORDER BY p.datepiece DESC LIMIT ?", ("-%d days" % days, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def sales_by_product(con: sqlite3.Connection, days: int = 30, store_id: int | None = None,
+                     order: str = "desc", limit: int = 50) -> list:
+    """Quantité (et CA brut avant remise) vendue par produit sur les N derniers
+    jours — ventes NETTES (une ligne de retour, qte négative, réduit le total,
+    cf. le -1200 DA d'entrée constaté sur les retours). Pièces/lignes annulées
+    exclues. order='desc' = meilleures ventes, 'asc' = ventes les plus faibles
+    (produits toujours vendus, mais peu)."""
+    sql = ("SELECT i.store_id, i.ref_art, "
+           "       COALESCE(a.designation, i.ref_art) AS designation, "
+           "       SUM(i.qte) AS qte_total, SUM(i.qte * i.prixht) AS ca_brut "
+           "FROM item i "
+           "JOIN piece p ON i.store_id=p.store_id AND i.nopiece=p.nopiece "
+           "LEFT JOIN article a ON a.store_id=i.store_id AND a.ref_art=i.ref_art "
+           "WHERE p.datepiece >= date('now', ?) "
+           "  AND (i.annulee IS NULL OR i.annulee=0) "
+           "  AND (p.annulee IS NULL OR p.annulee=0) ")
+    params: list = ["-%d days" % days]
+    if store_id:
+        sql += "AND i.store_id=? "
+        params.append(store_id)
+    sql += ("GROUP BY i.store_id, i.ref_art "
+           "ORDER BY qte_total %s LIMIT ?" % ("DESC" if order != "asc" else "ASC"))
+    params.append(limit)
+    rows = con.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def dead_stock(con: sqlite3.Connection, days: int = 30, store_id: int | None = None,
+              limit: int = 200) -> list:
+    """Produits en stock mais SANS aucune vente (qte > 0 sur une ligne non
+    annulée) depuis N jours, dans ce magasin — pièces/lignes annulées exclues."""
+    sql = ("SELECT a.store_id, a.ref_art, a.designation, "
+           "       COALESCE(SUM(s.qte_stock), 0) AS qte_stock "
+           "FROM article a LEFT JOIN stock_snapshot s "
+           "  ON s.store_id=a.store_id AND s.ref_art=a.ref_art "
+           "WHERE NOT EXISTS ("
+           "  SELECT 1 FROM item i JOIN piece p "
+           "    ON i.store_id=p.store_id AND i.nopiece=p.nopiece "
+           "  WHERE i.store_id=a.store_id AND i.ref_art=a.ref_art "
+           "    AND p.datepiece >= date('now', ?) "
+           "    AND (i.annulee IS NULL OR i.annulee=0) "
+           "    AND (p.annulee IS NULL OR p.annulee=0) "
+           "    AND i.qte > 0"
+           ") ")
+    params: list = ["-%d days" % days]
+    if store_id:
+        sql += "AND a.store_id=? "
+        params.append(store_id)
+    sql += ("GROUP BY a.store_id, a.ref_art HAVING qte_stock > 0 "
+           "ORDER BY qte_stock DESC LIMIT ?")
+    params.append(limit)
+    rows = con.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def ventes_range(con: sqlite3.Connection, date_from: str, date_to: str,
+                 store_id: int | None = None) -> list:
+    """Chiffre d'affaires PAR JOUR ET PAR MAGASIN sur une période [date_from,
+    date_to] (bornes incluses) — pièces annulées exclues. Sert à comparer les
+    magasins entre eux jour par jour."""
+    sql = ("SELECT store_id, substr(datepiece, 1, 10) AS jour, "
+           "       SUM(montantttc) AS ca, COUNT(*) AS nb_pieces "
+           "FROM piece "
+           "WHERE datepiece BETWEEN ? AND ? "
+           "  AND (annulee IS NULL OR annulee=0) ")
+    params: list = [date_from, date_to + " 23:59:59"]
+    if store_id:
+        sql += "AND store_id=? "
+        params.append(store_id)
+    sql += "GROUP BY store_id, jour ORDER BY jour DESC, store_id"
+    rows = con.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 

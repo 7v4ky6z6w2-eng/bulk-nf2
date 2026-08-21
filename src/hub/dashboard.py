@@ -23,6 +23,8 @@ from hub.central_db import (
     tresorerie_today, tresorerie_caisses, store_status, stock_search,
     ops_history, name_match_suggestions, confirm_article_link,
     price_sync_candidates, ArticleLinkConflict,
+    stock_value, stock_value_top, low_stock, transfer_suggestions,
+    sales_by_product, dead_stock, ventes_range,
 )
 from hub.ops import submit_op
 
@@ -226,6 +228,42 @@ def synchroniser_prix_appliquer():
                            rows=rows, store_names=names, results=results)
 
 
+@bp.get("/stock-valeur")
+def stock_valeur():
+    con = _db()
+    names = _store_names()
+    reg = _registry()
+    summary = stock_value(con)
+    for s in summary:
+        s["name"] = names.get(s["store_id"], "Magasin %d" % s["store_id"])
+    summary.sort(key=lambda s: -s["valeur"])
+    store_id_arg = request.args.get("store_id")
+    store_id = int(store_id_arg) if store_id_arg else None
+    top = stock_value_top(con, store_id)
+    stores = reg.stores if reg else []
+    return render_template("stock_valeur.html", summary=summary, top=top,
+                           stores=stores, store_id=store_id, store_names=names)
+
+
+@bp.get("/stock-bas")
+def stock_bas():
+    con = _db()
+    try:
+        seuil = max(0, int(request.args.get("seuil", 3)))
+    except ValueError:
+        seuil = 3
+    rows = low_stock(con, seuil)
+    return render_template("stock_bas.html", rows=rows, seuil=seuil,
+                           store_names=_store_names())
+
+
+@bp.get("/transferts")
+def transferts():
+    con = _db()
+    rows = transfer_suggestions(con)
+    return render_template("transferts.html", rows=rows, store_names=_store_names())
+
+
 @bp.get("/ventes")
 def ventes():
     con = _db()
@@ -238,6 +276,64 @@ def ventes():
         "ORDER BY p.datepiece DESC LIMIT 300").fetchall()
     names = _store_names()
     return render_template("ventes.html", rows=[dict(r) for r in rows], store_names=names)
+
+
+@bp.get("/ventes-produits")
+def ventes_produits():
+    con = _db()
+    reg = _registry()
+    try:
+        days = max(1, int(request.args.get("days", 30)))
+    except ValueError:
+        days = 30
+    order = "asc" if request.args.get("order") == "asc" else "desc"
+    store_id_arg = request.args.get("store_id")
+    store_id = int(store_id_arg) if store_id_arg else None
+    rows = sales_by_product(con, days, store_id, order)
+    stores = reg.stores if reg else []
+    return render_template("ventes_produits.html", rows=rows, days=days, order=order,
+                           stores=stores, store_id=store_id, store_names=_store_names())
+
+
+@bp.get("/stock-mort")
+def stock_mort():
+    con = _db()
+    reg = _registry()
+    try:
+        days = max(1, int(request.args.get("days", 30)))
+    except ValueError:
+        days = 30
+    store_id_arg = request.args.get("store_id")
+    store_id = int(store_id_arg) if store_id_arg else None
+    rows = dead_stock(con, days, store_id)
+    stores = reg.stores if reg else []
+    return render_template("stock_mort.html", rows=rows, days=days,
+                           stores=stores, store_id=store_id, store_names=_store_names())
+
+
+@bp.get("/ventes-comparaison")
+def ventes_comparaison():
+    con = _db()
+    reg = _registry()
+    names = _store_names()
+    today = datetime.now().strftime("%Y-%m-%d")
+    date_from = request.args.get("from") or (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
+    date_to = request.args.get("to") or today
+    rows = ventes_range(con, date_from, date_to)
+
+    by_day: dict = {}
+    for r in rows:
+        d = by_day.setdefault(r["jour"], {"jour": r["jour"], "par_magasin": {}})
+        d["par_magasin"][r["store_id"]] = {"ca": r["ca"] or 0.0, "nb": r["nb_pieces"] or 0}
+    days_sorted = sorted(by_day.values(), key=lambda d: d["jour"], reverse=True)
+
+    store_ids = [s.id for s in reg.stores] if reg else \
+        sorted({r["store_id"] for r in rows})
+    totals = {sid: sum(d["par_magasin"].get(sid, {}).get("ca", 0) for d in days_sorted)
+             for sid in store_ids}
+    return render_template("ventes_comparaison.html", days=days_sorted, store_ids=store_ids,
+                           totals=totals, date_from=date_from, date_to=date_to,
+                           store_names=names)
 
 
 @bp.get("/sync")
