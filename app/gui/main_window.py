@@ -7,12 +7,12 @@ person, not a product.
 import platform
 import sys
 
-from PySide6.QtCore import QDate, QThread, Signal
+from PySide6.QtCore import QDate, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QSpinBox, QTableWidget, QTabWidget, QVBoxLayout, QWidget,
+    QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from app import diagnostics
@@ -21,6 +21,7 @@ from app.sync.engine import render_report_lines, run_sync, write_dry_run_payload
 from app.sync.name_resync import run_name_resync
 from app.sync.order_importer import fix_duplicate_orders, run_order_import
 from app.sync.profit_consolidation import list_source_document_types, run_consolidation
+from app.sync.sku_fixer import apply_sku_fixes, list_products_missing_sku
 from app.sync.stock_sync import run_stock_sync
 
 try:
@@ -309,6 +310,44 @@ class ProfitConsolidationWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class MissingSkuWorker(QThread):
+    """Fetches every WooCommerce product with no SKU set -- the reason
+    some deliveries never made it into a Firebird PIECE (order_importer.py
+    can't match a line to an ARTICLE without a SKU)."""
+    finished_ok = Signal(list)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            rows = list_products_missing_sku(self.cfg)
+            self.finished_ok.emit(rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class ApplySkuFixesWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, fixes, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.fixes = fixes
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = apply_sku_fixes(self.cfg, self.fixes, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -332,6 +371,8 @@ class MainWindow(QMainWindow):
         self.schema_worker = None
         self.profit_types_worker = None
         self.profit_worker = None
+        self.missing_sku_worker = None
+        self.apply_sku_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
@@ -941,6 +982,47 @@ class MainWindow(QMainWindow):
         diag_layout.addLayout(fix_btn_row)
         layout.addWidget(diag_group)
 
+        sku_group = QGroupBox("Products missing a SKU (why some deliveries never made it into NetFact2)")
+        sku_layout = QVBoxLayout(sku_group)
+        sku_layout.addWidget(QLabel(
+            "A WooCommerce product with no SKU can't be matched to a Firebird\n"
+            "ARTICLE row, so its order lines get skipped on import. Find these\n"
+            "products, type in the REF_ART each one should have (checked\n"
+            "against NetFact2 before anything is written), then apply.\n\n"
+            "Note: an order whose missing-SKU line was already skipped (not\n"
+            "the whole order) already has its document in Firebird without\n"
+            "that line -- fixing the SKU here won't add the missing line to\n"
+            "an already-imported document; that still needs adding by hand."
+        ))
+        sku_btn_row = QHBoxLayout()
+        self.find_missing_sku_btn = QPushButton("Find products missing SKU")
+        self.find_missing_sku_btn.clicked.connect(self._start_find_missing_sku)
+        sku_btn_row.addWidget(self.find_missing_sku_btn)
+        sku_btn_row.addStretch()
+        sku_layout.addLayout(sku_btn_row)
+
+        self.missing_sku_table = QTableWidget(0, 3)
+        self.missing_sku_table.setHorizontalHeaderLabels(
+            ["WC Product ID", "Product name", "REF_ART in NetFact2"]
+        )
+        self.missing_sku_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        sku_layout.addWidget(self.missing_sku_table)
+
+        sku_apply_row = QHBoxLayout()
+        self.preview_sku_fix_btn = QPushButton("Preview fix (validate against NetFact2)")
+        self.preview_sku_fix_btn.clicked.connect(lambda: self._start_apply_sku_fixes(dry_run=True))
+        self.apply_sku_fix_btn = QPushButton("Apply SKU fixes")
+        self.apply_sku_fix_btn.setToolTip(
+            "Writes the SKU to WooCommerce for every row with a REF_ART typed "
+            "in and confirmed to exist in NetFact2."
+        )
+        self.apply_sku_fix_btn.clicked.connect(self._confirm_apply_sku_fixes)
+        sku_apply_row.addWidget(self.preview_sku_fix_btn)
+        sku_apply_row.addWidget(self.apply_sku_fix_btn)
+        sku_apply_row.addStretch()
+        sku_layout.addLayout(sku_apply_row)
+        layout.addWidget(sku_group)
+
         btn_row = QHBoxLayout()
         self.order_dry_run_btn = QPushButton("Dry run (preview only)")
         self.order_dry_run_btn.clicked.connect(lambda: self._start_order_import(dry_run=True))
@@ -1188,6 +1270,94 @@ class MainWindow(QMainWindow):
         self.preview_fix_btn.setEnabled(True)
         self.fix_duplicates_btn.setEnabled(True)
         self.order_log_view.appendPlainText(f"Fix duplicates FAILED: {message}")
+
+    def _start_find_missing_sku(self):
+        if self.missing_sku_worker and self.missing_sku_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.find_missing_sku_btn.setEnabled(False)
+        self.order_log_view.appendPlainText("Fetching WooCommerce products...")
+        self.missing_sku_worker = MissingSkuWorker(cfg)
+        self.missing_sku_worker.finished_ok.connect(self._missing_sku_found)
+        self.missing_sku_worker.finished_error.connect(self._missing_sku_failed)
+        self.missing_sku_worker.start()
+
+    def _missing_sku_found(self, rows):
+        self.find_missing_sku_btn.setEnabled(True)
+        self.missing_sku_table.setRowCount(0)
+        for row in rows:
+            r = self.missing_sku_table.rowCount()
+            self.missing_sku_table.insertRow(r)
+            id_item = QTableWidgetItem(str(row["id"]))
+            id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+            name_item = QTableWidgetItem(row["name"])
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            self.missing_sku_table.setItem(r, 0, id_item)
+            self.missing_sku_table.setItem(r, 1, name_item)
+            self.missing_sku_table.setItem(r, 2, QTableWidgetItem(""))
+        self.order_log_view.appendPlainText(f"{len(rows)} product(s) missing a SKU.")
+
+    def _missing_sku_failed(self, message):
+        self.find_missing_sku_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Finding products missing SKU FAILED: {message}")
+
+    def _collect_sku_fixes(self):
+        fixes = []
+        for row in range(self.missing_sku_table.rowCount()):
+            id_item = self.missing_sku_table.item(row, 0)
+            ref_item = self.missing_sku_table.item(row, 2)
+            ref_art = ref_item.text().strip() if ref_item else ""
+            if id_item and ref_art:
+                fixes.append({"product_id": int(id_item.text()), "ref_art": ref_art})
+        return fixes
+
+    def _confirm_apply_sku_fixes(self):
+        fixes = self._collect_sku_fixes()
+        if not fixes:
+            QMessageBox.warning(self, "Nothing to apply", "Type a REF_ART into at least one row first.")
+            return
+        answer = QMessageBox.question(
+            self, "Apply SKU fixes?",
+            f"This will set the SKU on {len(fixes)} WooCommerce product(s) to the "
+            "REF_ART you typed in (only for ones confirmed to exist in NetFact2). "
+            "This writes to your live WooCommerce store.\n\n"
+            "Run 'Preview fix' first if you haven't already.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_apply_sku_fixes(dry_run=False)
+
+    def _start_apply_sku_fixes(self, dry_run):
+        fixes = self._collect_sku_fixes()
+        if not fixes:
+            QMessageBox.warning(self, "Nothing to apply", "Type a REF_ART into at least one row first.")
+            return
+        if self.apply_sku_worker and self.apply_sku_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.preview_sku_fix_btn.setEnabled(False)
+        self.apply_sku_fix_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(
+            "Validating SKU fixes..." if dry_run else "Applying SKU fixes..."
+        )
+        self.apply_sku_worker = ApplySkuFixesWorker(cfg, fixes, dry_run)
+        self.apply_sku_worker.line.connect(self.order_log_view.appendPlainText)
+        self.apply_sku_worker.finished_ok.connect(self._apply_sku_fixes_done)
+        self.apply_sku_worker.finished_error.connect(self._apply_sku_fixes_failed)
+        self.apply_sku_worker.start()
+
+    def _apply_sku_fixes_done(self, report):
+        self.preview_sku_fix_btn.setEnabled(True)
+        self.apply_sku_fix_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(
+            f"applied={len(report['applied'])} invalid_ref={len(report['invalid_ref'])} "
+            f"errors={len(report['errors'])}"
+        )
+
+    def _apply_sku_fixes_failed(self, message):
+        self.preview_sku_fix_btn.setEnabled(True)
+        self.apply_sku_fix_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Apply SKU fixes FAILED: {message}")
 
     def _collect_order_import_config(self):
         oi_cfg = self.cfg["order_import"]
