@@ -24,10 +24,13 @@ anything that looks wrong before it's written):
      source commande) -- consolidating that one too would double-count
      every item. This can't be safely auto-detected, so the user picks it.
   2. preview_consolidation() -- gathers candidates for the chosen type,
-     splits them into "ready" (clean cost data) and "held back" (an item
-     with no matching ARTICLE row, or ARTICLE.PRIXACHATHT/TTC = 0/NULL --
-     the two things that would silently corrupt a profit number). Writes
-     nothing.
+     splits them into "ready" (goes into the consolidated document) and
+     "held back" (a line with no matching ARTICLE row at all -- nothing
+     to price). A ready line whose article DOES exist but has
+     PRIXACHATHT/TTC = 0/NULL is included anyway, at 0 cost, and reported
+     separately as a "zero_cost_warnings" entry -- per the user's choice,
+     that's something to go fix in NetFact2 later, not a reason to
+     withhold the whole document now. Writes nothing.
   3. run_consolidation() -- re-gathers the same data (never stale relative
      to what was previewed) and, for the "ready" set only, creates one
      PIECE/ITEM document. A held-back document is left completely alone
@@ -198,9 +201,12 @@ def _classify(cur, docs, already_done):
     cost_cache = {}
 
     def resolved_cost(ref):
+        """(cost_ht, cost_ttc) for a ref that IS in ARTICLE -- (0.0, 0.0)
+        if its PRIXACHATHT/TTC are both 0/blank, since that's a warning,
+        not a blocking issue (see module docstring)."""
         if ref not in cost_cache:
-            art = articles.get(ref)
-            cost_cache[ref] = _resolve_cost(art) if art else None
+            resolved = _resolve_cost(articles[ref])
+            cost_cache[ref] = resolved if resolved is not None else (0.0, 0.0)
         return cost_cache[ref]
 
     ready_lines = {}
@@ -208,29 +214,39 @@ def _classify(cur, docs, already_done):
     ready_original_total_ht = 0.0
     ready_original_total_ttc = 0.0
     held_back = []
+    zero_cost_warnings = []
 
     for d in pending_docs:
-        flags = []
-        seen = set()
+        # Only a missing REF_ART (blank on the item, or no matching
+        # ARTICLE row at all) blocks the whole document -- there's simply
+        # nothing to price. A zero PRIXACHAT on an article that DOES exist
+        # is included anyway (at 0 cost) and just reported as a warning,
+        # per the user's choice: they'll fix the article's cost later
+        # rather than have the document withheld until then.
+        blocking = []
+        seen_blocking = set()
+        doc_zero_cost_refs = set()
         for item in d["items"]:
             ref = item["ref_art"]
             if not ref:
                 key = ("(blank SKU)", "missing_sku")
             elif ref not in articles:
                 key = (ref, "missing_ref")
-            elif resolved_cost(ref) is None:
-                key = (ref, "zero_cost")
             else:
+                if resolved_cost(ref) == (0.0, 0.0):
+                    doc_zero_cost_refs.add(ref)
                 continue
-            if key not in seen:
-                seen.add(key)
-                flags.append({"ref_art": key[0], "reason": key[1]})
+            if key not in seen_blocking:
+                seen_blocking.add(key)
+                blocking.append({"ref_art": key[0], "reason": key[1]})
 
-        if flags:
-            held_back.append({"nopiece": d["nopiece"], "date": d["date"], "flags": flags})
+        if blocking:
+            held_back.append({"nopiece": d["nopiece"], "date": d["date"], "flags": blocking})
             continue
 
         ready_nopieces.append(d["nopiece"])
+        for ref in doc_zero_cost_refs:
+            zero_cost_warnings.append({"ref_art": ref, "nopiece": d["nopiece"]})
         for item in d["items"]:
             ref = item["ref_art"]
             cost_ht, cost_ttc = resolved_cost(ref)
@@ -249,6 +265,7 @@ def _classify(cur, docs, already_done):
         "ready_original_total_ht": round(ready_original_total_ht, 2),
         "ready_original_total_ttc": round(ready_original_total_ttc, 2),
         "held_back": held_back,
+        "zero_cost_warnings": zero_cost_warnings,
         "already_consolidated_skipped": already_consolidated_skipped,
     }
 
@@ -289,6 +306,9 @@ def preview_consolidation(cfg, source_client_code, doc_type_code, since=None, lo
     for h in result["held_back"]:
         reasons = ", ".join(f"{f['ref_art']} ({f['reason']})" for f in h["flags"])
         emit(f"HELD BACK doc #{h['nopiece']} ({h['date']}): {reasons}")
+    for w in result["zero_cost_warnings"]:
+        emit(f"WARNING: {w['ref_art']} has PRIXACHAT=0 -- included at 0 cost "
+             f"(doc #{w['nopiece']}). Fix the article's purchase price in NetFact2.")
 
     return {
         "created_nopiece": None,
@@ -300,6 +320,7 @@ def preview_consolidation(cfg, source_client_code, doc_type_code, since=None, lo
         "original_sale_ttc": result["ready_original_total_ttc"],
         "estimated_profit_ht": profit_ht, "estimated_profit_ttc": profit_ttc,
         "held_back": result["held_back"],
+        "zero_cost_warnings": result["zero_cost_warnings"],
     }
 
 
@@ -321,7 +342,7 @@ def run_consolidation(cfg, source_client_code, doc_type_code, target_client_code
         "total_cost_ht": 0.0, "total_cost_ttc": 0.0,
         "original_sale_ht": 0.0, "original_sale_ttc": 0.0,
         "estimated_profit_ht": 0.0, "estimated_profit_ttc": 0.0,
-        "held_back": [],
+        "held_back": [], "zero_cost_warnings": [],
     }
     try:
         cur = con.cursor()
@@ -338,6 +359,7 @@ def run_consolidation(cfg, source_client_code, doc_type_code, target_client_code
             result = _classify(cur, docs, already_done)
 
             report["held_back"] = result["held_back"]
+            report["zero_cost_warnings"] = result["zero_cost_warnings"]
             report["source_doc_count"] = result["ready_source_count"]
             report["already_consolidated_skipped"] = result["already_consolidated_skipped"]
             report["line_count"] = len(result["ready_lines"])
@@ -407,4 +429,7 @@ def run_consolidation(cfg, source_client_code, doc_type_code, target_client_code
     if report["held_back"]:
         emit(f"{len(report['held_back'])} document(s) held back due to flagged issues -- "
              f"fix and re-run to include them.")
+    for w in report["zero_cost_warnings"]:
+        emit(f"WARNING: {w['ref_art']} had PRIXACHAT=0 -- included at 0 cost "
+             f"(doc #{w['nopiece']}). Fix the article's purchase price in NetFact2.")
     return report

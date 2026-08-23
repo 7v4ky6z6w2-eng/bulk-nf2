@@ -137,18 +137,39 @@ def test_preview_separates_ready_from_held_back_and_writes_nothing(monkeypatch):
         assert con.committed is False
 
 
-def test_zero_cost_article_holds_back_its_document(monkeypatch):
+def test_zero_cost_article_is_included_at_zero_cost_and_flagged_as_warning(monkeypatch):
+    # An article that DOES exist but has PRIXACHAT=0 must not hold back the
+    # whole document -- included at 0 cost, just surfaced as a warning so
+    # the user can fix the article's cost later (their explicit choice).
     with tempfile.TemporaryDirectory() as tmp:
         state_path = os.path.join(tmp, "state.sqlite3")
         responder = _responder(
-            item_rows=[("1", "2026-01-01", 1, "REF1", 1.0, 24.0, 28.0, 1)],
+            item_rows=[("1", "2026-01-01", 1, "REF1", 2.0, 24.0, 28.0, 1)],
             articles={"REF1": (0.0, 0.0, 19.0)},  # PRIXACHAT = 0
         )
         _connect(monkeypatch, responder)
 
         report = pc.preview_consolidation(_cfg(state_path), "CLI-LIVRAISON", "PC_VE_B")
+        assert report["held_back"] == []
+        assert report["line_count"] == 1
+        assert report["total_cost_ht"] == 0.0
+        assert report["total_cost_ttc"] == 0.0
+        assert report["zero_cost_warnings"] == [{"ref_art": "REF1", "nopiece": "1"}]
+
+
+def test_missing_ref_still_holds_back_its_document(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        state_path = os.path.join(tmp, "state.sqlite3")
+        responder = _responder(
+            item_rows=[("1", "2026-01-01", 1, "REF1", 1.0, 24.0, 28.0, 1)],
+            articles={},  # REF1 doesn't exist in ARTICLE at all
+        )
+        _connect(monkeypatch, responder)
+
+        report = pc.preview_consolidation(_cfg(state_path), "CLI-LIVRAISON", "PC_VE_B")
         assert report["line_count"] == 0
-        assert report["held_back"][0]["flags"] == [{"ref_art": "REF1", "reason": "zero_cost"}]
+        assert report["held_back"][0]["flags"] == [{"ref_art": "REF1", "reason": "missing_ref"}]
+        assert report["zero_cost_warnings"] == []
 
 
 def test_run_consolidation_creates_one_doc_with_aggregated_lines_at_cost(monkeypatch):

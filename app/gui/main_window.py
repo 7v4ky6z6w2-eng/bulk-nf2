@@ -1429,6 +1429,13 @@ class MainWindow(QMainWindow):
             for h in report["held_back"]:
                 reasons = ", ".join(f"{f['ref_art']} ({f['reason']})" for f in h["flags"])
                 self.profit_log_view.appendPlainText(f"  doc #{h['nopiece']} ({h['date']}): {reasons}")
+        if report.get("zero_cost_warnings"):
+            self.profit_log_view.appendPlainText(
+                f"\n{len(report['zero_cost_warnings'])} line(s) included at 0 cost "
+                "(PRIXACHAT=0 -- fix the article's purchase price when convenient):"
+            )
+            for w in report["zero_cost_warnings"]:
+                self.profit_log_view.appendPlainText(f"  {w['ref_art']} (doc #{w['nopiece']})")
         if report["created_nopiece"]:
             self.statusBar().showMessage(
                 f"Created consolidated document NOPIECE={report['created_nopiece']}.", 8000
