@@ -23,6 +23,7 @@ from app.sync.order_importer import fix_duplicate_orders, run_order_import
 from app.sync.profit_consolidation import list_source_document_types, run_consolidation
 from app.sync.sku_fixer import apply_sku_fixes, list_products_missing_sku
 from app.sync.stock_sync import run_stock_sync
+from app.sync.yalidine_reconcile import run_reconciliation
 
 try:
     from app.scheduler import windows_task
@@ -348,6 +349,29 @@ class ApplySkuFixesWorker(QThread):
             self.finished_error.emit(str(exc))
 
 
+class YalidineReconcileWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, client_code, doc_type_code, since):
+        super().__init__()
+        self.cfg = cfg
+        self.client_code = client_code
+        self.doc_type_code = doc_type_code
+        self.since = since
+
+    def run(self):
+        try:
+            report = run_reconciliation(
+                self.cfg, self.client_code, self.doc_type_code,
+                since=self.since, log_fn=self.line.emit,
+            )
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, config_path):
         super().__init__()
@@ -373,6 +397,7 @@ class MainWindow(QMainWindow):
         self.profit_worker = None
         self.missing_sku_worker = None
         self.apply_sku_worker = None
+        self.yalidine_worker = None
 
         tabs = QTabWidget()
         tabs.addTab(self._build_config_tab(), "Configuration")
@@ -380,6 +405,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._build_stock_sync_tab(), "Stock Sync")
         tabs.addTab(self._build_orders_tab(), "Orders")
         tabs.addTab(self._build_profit_tab(), "Profit")
+        tabs.addTab(self._build_yalidine_tab(), "Yalidine")
         tabs.addTab(self._build_schedule_tab(), "Schedule")
         self.setCentralWidget(tabs)
         self.statusBar().showMessage("Ready.")
@@ -470,6 +496,16 @@ class MainWindow(QMainWindow):
         wp_form.addRow("Application password:", self.wp_pass)
         layout.addWidget(wp_group)
 
+        yal_group = QGroupBox("Yalidine API (only needed for the Yalidine reconciliation tool)")
+        yal_form = QFormLayout(yal_group)
+        self.yal_api_id = QLineEdit(self.cfg["yalidine"]["api_id"])
+        yal_form.addRow("API ID:", self.yal_api_id)
+        self.yal_api_token = QLineEdit(self.cfg["yalidine"]["api_token"])
+        self.yal_api_token.setEchoMode(QLineEdit.Password)
+        yal_form.addRow("API Token:", self.yal_api_token)
+        yal_form.addRow(QLabel("Yalidine dashboard -> Settings -> API -> Generate."))
+        layout.addWidget(yal_group)
+
         test_group = QGroupBox("Test connections")
         test_layout = QVBoxLayout(test_group)
         self.test_conn_btn = QPushButton("Test connections now")
@@ -534,6 +570,8 @@ class MainWindow(QMainWindow):
         self.cfg["woocommerce"]["consumer_secret"] = self.wc_secret.text()
         self.cfg["wordpress"]["username"] = self.wp_user.text()
         self.cfg["wordpress"]["app_password"] = self.wp_pass.text()
+        self.cfg["yalidine"]["api_id"] = self.yal_api_id.text()
+        self.cfg["yalidine"]["api_token"] = self.yal_api_token.text()
         return self.cfg
 
     def _save_config(self):
@@ -1615,6 +1653,112 @@ class MainWindow(QMainWindow):
         self.profit_preview_btn.setEnabled(True)
         self.profit_run_btn.setEnabled(True)
         self.profit_log_view.appendPlainText(f"FAILED: {message}")
+
+    # -- Yalidine tab -----------------------------------------------------------
+    def _build_yalidine_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        note = QLabel(
+            "Compares Yalidine's delivered parcels against NetFact2's\n"
+            "livraison-client documents, order by order (joined by the\n"
+            "WooCommerce order id both systems already key off of), to find\n"
+            "exactly where a reported total gap comes from rather than just\n"
+            "confirming that one exists. Read-only -- writes nothing anywhere.\n\n"
+            "Needs the Yalidine API ID/Token from the Configuration tab, and\n"
+            "the same 'livraison' document type used on the Profit tab (the\n"
+            "real Bon de Livraison, not the intermediate Commande -- use\n"
+            "'List document types for this client' there first if unsure)."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        cfg_group = QGroupBox("What to reconcile")
+        form = QFormLayout(cfg_group)
+        self.yal_client_code = QLineEdit(self.cfg["order_import"]["client_code"])
+        self.yal_client_code.setToolTip("Same CODE_TIERS as the Orders/Profit tabs' livraison client.")
+        form.addRow("Livraison client CODE_TIERS:", self.yal_client_code)
+        self.yal_doc_type_combo = self._type_piece_combo()
+        form.addRow("Bon de Livraison document type:", self.yal_doc_type_combo)
+
+        since_row = QHBoxLayout()
+        self.yal_use_since = QCheckBox("Only orders created on/after:")
+        self.yal_since_date = QDateEdit()
+        self.yal_since_date.setCalendarPopup(True)
+        self.yal_since_date.setDisplayFormat("yyyy-MM-dd")
+        self.yal_since_date.setDate(QDate.currentDate().addMonths(-1))
+        self.yal_since_date.setEnabled(False)
+        self.yal_use_since.toggled.connect(self.yal_since_date.setEnabled)
+        since_row.addWidget(self.yal_use_since)
+        since_row.addWidget(self.yal_since_date)
+        since_row.addStretch()
+        form.addRow(since_row)
+        layout.addWidget(cfg_group)
+
+        btn_row = QHBoxLayout()
+        self.yal_run_btn = QPushButton("Run reconciliation")
+        self.yal_run_btn.clicked.connect(self._start_yalidine_reconcile)
+        btn_row.addWidget(self.yal_run_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self.yal_log_view = QPlainTextEdit()
+        self.yal_log_view.setReadOnly(True)
+        layout.addWidget(self.yal_log_view)
+        return widget
+
+    def _start_yalidine_reconcile(self):
+        client_code = self.yal_client_code.text().strip()
+        doc_type = _combo_value(self.yal_doc_type_combo)
+        if not client_code or not doc_type:
+            QMessageBox.warning(self, "Missing information",
+                                 "Livraison client and document type are both required.")
+            return
+        if self.yalidine_worker and self.yalidine_worker.isRunning():
+            return
+        since = (
+            self.yal_since_date.date().toString("yyyy-MM-dd")
+            if self.yal_use_since.isChecked() else None
+        )
+        cfg = self._collect_config()
+        self.yal_log_view.clear()
+        self.yal_run_btn.setEnabled(False)
+        self.yalidine_worker = YalidineReconcileWorker(cfg, client_code, doc_type, since)
+        self.yalidine_worker.line.connect(self.yal_log_view.appendPlainText)
+        self.yalidine_worker.finished_ok.connect(self._yalidine_reconcile_done)
+        self.yalidine_worker.finished_error.connect(self._yalidine_reconcile_failed)
+        self.yalidine_worker.start()
+
+    def _yalidine_reconcile_done(self, report):
+        self.yal_run_btn.setEnabled(True)
+        v = self.yal_log_view.appendPlainText
+        v(f"\nNet gap: {report['net_gap']} "
+          "(positive = money Yalidine/NetFact2 together show is owed to "
+          "NetFact2 but isn't recorded there; negative = NetFact2 revenue "
+          "this courier integration can't account for)")
+        if report["amount_mismatch"]:
+            v(f"\n{len(report['amount_mismatch'])} amount mismatch(es):")
+            for m in report["amount_mismatch"]:
+                v(f"  order #{m['order_id']} ({m['tracking']}): Yalidine={m['yalidine_price']} "
+                  f"NetFact2={m['netfact_montant']} diff={m['diff']}")
+        if report["missing_in_netfact"]:
+            v(f"\n{len(report['missing_in_netfact'])} delivered in Yalidine, no NetFact2 document:")
+            for m in report["missing_in_netfact"]:
+                v(f"  order #{m['order_id']} ({m['tracking']}): Yalidine price={m['yalidine_price']}")
+        if report["missing_in_yalidine"]:
+            v(f"\n{len(report['missing_in_yalidine'])} NetFact2 document(s) never dispatched to Yalidine:")
+            for m in report["missing_in_yalidine"]:
+                v(f"  {m['refdoc']}: NetFact2 montant={m['netfact_montant']}")
+        if report["returned_or_failed_but_billed"]:
+            v(f"\n{len(report['returned_or_failed_but_billed'])} returned/failed at Yalidine but still billed in NetFact2:")
+            for m in report["returned_or_failed_but_billed"]:
+                v(f"  order #{m['order_id']} ({m['tracking']}): status={m['status']!r} "
+                  f"NetFact2 montant={m['netfact_montant']}")
+
+    def _yalidine_reconcile_failed(self, message):
+        self.yal_run_btn.setEnabled(True)
+        self.yal_log_view.appendPlainText(f"FAILED: {message}")
 
     # -- Schedule tab -------------------------------------------------------
     # Each mode gets its own independent Task Scheduler entry, since they

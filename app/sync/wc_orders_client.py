@@ -121,3 +121,35 @@ class WCOrdersClient:
             page += 1
         results.sort(key=lambda o: o.get("date_created", ""))
         return results
+
+    def fetch_all_orders(self, after=None):
+        """Every order regardless of status (unlike fetch_orders(), which
+        only keeps a specific wanted set) -- used by the Yalidine
+        reconciliation tool, which needs to see every order that might
+        have been dispatched to a courier, not just ones in a particular
+        WooCommerce status."""
+        results = []
+        seen_ids = set()
+        page = 1
+        per_page = 50
+        while True:
+            params = {"per_page": per_page, "page": page}
+            if after:
+                params["after"] = after
+            resp = self._request("GET", self._url("orders"), params=params)
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"WC orders fetch failed (page={page}): {resp.status_code} {resp.text[:200]}"
+                )
+            items = resp.json()
+            if not items:
+                break
+            for order in items:
+                if order["id"] not in seen_ids:
+                    seen_ids.add(order["id"])
+                    results.append(order)
+            if len(items) < per_page:
+                break
+            page += 1
+        results.sort(key=lambda o: o.get("date_created", ""))
+        return results

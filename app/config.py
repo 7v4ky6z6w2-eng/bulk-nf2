@@ -54,6 +54,12 @@ DEFAULT_CONFIG = {
         "app_password": "",
     },
 
+    # --- Yalidine (courier) API -- only needed for the Yalidine reconciliation tool
+    "yalidine": {
+        "api_id": "",
+        "api_token": "",
+    },
+
     # --- Stock sync (separate, lightweight, more-frequent than full sync) ----
     "stock_sync": {
         "enabled": False,
