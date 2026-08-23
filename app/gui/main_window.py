@@ -1,0 +1,1841 @@
+"""PySide6 GUI: configure the tool, run a sync, and toggle scheduling.
+
+Kept intentionally simple -- this is a config/preview/log tool for one
+person, not a product.
+"""
+
+import platform
+import sys
+
+from PySide6.QtCore import QDate, Qt, QThread, Signal
+from PySide6.QtWidgets import (
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+    QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+)
+
+from app import diagnostics
+from app.config import load_config, save_config
+from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
+from app.sync.name_resync import run_name_resync
+from app.sync.order_importer import fix_duplicate_orders, run_order_import
+from app.sync.profit_consolidation import list_source_document_types, run_consolidation
+from app.sync.sku_fixer import apply_sku_fixes, list_products_missing_sku
+from app.sync.stock_sync import run_stock_sync
+from app.sync.yalidine_reconcile import run_reconciliation
+
+try:
+    from app.scheduler import windows_task
+except Exception:  # pragma: no cover - only relevant off-Windows
+    windows_task = None
+
+# Statuses WooCommerce ships with out of the box; editable comboboxes still
+# accept any custom status a store adds.
+_COMMON_WC_STATUSES = [
+    "pending", "processing", "on-hold", "completed",
+    "cancelled", "refunded", "failed",
+]
+
+
+def _combo_value(combo):
+    """Reads a code out of an editable QComboBox: prefers the selected
+    item's stored data, falls back to parsing typed "CODE - Label" or
+    "CODE" text."""
+    data = combo.currentData()
+    if data:
+        return data
+    text = combo.currentText().strip()
+    if " - " in text:
+        return text.split(" - ", 1)[0].strip()
+    return text
+
+
+class SyncWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_sync(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001 - surface any failure to the GUI
+            self.finished_error.emit(str(exc))
+
+
+class NameResyncWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_name_resync(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class StockSyncWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_stock_sync(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class OrderImportWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_order_import(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class AdoptWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            from app.sync.reconcile import run_adopt
+            report = run_adopt(self.cfg, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class TestConnectionWorker(QThread):
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            result = diagnostics.test_connections(self.cfg)
+            self.finished_ok.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class TypePiecesWorker(QThread):
+    """Loads LOCAL_TYPE_PIECE codes/labels from Firebird in the background
+    so the Orders tab's dropdowns can offer real document types instead of
+    requiring the user to know/type the raw codes."""
+    finished_ok = Signal(list)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            from app.db import queries
+            from app.db.firebird_client import connect as connect_firebird
+            con = connect_firebird(self.cfg)
+            try:
+                rows = queries.fetch_type_pieces(con)
+            finally:
+                con.close()
+            self.finished_ok.emit(rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class OrderDiagnosticsWorker(QThread):
+    """Runs one of app.diagnostics' PIECE-table checks in the background --
+    the user only has NetFact2, not a raw SQL tool, so these buttons are
+    the only way for them to see this data."""
+    finished_ok = Signal(str, list)
+    finished_error = Signal(str, str)
+
+    def __init__(self, cfg, kind):
+        super().__init__()
+        self.cfg = cfg
+        self.kind = kind
+
+    def run(self):
+        try:
+            if self.kind == "annulee":
+                rows = diagnostics.check_piece_annulee(self.cfg)
+            elif self.kind == "type_coeffs":
+                rows = diagnostics.list_type_piece_coefficients(self.cfg)
+            else:
+                rows = diagnostics.check_duplicate_wc_orders(self.cfg)
+            self.finished_ok.emit(self.kind, rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(self.kind, str(exc))
+
+
+class LookupRefdocWorker(QThread):
+    finished_ok = Signal(str, list)
+    finished_error = Signal(str, str)
+
+    def __init__(self, cfg, refdoc):
+        super().__init__()
+        self.cfg = cfg
+        self.refdoc = refdoc
+
+    def run(self):
+        try:
+            rows = diagnostics.lookup_pieces_by_refdoc(self.cfg, self.refdoc)
+            self.finished_ok.emit(self.refdoc, rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(self.refdoc, str(exc))
+
+
+class SchemaLookupWorker(QThread):
+    """Runs a schema-catalog lookup (columns or triggers) for a given
+    table in the background."""
+    finished_ok = Signal(str, str, list)
+    finished_error = Signal(str, str, str)
+
+    def __init__(self, cfg, kind, table):
+        super().__init__()
+        self.cfg = cfg
+        self.kind = kind
+        self.table = table
+
+    def run(self):
+        try:
+            if self.kind == "columns":
+                rows = diagnostics.list_table_columns(self.cfg, self.table)
+            else:
+                rows = diagnostics.list_table_triggers(self.cfg, self.table)
+            self.finished_ok.emit(self.kind, self.table, rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(self.kind, self.table, str(exc))
+
+
+class FixDuplicatesWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = fix_duplicate_orders(self.cfg, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class ProfitTypesWorker(QThread):
+    """Loads the document-type breakdown (counts/totals per CODE_TYPE_PIECE)
+    for the source client -- the first, informational step of the profit
+    consolidation workflow, so the user can identify the real Bon de
+    Livraison type before consolidating anything."""
+    finished_ok = Signal(list)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, source_client_code):
+        super().__init__()
+        self.cfg = cfg
+        self.source_client_code = source_client_code
+
+    def run(self):
+        try:
+            rows = list_source_document_types(self.cfg, self.source_client_code)
+            self.finished_ok.emit(rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class ProfitConsolidationWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, source_client_code, doc_type_code, target_client_code, since, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.source_client_code = source_client_code
+        self.doc_type_code = doc_type_code
+        self.target_client_code = target_client_code
+        self.since = since
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = run_consolidation(
+                self.cfg, self.source_client_code, self.doc_type_code, self.target_client_code,
+                since=self.since, dry_run=self.dry_run, log_fn=self.line.emit,
+            )
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class MissingSkuWorker(QThread):
+    """Fetches every WooCommerce product with no SKU set -- the reason
+    some deliveries never made it into a Firebird PIECE (order_importer.py
+    can't match a line to an ARTICLE without a SKU)."""
+    finished_ok = Signal(list)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def run(self):
+        try:
+            rows = list_products_missing_sku(self.cfg)
+            self.finished_ok.emit(rows)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class ApplySkuFixesWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, fixes, dry_run):
+        super().__init__()
+        self.cfg = cfg
+        self.fixes = fixes
+        self.dry_run = dry_run
+
+    def run(self):
+        try:
+            report = apply_sku_fixes(self.cfg, self.fixes, dry_run=self.dry_run, log_fn=self.line.emit)
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class YalidineReconcileWorker(QThread):
+    line = Signal(str)
+    finished_ok = Signal(dict)
+    finished_error = Signal(str)
+
+    def __init__(self, cfg, client_code, doc_type_code, since):
+        super().__init__()
+        self.cfg = cfg
+        self.client_code = client_code
+        self.doc_type_code = doc_type_code
+        self.since = since
+
+    def run(self):
+        try:
+            report = run_reconciliation(
+                self.cfg, self.client_code, self.doc_type_code,
+                since=self.since, log_fn=self.line.emit,
+            )
+            self.finished_ok.emit(report)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_error.emit(str(exc))
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, config_path):
+        super().__init__()
+        self.config_path = config_path
+        self.cfg = load_config(config_path)
+        self.worker = None
+        self.name_resync_worker = None
+
+        self.setWindowTitle("ERP -> WooCommerce Product Sync")
+        self.resize(920, 720)
+
+        self.stock_worker = None
+        self.order_worker = None
+        self.adopt_worker = None
+        self.test_conn_worker = None
+        self.type_pieces_worker = None
+        self.type_piece_choices = []
+        self.order_diag_worker = None
+        self.fix_dup_worker = None
+        self.lookup_worker = None
+        self.schema_worker = None
+        self.profit_types_worker = None
+        self.profit_worker = None
+        self.missing_sku_worker = None
+        self.apply_sku_worker = None
+        self.yalidine_worker = None
+
+        tabs = QTabWidget()
+        tabs.addTab(self._build_config_tab(), "Configuration")
+        tabs.addTab(self._build_sync_tab(), "Sync")
+        tabs.addTab(self._build_stock_sync_tab(), "Stock Sync")
+        tabs.addTab(self._build_orders_tab(), "Orders")
+        tabs.addTab(self._build_profit_tab(), "Profit")
+        tabs.addTab(self._build_yalidine_tab(), "Yalidine")
+        tabs.addTab(self._build_schedule_tab(), "Schedule")
+        self.setCentralWidget(tabs)
+        self.statusBar().showMessage("Ready.")
+
+    # -- Configuration tab ----------------------------------------------------
+    def _build_config_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        fb_group = QGroupBox("Firebird database (.FDB)")
+        fb_form = QFormLayout(fb_group)
+        self.db_path = QLineEdit(self.cfg["firebird"]["database"])
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_fdb)
+        db_row = QHBoxLayout()
+        db_row.addWidget(self.db_path)
+        db_row.addWidget(browse_btn)
+        db_row_widget = QWidget()
+        db_row_widget.setLayout(db_row)
+        self.db_path.setToolTip("Path to the .FDB file, e.g. C:\\Prime\\DIFA2.FDB")
+        fb_form.addRow("Database path:", db_row_widget)
+        self.fb_host = QLineEdit(self.cfg["firebird"]["host"])
+        self.fb_host.setToolTip("Leave blank to open the .FDB file directly (embedded);\nset this only if connecting to a Firebird server over the network.")
+        fb_form.addRow("Host (blank = local file):", self.fb_host)
+        self.fb_port = QSpinBox()
+        self.fb_port.setRange(1, 65535)
+        self.fb_port.setValue(self.cfg["firebird"]["port"])
+        fb_form.addRow("Port:", self.fb_port)
+        self.fb_user = QLineEdit(self.cfg["firebird"]["user"])
+        fb_form.addRow("User:", self.fb_user)
+        self.fb_password = QLineEdit(self.cfg["firebird"]["password"])
+        self.fb_password.setEchoMode(QLineEdit.Password)
+        fb_form.addRow("Password:", self.fb_password)
+        self.fb_charset = QLineEdit(self.cfg["firebird"]["charset"])
+        fb_form.addRow("Charset:", self.fb_charset)
+        layout.addWidget(fb_group)
+
+        sync_group = QGroupBox("Sync scope")
+        sync_form = QFormLayout(sync_group)
+        self.filter_boutique = QCheckBox("Only sync articles whose family is BOUTIQ_VISIBLE")
+        self.filter_boutique.setChecked(self.cfg["sync"]["filter_boutique_visible"])
+        sync_form.addRow(self.filter_boutique)
+        self.price_field = QComboBox()
+        self.price_field.addItems(["PRIXVENTETTC", "PRIXVENTEHT"])
+        self.price_field.setCurrentText(self.cfg["sync"]["price_field"])
+        sync_form.addRow("Regular price source:", self.price_field)
+        self.sync_images = QCheckBox("Use ARTICLE.PHOTO when it's a real image")
+        self.sync_images.setChecked(self.cfg["sync"]["sync_images"])
+        sync_form.addRow(self.sync_images)
+        self.auto_sale_on_price_drop = QCheckBox(
+            "If a price drops in NetFact2, show it as a WooCommerce sale price"
+        )
+        self.auto_sale_on_price_drop.setChecked(self.cfg["sync"]["auto_sale_on_price_drop"])
+        self.auto_sale_on_price_drop.setToolTip(
+            "Keeps the last-synced (higher) price as the WooCommerce regular\n"
+            "price and pushes the new, lower NetFact2 price as sale_price --\n"
+            "shows as a strikethrough discount instead of just changing the\n"
+            "base price. When the price rises back up, it becomes the new\n"
+            "regular price and the sale is cleared. An explicit ACTIVEPROMO\n"
+            "in NetFact2 always takes priority over this."
+        )
+        sync_form.addRow(self.auto_sale_on_price_drop)
+        layout.addWidget(sync_group)
+
+        wc_group = QGroupBox("WooCommerce REST API")
+        wc_form = QFormLayout(wc_group)
+        self.wc_url = QLineEdit(self.cfg["woocommerce"]["site_url"])
+        self.wc_url.setToolTip("e.g. https://your-store.com")
+        wc_form.addRow("Site URL:", self.wc_url)
+        self.wc_key = QLineEdit(self.cfg["woocommerce"]["consumer_key"])
+        wc_form.addRow("Consumer key:", self.wc_key)
+        self.wc_secret = QLineEdit(self.cfg["woocommerce"]["consumer_secret"])
+        self.wc_secret.setEchoMode(QLineEdit.Password)
+        wc_form.addRow("Consumer secret:", self.wc_secret)
+        wc_form.addRow(QLabel(
+            "WooCommerce -> Settings -> Advanced -> REST API -> Add key\n"
+            "(needs Read/Write permissions)."
+        ))
+        layout.addWidget(wc_group)
+
+        wp_group = QGroupBox("WordPress (only needed to upload ARTICLE.PHOTO images)")
+        wp_form = QFormLayout(wp_group)
+        self.wp_user = QLineEdit(self.cfg["wordpress"]["username"])
+        wp_form.addRow("Username:", self.wp_user)
+        self.wp_pass = QLineEdit(self.cfg["wordpress"]["app_password"])
+        self.wp_pass.setEchoMode(QLineEdit.Password)
+        self.wp_pass.setToolTip("Users -> Profile -> Application Passwords -> New (not your login password).")
+        wp_form.addRow("Application password:", self.wp_pass)
+        layout.addWidget(wp_group)
+
+        yal_group = QGroupBox("Yalidine API (only needed for the Yalidine reconciliation tool)")
+        yal_form = QFormLayout(yal_group)
+        self.yal_api_id = QLineEdit(self.cfg["yalidine"]["api_id"])
+        yal_form.addRow("API ID:", self.yal_api_id)
+        self.yal_api_token = QLineEdit(self.cfg["yalidine"]["api_token"])
+        self.yal_api_token.setEchoMode(QLineEdit.Password)
+        yal_form.addRow("API Token:", self.yal_api_token)
+        yal_form.addRow(QLabel("Yalidine dashboard -> Settings -> API -> Generate."))
+        layout.addWidget(yal_group)
+
+        test_group = QGroupBox("Test connections")
+        test_layout = QVBoxLayout(test_group)
+        self.test_conn_btn = QPushButton("Test connections now")
+        self.test_conn_btn.clicked.connect(self._start_test_connection)
+        test_layout.addWidget(self.test_conn_btn)
+        self.fb_status_label = QLabel("Firebird: not tested yet.")
+        self.wc_status_label = QLabel("WooCommerce: not tested yet.")
+        test_layout.addWidget(self.fb_status_label)
+        test_layout.addWidget(self.wc_status_label)
+        layout.addWidget(test_group)
+
+        save_btn = QPushButton("Save configuration")
+        save_btn.clicked.connect(self._save_config)
+        layout.addWidget(save_btn)
+        layout.addStretch()
+        return widget
+
+    def _start_test_connection(self):
+        if self.test_conn_worker and self.test_conn_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.test_conn_btn.setEnabled(False)
+        self.fb_status_label.setText("Firebird: testing...")
+        self.wc_status_label.setText("WooCommerce: testing...")
+        self.test_conn_worker = TestConnectionWorker(cfg)
+        self.test_conn_worker.finished_ok.connect(self._test_connection_done)
+        self.test_conn_worker.finished_error.connect(self._test_connection_failed)
+        self.test_conn_worker.start()
+
+    def _test_connection_done(self, result):
+        self.test_conn_btn.setEnabled(True)
+        fb, wc = result["firebird"], result["woocommerce"]
+        self.fb_status_label.setText(f"Firebird: {'OK' if fb['ok'] else 'FAILED'} -- {fb['message']}")
+        self.fb_status_label.setStyleSheet(f"color: {'green' if fb['ok'] else 'red'};")
+        self.wc_status_label.setText(f"WooCommerce: {'OK' if wc['ok'] else 'FAILED'} -- {wc['message']}")
+        self.wc_status_label.setStyleSheet(f"color: {'green' if wc['ok'] else 'red'};")
+
+    def _test_connection_failed(self, message):
+        self.test_conn_btn.setEnabled(True)
+        self.fb_status_label.setText(f"Firebird: FAILED -- {message}")
+        self.fb_status_label.setStyleSheet("color: red;")
+        self.wc_status_label.setText("WooCommerce: not tested (unexpected error above).")
+
+    def _browse_fdb(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select .FDB file", "", "Firebird DB (*.fdb *.FDB)")
+        if path:
+            self.db_path.setText(path)
+
+    def _collect_config(self):
+        self.cfg["firebird"]["database"] = self.db_path.text()
+        self.cfg["firebird"]["host"] = self.fb_host.text()
+        self.cfg["firebird"]["port"] = self.fb_port.value()
+        self.cfg["firebird"]["user"] = self.fb_user.text()
+        self.cfg["firebird"]["password"] = self.fb_password.text()
+        self.cfg["firebird"]["charset"] = self.fb_charset.text()
+        self.cfg["sync"]["filter_boutique_visible"] = self.filter_boutique.isChecked()
+        self.cfg["sync"]["price_field"] = self.price_field.currentText()
+        self.cfg["sync"]["sync_images"] = self.sync_images.isChecked()
+        self.cfg["sync"]["auto_sale_on_price_drop"] = self.auto_sale_on_price_drop.isChecked()
+        self.cfg["woocommerce"]["site_url"] = self.wc_url.text()
+        self.cfg["woocommerce"]["consumer_key"] = self.wc_key.text()
+        self.cfg["woocommerce"]["consumer_secret"] = self.wc_secret.text()
+        self.cfg["wordpress"]["username"] = self.wp_user.text()
+        self.cfg["wordpress"]["app_password"] = self.wp_pass.text()
+        self.cfg["yalidine"]["api_id"] = self.yal_api_id.text()
+        self.cfg["yalidine"]["api_token"] = self.yal_api_token.text()
+        return self.cfg
+
+    def _save_config(self):
+        cfg = self._collect_config()
+        save_config(self.config_path, cfg)
+        self.statusBar().showMessage(f"Configuration saved to {self.config_path}", 5000)
+        QMessageBox.information(self, "Saved", f"Configuration saved to {self.config_path}")
+
+    # -- Sync tab ---------------------------------------------------------------
+    def _build_sync_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        btn_row = QHBoxLayout()
+        self.dry_run_btn = QPushButton("Dry run (preview only)")
+        self.dry_run_btn.clicked.connect(lambda: self._start_sync(dry_run=True))
+        self.sync_btn = QPushButton("Sync now")
+        self.sync_btn.clicked.connect(lambda: self._start_sync(dry_run=False))
+        btn_row.addWidget(self.dry_run_btn)
+        btn_row.addWidget(self.sync_btn)
+        layout.addLayout(btn_row)
+
+        resync_group = QGroupBox("Fix names")
+        resync_layout = QVBoxLayout(resync_group)
+        resync_layout.addWidget(QLabel(
+            "Normal syncs never touch a product's name once it exists in\n"
+            "WooCommerce (so names edited by hand on the site stick). Use this\n"
+            "to force-reset every already-synced product's name back to the\n"
+            "raw ERP designation -- e.g. to undo the old name-cleaning step\n"
+            "that stripped reference/packaging info from some names."
+        ))
+        resync_btn_row = QHBoxLayout()
+        self.name_resync_preview_btn = QPushButton("Preview name resync (dry run)")
+        self.name_resync_preview_btn.clicked.connect(lambda: self._start_name_resync(dry_run=True))
+        self.name_resync_btn = QPushButton("Resync all names now")
+        self.name_resync_btn.setToolTip("Writes to WooCommerce immediately for every already-synced product.")
+        self.name_resync_btn.clicked.connect(self._confirm_name_resync)
+        resync_btn_row.addWidget(self.name_resync_preview_btn)
+        resync_btn_row.addWidget(self.name_resync_btn)
+        resync_layout.addLayout(resync_btn_row)
+        layout.addWidget(resync_group)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        layout.addWidget(self.log_view)
+        return widget
+
+    def _start_sync(self, dry_run):
+        if self.worker and self.worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.log_view.clear()
+        self.dry_run_btn.setEnabled(False)
+        self.sync_btn.setEnabled(False)
+        self.worker = SyncWorker(cfg, dry_run)
+        self.worker.line.connect(self.log_view.appendPlainText)
+        self.worker.finished_ok.connect(self._sync_done)
+        self.worker.finished_error.connect(self._sync_failed)
+        self.worker.start()
+
+    # Catalogs can run into the thousands of articles -- capped so the log
+    # view (and Qt) stay responsive; the full list still goes to disk.
+    PAYLOAD_PREVIEW_LIMIT = 200
+
+    def _sync_done(self, report):
+        self.dry_run_btn.setEnabled(True)
+        self.sync_btn.setEnabled(True)
+        for line in render_report_lines(report, payload_limit=self.PAYLOAD_PREVIEW_LIMIT):
+            self.log_view.appendPlainText(line)
+        written_path = write_dry_run_payloads(report)
+        if written_path:
+            self.log_view.appendPlainText(
+                f"\nFull list of {len(report['payloads'])} payload(s) written to {written_path}"
+            )
+
+    def _sync_failed(self, message):
+        self.dry_run_btn.setEnabled(True)
+        self.sync_btn.setEnabled(True)
+        self.log_view.appendPlainText(f"FAILED: {message}")
+
+    def _confirm_name_resync(self):
+        answer = QMessageBox.question(
+            self, "Resync all names?",
+            "This will overwrite the name of every already-synced product in "
+            "WooCommerce with the raw ERP designation -- including any names "
+            "you've edited by hand on the site.\n\n"
+            "Run 'Preview name resync (dry run)' first if you haven't already, "
+            "to see what will change.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_name_resync(dry_run=False)
+
+    def _start_name_resync(self, dry_run):
+        if self.name_resync_worker and self.name_resync_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.name_resync_preview_btn.setEnabled(False)
+        self.name_resync_btn.setEnabled(False)
+        self.log_view.appendPlainText(
+            "Previewing name resync..." if dry_run else "Resyncing all names..."
+        )
+        self.name_resync_worker = NameResyncWorker(cfg, dry_run)
+        self.name_resync_worker.line.connect(self.log_view.appendPlainText)
+        self.name_resync_worker.finished_ok.connect(self._name_resync_done)
+        self.name_resync_worker.finished_error.connect(self._name_resync_failed)
+        self.name_resync_worker.start()
+
+    def _name_resync_done(self, report):
+        self.name_resync_preview_btn.setEnabled(True)
+        self.name_resync_btn.setEnabled(True)
+        if report.get("payloads"):
+            for item in report["payloads"][:self.PAYLOAD_PREVIEW_LIMIT]:
+                self.log_view.appendPlainText(f"  {item['ref_art']}: name -> {item['name']!r}")
+            if len(report["payloads"]) > self.PAYLOAD_PREVIEW_LIMIT:
+                self.log_view.appendPlainText(
+                    f"  ... and {len(report['payloads']) - self.PAYLOAD_PREVIEW_LIMIT} more"
+                )
+        self.log_view.appendPlainText(
+            f"updated={len(report['updated'])} not_tracked={report['not_tracked']} "
+            f"errors={len(report['errors'])}"
+        )
+        if report.get("errors"):
+            self.log_view.appendPlainText(f"Errors: {report['errors']}")
+
+    def _name_resync_failed(self, message):
+        self.name_resync_preview_btn.setEnabled(True)
+        self.name_resync_btn.setEnabled(True)
+        self.log_view.appendPlainText(f"Name resync FAILED: {message}")
+
+    # -- Stock Sync tab -------------------------------------------------------
+    def _build_stock_sync_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        adopt_group = QGroupBox("First-time setup: adopt existing products")
+        adopt_layout = QVBoxLayout(adopt_group)
+        adopt_layout.addWidget(QLabel(
+            "Run this ONCE if your store already has products (e.g. made by an\n"
+            "older tool). It matches existing WooCommerce products to your\n"
+            "articles by SKU so stock sync knows their ids. If a plugin hides\n"
+            "products without images, disable it (or set it to frontend-only)\n"
+            "just while this runs, so every product is visible to the API."
+        ))
+        self.adopt_btn = QPushButton("Adopt existing products now")
+        self.adopt_btn.clicked.connect(self._start_adopt)
+        adopt_layout.addWidget(self.adopt_btn)
+        layout.addWidget(adopt_group)
+
+        opts_group = QGroupBox("Options")
+        opts_form = QFormLayout(opts_group)
+        self.stock_zero_missing = QCheckBox(
+            "Zero out WooCommerce products whose SKU isn't found in the DB at all"
+        )
+        self.stock_zero_missing.setChecked(self.cfg["stock_sync"]["zero_missing_in_db"])
+        opts_form.addRow(self.stock_zero_missing)
+        layout.addWidget(opts_group)
+
+        btn_row = QHBoxLayout()
+        self.stock_dry_run_btn = QPushButton("Dry run (preview only)")
+        self.stock_dry_run_btn.clicked.connect(lambda: self._start_stock_sync(dry_run=True))
+        self.stock_sync_btn = QPushButton("Sync stock now")
+        self.stock_sync_btn.clicked.connect(lambda: self._start_stock_sync(dry_run=False))
+        btn_row.addWidget(self.stock_dry_run_btn)
+        btn_row.addWidget(self.stock_sync_btn)
+        layout.addLayout(btn_row)
+
+        self.stock_log_view = QPlainTextEdit()
+        self.stock_log_view.setReadOnly(True)
+        layout.addWidget(self.stock_log_view)
+        return widget
+
+    def _start_stock_sync(self, dry_run):
+        if self.stock_worker and self.stock_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        cfg["stock_sync"]["zero_missing_in_db"] = self.stock_zero_missing.isChecked()
+        self.stock_log_view.clear()
+        self.stock_dry_run_btn.setEnabled(False)
+        self.stock_sync_btn.setEnabled(False)
+        self.stock_worker = StockSyncWorker(cfg, dry_run)
+        self.stock_worker.line.connect(self.stock_log_view.appendPlainText)
+        self.stock_worker.finished_ok.connect(self._stock_sync_done)
+        self.stock_worker.finished_error.connect(self._stock_sync_failed)
+        self.stock_worker.start()
+
+    def _stock_sync_done(self, report):
+        self.stock_dry_run_btn.setEnabled(True)
+        self.stock_sync_btn.setEnabled(True)
+        if report.get("updates_preview"):
+            self.stock_log_view.appendPlainText("--- Would update ---")
+            for u in report["updates_preview"][:self.PAYLOAD_PREVIEW_LIMIT]:
+                self.stock_log_view.appendPlainText(f"{u['sku']}: stock_quantity={u['stock_quantity']}")
+        if report.get("errors"):
+            self.stock_log_view.appendPlainText(f"Errors: {report['errors']}")
+
+    def _stock_sync_failed(self, message):
+        self.stock_dry_run_btn.setEnabled(True)
+        self.stock_sync_btn.setEnabled(True)
+        self.stock_log_view.appendPlainText(f"FAILED: {message}")
+
+    def _start_adopt(self):
+        if self.adopt_worker and self.adopt_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.stock_log_view.clear()
+        self.adopt_btn.setEnabled(False)
+        self.adopt_worker = AdoptWorker(cfg)
+        self.adopt_worker.line.connect(self.stock_log_view.appendPlainText)
+        self.adopt_worker.finished_ok.connect(self._adopt_done)
+        self.adopt_worker.finished_error.connect(self._adopt_failed)
+        self.adopt_worker.start()
+
+    def _adopt_done(self, report):
+        self.adopt_btn.setEnabled(True)
+        self.stock_log_view.appendPlainText(
+            f"Adopted {report['adopted']} of {report['wc_total']} WooCommerce product(s)."
+        )
+
+    def _adopt_failed(self, message):
+        self.adopt_btn.setEnabled(True)
+        self.stock_log_view.appendPlainText(f"FAILED: {message}")
+
+    # -- Orders tab -------------------------------------------------------------
+    def _build_orders_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        oi_cfg = self.cfg["order_import"]
+
+        note = QLabel(
+            "Every run scans the FULL WooCommerce order history for the statuses\n"
+            "mapped below (or only orders on/after the date below, if set) --\n"
+            "there's no separate \"import past orders\" step. Each order is\n"
+            "written to Firebird as PIECE.REFDOC = 'WC-<order id>', and that\n"
+            "field is checked before creating anything, so re-running (or\n"
+            "scheduling this to run repeatedly) never creates a duplicate\n"
+            "document for an order that was already imported."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        cfg_group = QGroupBox("WooCommerce order -> Firebird document mapping")
+        form = QFormLayout(cfg_group)
+        self.order_client_code = QLineEdit(oi_cfg["client_code"])
+        self.order_client_code.setToolTip("TIERS.CODE_TIERS the generated PIECE is billed to.")
+        form.addRow("Client CODE_TIERS:", self.order_client_code)
+        self.order_code_depot = QLineEdit(oi_cfg["code_depot"])
+        form.addRow("Default CODE_DEPOT:", self.order_code_depot)
+        self.order_username = QLineEdit(oi_cfg["username"])
+        form.addRow("Username stamped on PIECE:", self.order_username)
+        self.order_on_missing_sku = QComboBox()
+        self.order_on_missing_sku.addItems(["skip_line", "skip_order"])
+        self.order_on_missing_sku.setCurrentText(oi_cfg["on_missing_sku"])
+        self.order_on_missing_sku.setToolTip(
+            "skip_line: drop just the unmatched line, import the rest of the order.\n"
+            "skip_order: if any line's SKU isn't found in ARTICLE, skip the whole order."
+        )
+        form.addRow("On missing SKU:", self.order_on_missing_sku)
+        self.order_cancel_statuses = QLineEdit(", ".join(oi_cfg.get("cancel_statuses") or []))
+        self.order_cancel_statuses.setPlaceholderText("e.g. cancelled, refunded")
+        self.order_cancel_statuses.setToolTip(
+            "WooCommerce statuses that mean 'annul the document(s) already\n"
+            "created for this order' instead of creating a new one -- e.g. an\n"
+            "order that went processing (document created) then got cancelled.\n"
+            "Comma-separated. Leave empty to disable (cancellations are ignored)."
+        )
+        form.addRow("Cancel statuses:", self.order_cancel_statuses)
+
+        start_date_row = QHBoxLayout()
+        self.order_use_start_date = QCheckBox("Only import orders created on/after:")
+        self.order_start_date = QDateEdit()
+        self.order_start_date.setCalendarPopup(True)
+        self.order_start_date.setDisplayFormat("yyyy-MM-dd")
+        configured_start = (oi_cfg.get("start_date") or "").strip()
+        if configured_start:
+            self.order_use_start_date.setChecked(True)
+            qd = QDate.fromString(configured_start, "yyyy-MM-dd")
+            self.order_start_date.setDate(qd if qd.isValid() else QDate.currentDate())
+        else:
+            self.order_use_start_date.setChecked(False)
+            self.order_start_date.setDate(QDate.currentDate().addMonths(-1))
+        self.order_start_date.setEnabled(self.order_use_start_date.isChecked())
+        self.order_use_start_date.toggled.connect(self.order_start_date.setEnabled)
+        self.order_use_start_date.setToolTip(
+            "Skips fetching/importing anything created before this date.\n"
+            "Useful to keep a large order history fast to scan each run, or\n"
+            "to deliberately leave old orders out. Unchecked = full history."
+        )
+        start_date_row.addWidget(self.order_use_start_date)
+        start_date_row.addWidget(self.order_start_date)
+        start_date_row.addStretch()
+        form.addRow(start_date_row)
+        layout.addWidget(cfg_group)
+
+        types_row = QHBoxLayout()
+        self.refresh_types_btn = QPushButton("Load document types from database")
+        self.refresh_types_btn.setToolTip(
+            "Connects to Firebird and reads LOCAL_TYPE_PIECE so the dropdowns\n"
+            "below show real document types (e.g. PC_VE_COM = Commande de vente)\n"
+            "instead of requiring you to know the raw codes."
+        )
+        self.refresh_types_btn.clicked.connect(self._load_type_pieces)
+        types_row.addWidget(self.refresh_types_btn)
+        types_row.addStretch()
+        layout.addLayout(types_row)
+
+        mapping_group = QGroupBox("Status mapping -- which Firebird document each WooCommerce order status creates")
+        mapping_layout = QVBoxLayout(mapping_group)
+        mapping_layout.addWidget(QLabel(
+            "Example: WooCommerce status \"processing\" -> document type "
+            "\"PC_VE_COM\" (Commande de vente)."
+        ))
+        self.status_table = QTableWidget(0, 2)
+        self.status_table.setHorizontalHeaderLabels(["WooCommerce order status", "Firebird document type"])
+        self.status_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.status_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        mapping_layout.addWidget(self.status_table)
+        status_btn_row = QHBoxLayout()
+        add_status_btn = QPushButton("+ Add row")
+        add_status_btn.clicked.connect(lambda: self._add_status_mapping_row())
+        remove_status_btn = QPushButton("- Remove selected row")
+        remove_status_btn.clicked.connect(lambda: self._remove_selected_row(self.status_table))
+        status_btn_row.addWidget(add_status_btn)
+        status_btn_row.addWidget(remove_status_btn)
+        status_btn_row.addStretch()
+        mapping_layout.addLayout(status_btn_row)
+        layout.addWidget(mapping_group)
+        for wc_status, code in oi_cfg["status_mapping"].items():
+            self._add_status_mapping_row(wc_status, code)
+
+        transform_group = QGroupBox("Transformation linking -- link a created document back to an earlier one")
+        transform_layout = QVBoxLayout(transform_group)
+        transform_layout.addWidget(QLabel(
+            "Example: a \"PC_VE_B\" (Bon de livraison) created for status "
+            "\"completed\" links back to the \"PC_VE_COM\" (Commande de vente)\n"
+            "created earlier for the same order, the way turning a commande "
+            "into a delivery note would in the ERP."
+        ))
+        self.transform_table = QTableWidget(0, 2)
+        self.transform_table.setHorizontalHeaderLabels(["Newly created document type", "Links back to source document type"])
+        self.transform_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.transform_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        transform_layout.addWidget(self.transform_table)
+        transform_btn_row = QHBoxLayout()
+        add_transform_btn = QPushButton("+ Add row")
+        add_transform_btn.clicked.connect(lambda: self._add_transform_row())
+        remove_transform_btn = QPushButton("- Remove selected row")
+        remove_transform_btn.clicked.connect(lambda: self._remove_selected_row(self.transform_table))
+        transform_btn_row.addWidget(add_transform_btn)
+        transform_btn_row.addWidget(remove_transform_btn)
+        transform_btn_row.addStretch()
+        transform_layout.addLayout(transform_btn_row)
+        layout.addWidget(transform_group)
+        for target, source in oi_cfg["transformation"].items():
+            self._add_transform_row(target, source)
+
+        diag_group = QGroupBox("Diagnostics (results print to the log below)")
+        diag_layout = QVBoxLayout(diag_group)
+        diag_layout.addWidget(QLabel(
+            "These connect to Firebird and print raw results here -- useful if\n"
+            "you only have NetFact2 and can't run a SQL query yourself."
+        ))
+        diag_btn_row = QHBoxLayout()
+        self.check_annulee_btn = QPushButton("Check ANNULEE values")
+        self.check_annulee_btn.setToolTip(
+            "Compares PIECE.ANNULEE on documents you created manually in NetFact2\n"
+            "vs. the ones this tool imported (REFDOC starting with 'WC-'). Tells\n"
+            "us whether the tool is writing the right 'not cancelled' value."
+        )
+        self.check_annulee_btn.clicked.connect(self._start_annulee_check)
+        self.check_duplicates_btn = QPushButton("Check for duplicate WC imports")
+        self.check_duplicates_btn.setToolTip(
+            "Finds orders that ended up with more than one PIECE for the same\n"
+            "order (evidence of the now-fixed duplicate-reimport bug)."
+        )
+        self.check_duplicates_btn.clicked.connect(self._start_duplicate_check)
+        self.check_coeffs_btn = QPushButton("List document type coefficients")
+        self.check_coeffs_btn.setToolTip(
+            "Shows LOCAL_TYPE_PIECE.COEFF_PIECE/COEFF_PIECE_TR per document\n"
+            "type -- the balance (solde) calculation multiplies these into\n"
+            "each document's contribution. Needed to know the right sign\n"
+            "before this tool starts setting PIECE.COEFF/COEFF_TR itself."
+        )
+        self.check_coeffs_btn.clicked.connect(self._start_coeffs_check)
+        diag_btn_row.addWidget(self.check_annulee_btn)
+        diag_btn_row.addWidget(self.check_duplicates_btn)
+        diag_btn_row.addWidget(self.check_coeffs_btn)
+        diag_btn_row.addStretch()
+        diag_layout.addLayout(diag_btn_row)
+
+        lookup_row = QHBoxLayout()
+        self.lookup_refdoc_edit = QLineEdit()
+        self.lookup_refdoc_edit.setPlaceholderText("e.g. WC-18226")
+        self.lookup_refdoc_btn = QPushButton("Look up documents by REFDOC")
+        self.lookup_refdoc_btn.setToolTip(
+            "Shows every PIECE document with this exact REFDOC (NOPIECE, type,\n"
+            "date, amount, ANNULEE) -- cross-reference against what NetFact2's\n"
+            "grid shows for the same REFDOC column to check a specific order."
+        )
+        self.lookup_refdoc_btn.clicked.connect(self._start_lookup_refdoc)
+        lookup_row.addWidget(self.lookup_refdoc_edit)
+        lookup_row.addWidget(self.lookup_refdoc_btn)
+        diag_layout.addLayout(lookup_row)
+
+        schema_row = QHBoxLayout()
+        self.schema_table_edit = QLineEdit("PIECE")
+        self.list_columns_btn = QPushButton("List columns")
+        self.list_columns_btn.setToolTip(
+            "Shows every column of this table straight from Firebird's system\n"
+            "catalog -- confirms exact field names before we write SQL that\n"
+            "references them (e.g. Remise/TVA1-3/Espece/Timbre/Montant Verse)."
+        )
+        self.list_columns_btn.clicked.connect(self._start_list_columns)
+        self.list_triggers_btn = QPushButton("List triggers")
+        self.list_triggers_btn.setToolTip(
+            "Shows every Firebird trigger on this table, with its timing\n"
+            "(BEFORE/AFTER INSERT/UPDATE/DELETE) and full source. Checks\n"
+            "whether balance recalculation only fires on UPDATE, not INSERT."
+        )
+        self.list_triggers_btn.clicked.connect(self._start_list_triggers)
+        schema_row.addWidget(QLabel("Table:"))
+        schema_row.addWidget(self.schema_table_edit)
+        schema_row.addWidget(self.list_columns_btn)
+        schema_row.addWidget(self.list_triggers_btn)
+        diag_layout.addLayout(schema_row)
+
+        diag_layout.addWidget(QLabel(
+            "\nFix duplicates: for any order with more than one document (even if\n"
+            "you already cancelled one by hand), keeps one -- an active one if\n"
+            "any, else the earliest -- and DELETES the rest (their ITEM rows,\n"
+            "then the PIECE row itself). This is a real deletion -- preview first."
+        ))
+        fix_btn_row = QHBoxLayout()
+        self.preview_fix_btn = QPushButton("Preview duplicate fix (dry run)")
+        self.preview_fix_btn.clicked.connect(lambda: self._start_fix_duplicates(dry_run=True))
+        self.fix_duplicates_btn = QPushButton("Fix duplicates now")
+        self.fix_duplicates_btn.setToolTip(
+            "Permanently deletes from Firebird. Preview first to see exactly\n"
+            "which documents will be deleted before running this for real."
+        )
+        self.fix_duplicates_btn.clicked.connect(lambda: self._confirm_fix_duplicates())
+        fix_btn_row.addWidget(self.preview_fix_btn)
+        fix_btn_row.addWidget(self.fix_duplicates_btn)
+        fix_btn_row.addStretch()
+        diag_layout.addLayout(fix_btn_row)
+        layout.addWidget(diag_group)
+
+        sku_group = QGroupBox("Products missing a SKU (why some deliveries never made it into NetFact2)")
+        sku_layout = QVBoxLayout(sku_group)
+        sku_layout.addWidget(QLabel(
+            "A WooCommerce product with no SKU can't be matched to a Firebird\n"
+            "ARTICLE row, so its order lines get skipped on import. Find these\n"
+            "products, type in the REF_ART each one should have (checked\n"
+            "against NetFact2 before anything is written), then apply.\n\n"
+            "Note: an order whose missing-SKU line was already skipped (not\n"
+            "the whole order) already has its document in Firebird without\n"
+            "that line -- fixing the SKU here won't add the missing line to\n"
+            "an already-imported document; that still needs adding by hand."
+        ))
+        sku_btn_row = QHBoxLayout()
+        self.find_missing_sku_btn = QPushButton("Find products missing SKU")
+        self.find_missing_sku_btn.clicked.connect(self._start_find_missing_sku)
+        sku_btn_row.addWidget(self.find_missing_sku_btn)
+        sku_btn_row.addStretch()
+        sku_layout.addLayout(sku_btn_row)
+
+        self.missing_sku_table = QTableWidget(0, 3)
+        self.missing_sku_table.setHorizontalHeaderLabels(
+            ["WC Product ID", "Product name", "REF_ART in NetFact2"]
+        )
+        self.missing_sku_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        sku_layout.addWidget(self.missing_sku_table)
+
+        sku_apply_row = QHBoxLayout()
+        self.preview_sku_fix_btn = QPushButton("Preview fix (validate against NetFact2)")
+        self.preview_sku_fix_btn.clicked.connect(lambda: self._start_apply_sku_fixes(dry_run=True))
+        self.apply_sku_fix_btn = QPushButton("Apply SKU fixes")
+        self.apply_sku_fix_btn.setToolTip(
+            "Writes the SKU to WooCommerce for every row with a REF_ART typed "
+            "in and confirmed to exist in NetFact2."
+        )
+        self.apply_sku_fix_btn.clicked.connect(self._confirm_apply_sku_fixes)
+        sku_apply_row.addWidget(self.preview_sku_fix_btn)
+        sku_apply_row.addWidget(self.apply_sku_fix_btn)
+        sku_apply_row.addStretch()
+        sku_layout.addLayout(sku_apply_row)
+        layout.addWidget(sku_group)
+
+        btn_row = QHBoxLayout()
+        self.order_dry_run_btn = QPushButton("Dry run (preview only)")
+        self.order_dry_run_btn.clicked.connect(lambda: self._start_order_import(dry_run=True))
+        self.order_import_btn = QPushButton("Import orders now")
+        self.order_import_btn.clicked.connect(lambda: self._start_order_import(dry_run=False))
+        btn_row.addWidget(self.order_dry_run_btn)
+        btn_row.addWidget(self.order_import_btn)
+        layout.addLayout(btn_row)
+
+        self.order_log_view = QPlainTextEdit()
+        self.order_log_view.setReadOnly(True)
+        layout.addWidget(self.order_log_view)
+        return widget
+
+    def _type_piece_combo(self, current_code=""):
+        combo = QComboBox()
+        combo.setEditable(True)
+        for choice in self.type_piece_choices:
+            combo.addItem(f"{choice['code']} - {choice['label']}", choice["code"])
+        if current_code:
+            idx = combo.findData(current_code)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            else:
+                combo.setEditText(current_code)
+        return combo
+
+    def _add_status_mapping_row(self, wc_status="", code_type_piece=""):
+        row = self.status_table.rowCount()
+        self.status_table.insertRow(row)
+        status_combo = QComboBox()
+        status_combo.setEditable(True)
+        status_combo.addItems(_COMMON_WC_STATUSES)
+        if wc_status:
+            status_combo.setCurrentText(wc_status)
+        else:
+            status_combo.setCurrentText("")
+        self.status_table.setCellWidget(row, 0, status_combo)
+        self.status_table.setCellWidget(row, 1, self._type_piece_combo(code_type_piece))
+
+    def _add_transform_row(self, target="", source=""):
+        row = self.transform_table.rowCount()
+        self.transform_table.insertRow(row)
+        self.transform_table.setCellWidget(row, 0, self._type_piece_combo(target))
+        self.transform_table.setCellWidget(row, 1, self._type_piece_combo(source))
+
+    def _remove_selected_row(self, table):
+        rows = sorted({idx.row() for idx in table.selectedIndexes()}, reverse=True)
+        for row in rows:
+            table.removeRow(row)
+
+    def _load_type_pieces(self):
+        if self.type_pieces_worker and self.type_pieces_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.refresh_types_btn.setEnabled(False)
+        self.refresh_types_btn.setText("Loading...")
+        self.type_pieces_worker = TypePiecesWorker(cfg)
+        self.type_pieces_worker.finished_ok.connect(self._type_pieces_loaded)
+        self.type_pieces_worker.finished_error.connect(self._type_pieces_failed)
+        self.type_pieces_worker.start()
+
+    def _type_pieces_loaded(self, choices):
+        self.type_piece_choices = choices
+        self.refresh_types_btn.setEnabled(True)
+        self.refresh_types_btn.setText("Load document types from database")
+        for table, columns in ((self.status_table, [1]), (self.transform_table, [0, 1])):
+            for row in range(table.rowCount()):
+                for col in columns:
+                    old_combo = table.cellWidget(row, col)
+                    current = _combo_value(old_combo) if old_combo else ""
+                    table.setCellWidget(row, col, self._type_piece_combo(current))
+        self.statusBar().showMessage(f"Loaded {len(choices)} document type(s) from LOCAL_TYPE_PIECE.", 5000)
+
+    def _type_pieces_failed(self, message):
+        self.refresh_types_btn.setEnabled(True)
+        self.refresh_types_btn.setText("Load document types from database")
+        QMessageBox.warning(self, "Could not load document types", message)
+
+    def _start_annulee_check(self):
+        self._start_order_diagnostic("annulee")
+
+    def _start_duplicate_check(self):
+        self._start_order_diagnostic("duplicates")
+
+    def _start_coeffs_check(self):
+        self._start_order_diagnostic("type_coeffs")
+
+    def _start_order_diagnostic(self, kind):
+        if self.order_diag_worker and self.order_diag_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.check_annulee_btn.setEnabled(False)
+        self.check_duplicates_btn.setEnabled(False)
+        self.check_coeffs_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(f"Running '{kind}' check...")
+        self.order_diag_worker = OrderDiagnosticsWorker(cfg, kind)
+        self.order_diag_worker.finished_ok.connect(self._order_diagnostic_done)
+        self.order_diag_worker.finished_error.connect(self._order_diagnostic_failed)
+        self.order_diag_worker.start()
+
+    def _order_diagnostic_done(self, kind, rows):
+        self.check_annulee_btn.setEnabled(True)
+        self.check_duplicates_btn.setEnabled(True)
+        self.check_coeffs_btn.setEnabled(True)
+        if kind == "annulee":
+            self.order_log_view.appendPlainText("--- ANNULEE values: manually-created vs. WC-imported ---")
+            if not rows:
+                self.order_log_view.appendPlainText("  PIECE has no rows.")
+            for source, value, count in rows:
+                self.order_log_view.appendPlainText(f"  {source}: ANNULEE={value!r} ({count} document(s))")
+        elif kind == "type_coeffs":
+            self.order_log_view.appendPlainText("--- LOCAL_TYPE_PIECE coefficients ---")
+            if not rows:
+                self.order_log_view.appendPlainText("  LOCAL_TYPE_PIECE has no rows.")
+            for code, intitule, coeff_piece, coeff_piece_tr, coeff_item, coeff_item_tr in rows:
+                self.order_log_view.appendPlainText(
+                    f"  {code} ({intitule}): COEFF_PIECE={coeff_piece} COEFF_PIECE_TR={coeff_piece_tr} "
+                    f"COEFF_ITEM={coeff_item} COEFF_ITEM_TR={coeff_item_tr}"
+                )
+        else:
+            self.order_log_view.appendPlainText("--- Duplicate WC-imported documents ---")
+            if not rows:
+                self.order_log_view.appendPlainText("  None found.")
+            for refdoc, doc_type, count in rows:
+                self.order_log_view.appendPlainText(f"  {refdoc} / {doc_type}: {count} copies")
+
+    def _order_diagnostic_failed(self, kind, message):
+        self.check_annulee_btn.setEnabled(True)
+        self.check_duplicates_btn.setEnabled(True)
+        self.check_coeffs_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"'{kind}' check FAILED: {message}")
+
+    def _start_lookup_refdoc(self):
+        refdoc = self.lookup_refdoc_edit.text().strip()
+        if not refdoc:
+            return
+        if self.lookup_worker and self.lookup_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.lookup_refdoc_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(f"Looking up {refdoc}...")
+        self.lookup_worker = LookupRefdocWorker(cfg, refdoc)
+        self.lookup_worker.finished_ok.connect(self._lookup_refdoc_done)
+        self.lookup_worker.finished_error.connect(self._lookup_refdoc_failed)
+        self.lookup_worker.start()
+
+    def _lookup_refdoc_done(self, refdoc, rows):
+        self.lookup_refdoc_btn.setEnabled(True)
+        if not rows:
+            self.order_log_view.appendPlainText(f"  No PIECE found with REFDOC = {refdoc}")
+            return
+        for nopiece, doc_type, datepiece, montantttc, annulee in rows:
+            self.order_log_view.appendPlainText(
+                f"  NOPIECE={nopiece} {doc_type} {datepiece} MONTANTTTC={montantttc} ANNULEE={annulee!r}"
+            )
+
+    def _lookup_refdoc_failed(self, refdoc, message):
+        self.lookup_refdoc_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Lookup of {refdoc} FAILED: {message}")
+
+    def _start_list_columns(self):
+        self._start_schema_lookup("columns")
+
+    def _start_list_triggers(self):
+        self._start_schema_lookup("triggers")
+
+    def _start_schema_lookup(self, kind):
+        table = self.schema_table_edit.text().strip().upper()
+        if not table:
+            return
+        if self.schema_worker and self.schema_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.list_columns_btn.setEnabled(False)
+        self.list_triggers_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(f"Listing {kind} for {table}...")
+        self.schema_worker = SchemaLookupWorker(cfg, kind, table)
+        self.schema_worker.finished_ok.connect(self._schema_lookup_done)
+        self.schema_worker.finished_error.connect(self._schema_lookup_failed)
+        self.schema_worker.start()
+
+    def _schema_lookup_done(self, kind, table, rows):
+        self.list_columns_btn.setEnabled(True)
+        self.list_triggers_btn.setEnabled(True)
+        if not rows:
+            self.order_log_view.appendPlainText(f"  {table} has no {kind}.")
+            return
+        if kind == "columns":
+            for name, type_name, length, subtype, nullable in rows:
+                null_txt = "nullable" if nullable else "NOT NULL"
+                self.order_log_view.appendPlainText(
+                    f"  {name:<25} type={type_name} len={length} subtype={subtype} {null_txt}"
+                )
+        else:
+            for name, type_name, inactive, source in rows:
+                status = "INACTIVE" if inactive else "active"
+                self.order_log_view.appendPlainText(f"  [{name}] {type_name} ({status})")
+                for line in source.splitlines():
+                    self.order_log_view.appendPlainText(f"      {line}")
+
+    def _schema_lookup_failed(self, kind, table, message):
+        self.list_columns_btn.setEnabled(True)
+        self.list_triggers_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Listing {kind} for {table} FAILED: {message}")
+
+    def _confirm_fix_duplicates(self):
+        answer = QMessageBox.question(
+            self, "Fix duplicate WC imports?",
+            "This will PERMANENTLY DELETE the extra document(s) (PIECE and "
+            "ITEM rows) for any order that has more than one document -- "
+            "keeping an active one if any, else the earliest. This cannot "
+            "be undone.\n\n"
+            "Run 'Preview duplicate fix (dry run)' first if you haven't already, "
+            "to see exactly what will be deleted.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_fix_duplicates(dry_run=False)
+
+    def _start_fix_duplicates(self, dry_run):
+        if self.fix_dup_worker and self.fix_dup_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.preview_fix_btn.setEnabled(False)
+        self.fix_duplicates_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(
+            "Previewing duplicate fix..." if dry_run else "Fixing duplicates..."
+        )
+        self.fix_dup_worker = FixDuplicatesWorker(cfg, dry_run)
+        self.fix_dup_worker.line.connect(self.order_log_view.appendPlainText)
+        self.fix_dup_worker.finished_ok.connect(self._fix_duplicates_done)
+        self.fix_dup_worker.finished_error.connect(self._fix_duplicates_failed)
+        self.fix_dup_worker.start()
+
+    def _fix_duplicates_done(self, report):
+        self.preview_fix_btn.setEnabled(True)
+        self.fix_duplicates_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(
+            f"{len(report['fixed'])} order(s) with duplicates, "
+            f"{report['total_deleted']} document(s) deleted."
+        )
+
+    def _fix_duplicates_failed(self, message):
+        self.preview_fix_btn.setEnabled(True)
+        self.fix_duplicates_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Fix duplicates FAILED: {message}")
+
+    def _start_find_missing_sku(self):
+        if self.missing_sku_worker and self.missing_sku_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.find_missing_sku_btn.setEnabled(False)
+        self.order_log_view.appendPlainText("Fetching WooCommerce products...")
+        self.missing_sku_worker = MissingSkuWorker(cfg)
+        self.missing_sku_worker.finished_ok.connect(self._missing_sku_found)
+        self.missing_sku_worker.finished_error.connect(self._missing_sku_failed)
+        self.missing_sku_worker.start()
+
+    def _missing_sku_found(self, rows):
+        self.find_missing_sku_btn.setEnabled(True)
+        self.missing_sku_table.setRowCount(0)
+        for row in rows:
+            r = self.missing_sku_table.rowCount()
+            self.missing_sku_table.insertRow(r)
+            id_item = QTableWidgetItem(str(row["id"]))
+            id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
+            name_item = QTableWidgetItem(row["name"])
+            name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
+            self.missing_sku_table.setItem(r, 0, id_item)
+            self.missing_sku_table.setItem(r, 1, name_item)
+            self.missing_sku_table.setItem(r, 2, QTableWidgetItem(""))
+        self.order_log_view.appendPlainText(f"{len(rows)} product(s) missing a SKU.")
+
+    def _missing_sku_failed(self, message):
+        self.find_missing_sku_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Finding products missing SKU FAILED: {message}")
+
+    def _collect_sku_fixes(self):
+        fixes = []
+        for row in range(self.missing_sku_table.rowCount()):
+            id_item = self.missing_sku_table.item(row, 0)
+            ref_item = self.missing_sku_table.item(row, 2)
+            ref_art = ref_item.text().strip() if ref_item else ""
+            if id_item and ref_art:
+                fixes.append({"product_id": int(id_item.text()), "ref_art": ref_art})
+        return fixes
+
+    def _confirm_apply_sku_fixes(self):
+        fixes = self._collect_sku_fixes()
+        if not fixes:
+            QMessageBox.warning(self, "Nothing to apply", "Type a REF_ART into at least one row first.")
+            return
+        answer = QMessageBox.question(
+            self, "Apply SKU fixes?",
+            f"This will set the SKU on {len(fixes)} WooCommerce product(s) to the "
+            "REF_ART you typed in (only for ones confirmed to exist in NetFact2). "
+            "This writes to your live WooCommerce store.\n\n"
+            "Run 'Preview fix' first if you haven't already.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_apply_sku_fixes(dry_run=False)
+
+    def _start_apply_sku_fixes(self, dry_run):
+        fixes = self._collect_sku_fixes()
+        if not fixes:
+            QMessageBox.warning(self, "Nothing to apply", "Type a REF_ART into at least one row first.")
+            return
+        if self.apply_sku_worker and self.apply_sku_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.preview_sku_fix_btn.setEnabled(False)
+        self.apply_sku_fix_btn.setEnabled(False)
+        self.order_log_view.appendPlainText(
+            "Validating SKU fixes..." if dry_run else "Applying SKU fixes..."
+        )
+        self.apply_sku_worker = ApplySkuFixesWorker(cfg, fixes, dry_run)
+        self.apply_sku_worker.line.connect(self.order_log_view.appendPlainText)
+        self.apply_sku_worker.finished_ok.connect(self._apply_sku_fixes_done)
+        self.apply_sku_worker.finished_error.connect(self._apply_sku_fixes_failed)
+        self.apply_sku_worker.start()
+
+    def _apply_sku_fixes_done(self, report):
+        self.preview_sku_fix_btn.setEnabled(True)
+        self.apply_sku_fix_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(
+            f"applied={len(report['applied'])} invalid_ref={len(report['invalid_ref'])} "
+            f"errors={len(report['errors'])}"
+        )
+
+    def _apply_sku_fixes_failed(self, message):
+        self.preview_sku_fix_btn.setEnabled(True)
+        self.apply_sku_fix_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"Apply SKU fixes FAILED: {message}")
+
+    def _collect_order_import_config(self):
+        oi_cfg = self.cfg["order_import"]
+        oi_cfg["client_code"] = self.order_client_code.text()
+        oi_cfg["code_depot"] = self.order_code_depot.text()
+        oi_cfg["username"] = self.order_username.text()
+        oi_cfg["on_missing_sku"] = self.order_on_missing_sku.currentText()
+        oi_cfg["cancel_statuses"] = [
+            s.strip() for s in self.order_cancel_statuses.text().split(",") if s.strip()
+        ]
+        oi_cfg["start_date"] = (
+            self.order_start_date.date().toString("yyyy-MM-dd")
+            if self.order_use_start_date.isChecked() else ""
+        )
+
+        status_mapping = {}
+        for row in range(self.status_table.rowCount()):
+            status_combo = self.status_table.cellWidget(row, 0)
+            code_combo = self.status_table.cellWidget(row, 1)
+            wc_status = status_combo.currentText().strip() if status_combo else ""
+            code = _combo_value(code_combo) if code_combo else ""
+            if wc_status and code:
+                status_mapping[wc_status] = code
+        oi_cfg["status_mapping"] = status_mapping
+
+        transformation = {}
+        for row in range(self.transform_table.rowCount()):
+            target_combo = self.transform_table.cellWidget(row, 0)
+            source_combo = self.transform_table.cellWidget(row, 1)
+            target = _combo_value(target_combo) if target_combo else ""
+            source = _combo_value(source_combo) if source_combo else ""
+            if target and source:
+                transformation[target] = source
+        oi_cfg["transformation"] = transformation
+        return oi_cfg
+
+    def _start_order_import(self, dry_run):
+        if self.order_worker and self.order_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self._collect_order_import_config()
+        self.order_log_view.clear()
+        self.order_dry_run_btn.setEnabled(False)
+        self.order_import_btn.setEnabled(False)
+        self.order_worker = OrderImportWorker(cfg, dry_run)
+        self.order_worker.line.connect(self.order_log_view.appendPlainText)
+        self.order_worker.finished_ok.connect(self._order_import_done)
+        self.order_worker.finished_error.connect(self._order_import_failed)
+        self.order_worker.start()
+
+    def _order_import_done(self, report):
+        self.order_dry_run_btn.setEnabled(True)
+        self.order_import_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(
+            f"created={len(report['created'])} cancelled={len(report.get('cancelled', []))} "
+            f"skipped={len(report['skipped'])} errors={len(report['errors'])}"
+        )
+        skip_reasons = report.get("skip_reasons") or {}
+        if skip_reasons:
+            breakdown = ", ".join(f"{reason}={count}" for reason, count in skip_reasons.items())
+            self.order_log_view.appendPlainText(f"Skip reasons: {breakdown}")
+            if skip_reasons.get("already_imported"):
+                self.order_log_view.appendPlainText(
+                    f"  ({skip_reasons['already_imported']} already existed in Firebird -- not duplicated.)"
+                )
+        if report.get("errors"):
+            self.order_log_view.appendPlainText(f"Errors: {report['errors']}")
+
+    def _order_import_failed(self, message):
+        self.order_dry_run_btn.setEnabled(True)
+        self.order_import_btn.setEnabled(True)
+        self.order_log_view.appendPlainText(f"FAILED: {message}")
+
+    # -- Profit tab -----------------------------------------------------------
+    def _build_profit_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        note = QLabel(
+            "Every WooCommerce order becomes a Bon de Livraison under one\n"
+            "dedicated client (the 'livraison' client, same CODE_TIERS as the\n"
+            "Orders tab), priced at the normal sale price. This consolidates\n"
+            "every one of those documents that hasn't been consolidated yet\n"
+            "into ONE new document, aggregated by article, under a client of\n"
+            "your choice -- priced at PURCHASE price (0% margin) instead. Its\n"
+            "total, compared against the original sale total, is your real\n"
+            "profit for that period. Running this again later only picks up\n"
+            "NEW deliveries -- it never re-includes ones already consolidated.\n\n"
+            "This new document does not affect stock or the chosen client's\n"
+            "balance -- it exists only to be viewed/printed for its totals."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        cfg_group = QGroupBox("What to consolidate")
+        form = QFormLayout(cfg_group)
+        self.profit_source_client = QLineEdit(self.cfg["order_import"]["client_code"])
+        self.profit_source_client.setToolTip(
+            "TIERS.CODE_TIERS of the 'livraison' client every WC order is "
+            "imported under -- normally the same as the Orders tab's "
+            "'Client CODE_TIERS'."
+        )
+        form.addRow("Source client CODE_TIERS:", self.profit_source_client)
+
+        list_types_row = QHBoxLayout()
+        self.list_doc_types_btn = QPushButton("List document types for this client")
+        self.list_doc_types_btn.setToolTip(
+            "Shows every CODE_TYPE_PIECE found under the source client, with "
+            "counts -- an order usually creates BOTH a Commande and a Bon de "
+            "Livraison under the same client, so pick the real BL type below, "
+            "not the Commande (consolidating the Commande too would double-"
+            "count every item)."
+        )
+        self.list_doc_types_btn.clicked.connect(self._start_profit_types)
+        list_types_row.addWidget(self.list_doc_types_btn)
+        list_types_row.addStretch()
+        form.addRow(list_types_row)
+
+        self.profit_doc_type_combo = self._type_piece_combo()
+        form.addRow("Bon de Livraison document type:", self.profit_doc_type_combo)
+
+        self.profit_target_client = QLineEdit()
+        self.profit_target_client.setPlaceholderText("CODE_TIERS to bill the consolidated document to")
+        form.addRow("Consolidate into client CODE_TIERS:", self.profit_target_client)
+
+        since_row = QHBoxLayout()
+        self.profit_use_since = QCheckBox("Only include deliveries on/after:")
+        self.profit_since_date = QDateEdit()
+        self.profit_since_date.setCalendarPopup(True)
+        self.profit_since_date.setDisplayFormat("yyyy-MM-dd")
+        self.profit_since_date.setDate(QDate.currentDate().addMonths(-1))
+        self.profit_since_date.setEnabled(False)
+        self.profit_use_since.toggled.connect(self.profit_since_date.setEnabled)
+        since_row.addWidget(self.profit_use_since)
+        since_row.addWidget(self.profit_since_date)
+        since_row.addStretch()
+        form.addRow(since_row)
+        layout.addWidget(cfg_group)
+
+        btn_row = QHBoxLayout()
+        self.profit_preview_btn = QPushButton("Preview consolidation (dry run)")
+        self.profit_preview_btn.clicked.connect(lambda: self._start_profit_consolidation(dry_run=True))
+        self.profit_run_btn = QPushButton("Create consolidated BL now")
+        self.profit_run_btn.setToolTip(
+            "Writes one new PIECE/ITEM document to Firebird. Preview first to "
+            "see exactly what will be included and what's held back."
+        )
+        self.profit_run_btn.clicked.connect(self._confirm_profit_consolidation)
+        btn_row.addWidget(self.profit_preview_btn)
+        btn_row.addWidget(self.profit_run_btn)
+        layout.addLayout(btn_row)
+
+        self.profit_log_view = QPlainTextEdit()
+        self.profit_log_view.setReadOnly(True)
+        layout.addWidget(self.profit_log_view)
+        return widget
+
+    def _start_profit_types(self):
+        source_client = self.profit_source_client.text().strip()
+        if not source_client:
+            return
+        if self.profit_types_worker and self.profit_types_worker.isRunning():
+            return
+        cfg = self._collect_config()
+        self.list_doc_types_btn.setEnabled(False)
+        self.profit_log_view.appendPlainText(f"Listing document types for {source_client}...")
+        self.profit_types_worker = ProfitTypesWorker(cfg, source_client)
+        self.profit_types_worker.finished_ok.connect(self._profit_types_done)
+        self.profit_types_worker.finished_error.connect(self._profit_types_failed)
+        self.profit_types_worker.start()
+
+    def _profit_types_done(self, rows):
+        self.list_doc_types_btn.setEnabled(True)
+        if not rows:
+            self.profit_log_view.appendPlainText("  No active documents found for this client.")
+            return
+        for e in rows:
+            self.profit_log_view.appendPlainText(
+                f"  {e['code_type_piece']} ({e['intitule'] or 'no label'}): {e['count']} document(s), "
+                f"total {round(e['total_montant'], 2)}, {e['already_consolidated']} already consolidated"
+            )
+
+    def _profit_types_failed(self, message):
+        self.list_doc_types_btn.setEnabled(True)
+        self.profit_log_view.appendPlainText(f"Listing document types FAILED: {message}")
+
+    def _confirm_profit_consolidation(self):
+        target = self.profit_target_client.text().strip()
+        if not target:
+            QMessageBox.warning(self, "Missing client", "Enter the client CODE_TIERS to consolidate into.")
+            return
+        answer = QMessageBox.question(
+            self, "Create consolidated Bon de Livraison?",
+            f"This will create ONE new document under client {target!r}, priced "
+            "at purchase price (0% margin), from every not-yet-consolidated "
+            "delivery under the source client. This writes to Firebird.\n\n"
+            "Run 'Preview consolidation (dry run)' first if you haven't "
+            "already, to see exactly what will be included and what's held "
+            "back.\n\nProceed?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self._start_profit_consolidation(dry_run=False)
+
+    def _start_profit_consolidation(self, dry_run):
+        source_client = self.profit_source_client.text().strip()
+        doc_type = _combo_value(self.profit_doc_type_combo)
+        target_client = self.profit_target_client.text().strip()
+        if not source_client or not doc_type or not target_client:
+            QMessageBox.warning(
+                self, "Missing information",
+                "Source client, document type, and target client are all required."
+            )
+            return
+        if self.profit_worker and self.profit_worker.isRunning():
+            return
+        since = (
+            self.profit_since_date.date().toString("yyyy-MM-dd")
+            if self.profit_use_since.isChecked() else None
+        )
+        cfg = self._collect_config()
+        self.profit_log_view.clear()
+        self.profit_preview_btn.setEnabled(False)
+        self.profit_run_btn.setEnabled(False)
+        self.profit_worker = ProfitConsolidationWorker(
+            cfg, source_client, doc_type, target_client, since, dry_run
+        )
+        self.profit_worker.line.connect(self.profit_log_view.appendPlainText)
+        self.profit_worker.finished_ok.connect(self._profit_consolidation_done)
+        self.profit_worker.finished_error.connect(self._profit_consolidation_failed)
+        self.profit_worker.start()
+
+    def _profit_consolidation_done(self, report):
+        self.profit_preview_btn.setEnabled(True)
+        self.profit_run_btn.setEnabled(True)
+        if report["held_back"]:
+            self.profit_log_view.appendPlainText(f"\n{len(report['held_back'])} document(s) held back:")
+            for h in report["held_back"]:
+                reasons = ", ".join(f"{f['ref_art']} ({f['reason']})" for f in h["flags"])
+                self.profit_log_view.appendPlainText(f"  doc #{h['nopiece']} ({h['date']}): {reasons}")
+        if report.get("zero_cost_warnings"):
+            self.profit_log_view.appendPlainText(
+                f"\n{len(report['zero_cost_warnings'])} line(s) included at 0 cost "
+                "(PRIXACHAT=0 -- fix the article's purchase price when convenient):"
+            )
+            for w in report["zero_cost_warnings"]:
+                self.profit_log_view.appendPlainText(f"  {w['ref_art']} (doc #{w['nopiece']})")
+        if report["created_nopiece"]:
+            self.statusBar().showMessage(
+                f"Created consolidated document NOPIECE={report['created_nopiece']}.", 8000
+            )
+
+    def _profit_consolidation_failed(self, message):
+        self.profit_preview_btn.setEnabled(True)
+        self.profit_run_btn.setEnabled(True)
+        self.profit_log_view.appendPlainText(f"FAILED: {message}")
+
+    # -- Yalidine tab -----------------------------------------------------------
+    def _build_yalidine_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        note = QLabel(
+            "Compares Yalidine's delivered parcels against NetFact2's\n"
+            "livraison-client documents, order by order (joined by the\n"
+            "WooCommerce order id both systems already key off of), to find\n"
+            "exactly where a reported total gap comes from rather than just\n"
+            "confirming that one exists. Read-only -- writes nothing anywhere.\n\n"
+            "Needs the Yalidine API ID/Token from the Configuration tab, and\n"
+            "the same 'livraison' document type used on the Profit tab (the\n"
+            "real Bon de Livraison, not the intermediate Commande -- use\n"
+            "'List document types for this client' there first if unsure)."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        cfg_group = QGroupBox("What to reconcile")
+        form = QFormLayout(cfg_group)
+        self.yal_client_code = QLineEdit(self.cfg["order_import"]["client_code"])
+        self.yal_client_code.setToolTip("Same CODE_TIERS as the Orders/Profit tabs' livraison client.")
+        form.addRow("Livraison client CODE_TIERS:", self.yal_client_code)
+        self.yal_doc_type_combo = self._type_piece_combo()
+        form.addRow("Bon de Livraison document type:", self.yal_doc_type_combo)
+
+        since_row = QHBoxLayout()
+        self.yal_use_since = QCheckBox("Only orders created on/after:")
+        self.yal_since_date = QDateEdit()
+        self.yal_since_date.setCalendarPopup(True)
+        self.yal_since_date.setDisplayFormat("yyyy-MM-dd")
+        self.yal_since_date.setDate(QDate.currentDate().addMonths(-1))
+        self.yal_since_date.setEnabled(False)
+        self.yal_use_since.toggled.connect(self.yal_since_date.setEnabled)
+        since_row.addWidget(self.yal_use_since)
+        since_row.addWidget(self.yal_since_date)
+        since_row.addStretch()
+        form.addRow(since_row)
+        layout.addWidget(cfg_group)
+
+        btn_row = QHBoxLayout()
+        self.yal_run_btn = QPushButton("Run reconciliation")
+        self.yal_run_btn.clicked.connect(self._start_yalidine_reconcile)
+        btn_row.addWidget(self.yal_run_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        self.yal_log_view = QPlainTextEdit()
+        self.yal_log_view.setReadOnly(True)
+        layout.addWidget(self.yal_log_view)
+        return widget
+
+    def _start_yalidine_reconcile(self):
+        client_code = self.yal_client_code.text().strip()
+        doc_type = _combo_value(self.yal_doc_type_combo)
+        if not client_code or not doc_type:
+            QMessageBox.warning(self, "Missing information",
+                                 "Livraison client and document type are both required.")
+            return
+        if self.yalidine_worker and self.yalidine_worker.isRunning():
+            return
+        since = (
+            self.yal_since_date.date().toString("yyyy-MM-dd")
+            if self.yal_use_since.isChecked() else None
+        )
+        cfg = self._collect_config()
+        self.yal_log_view.clear()
+        self.yal_run_btn.setEnabled(False)
+        self.yalidine_worker = YalidineReconcileWorker(cfg, client_code, doc_type, since)
+        self.yalidine_worker.line.connect(self.yal_log_view.appendPlainText)
+        self.yalidine_worker.finished_ok.connect(self._yalidine_reconcile_done)
+        self.yalidine_worker.finished_error.connect(self._yalidine_reconcile_failed)
+        self.yalidine_worker.start()
+
+    def _yalidine_reconcile_done(self, report):
+        self.yal_run_btn.setEnabled(True)
+        v = self.yal_log_view.appendPlainText
+        v(f"\nNet gap: {report['net_gap']} "
+          "(positive = money Yalidine/NetFact2 together show is owed to "
+          "NetFact2 but isn't recorded there; negative = NetFact2 revenue "
+          "this courier integration can't account for)")
+        if report["amount_mismatch"]:
+            v(f"\n{len(report['amount_mismatch'])} amount mismatch(es):")
+            for m in report["amount_mismatch"]:
+                v(f"  order #{m['order_id']} ({m['tracking']}): Yalidine={m['yalidine_price']} "
+                  f"NetFact2={m['netfact_montant']} diff={m['diff']}")
+        if report["missing_in_netfact"]:
+            v(f"\n{len(report['missing_in_netfact'])} delivered in Yalidine, no NetFact2 document:")
+            for m in report["missing_in_netfact"]:
+                v(f"  order #{m['order_id']} ({m['tracking']}): Yalidine price={m['yalidine_price']}")
+        if report["missing_in_yalidine"]:
+            v(f"\n{len(report['missing_in_yalidine'])} NetFact2 document(s) never dispatched to Yalidine:")
+            for m in report["missing_in_yalidine"]:
+                v(f"  {m['refdoc']}: NetFact2 montant={m['netfact_montant']}")
+        if report["returned_or_failed_but_billed"]:
+            v(f"\n{len(report['returned_or_failed_but_billed'])} returned/failed at Yalidine but still billed in NetFact2:")
+            for m in report["returned_or_failed_but_billed"]:
+                v(f"  order #{m['order_id']} ({m['tracking']}): status={m['status']!r} "
+                  f"NetFact2 montant={m['netfact_montant']}")
+
+    def _yalidine_reconcile_failed(self, message):
+        self.yal_run_btn.setEnabled(True)
+        self.yal_log_view.appendPlainText(f"FAILED: {message}")
+
+    # -- Schedule tab -------------------------------------------------------
+    # Each mode gets its own independent Task Scheduler entry, since they
+    # run at very different cadences (stock changes constantly; full
+    # product/order syncs don't need to run nearly as often).
+    _SCHEDULE_MODES = [
+        # (attr_prefix, group title, cli_flag, task_name, config_section, label)
+        ("schedule", "Product Sync", "--sync", windows_task.TASK_NAME_SYNC if windows_task else None,
+         "schedule", "Every N minutes:"),
+        ("stock_schedule", "Stock Sync", "--stock-sync",
+         windows_task.TASK_NAME_STOCK_SYNC if windows_task else None,
+         "stock_sync", "Every N minutes:"),
+        ("order_schedule", "Order Import", "--import-orders",
+         windows_task.TASK_NAME_ORDER_IMPORT if windows_task else None,
+         "order_import", "Every N minutes:"),
+    ]
+
+    def _build_schedule_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        if platform.system() != "Windows":
+            layout.addWidget(QLabel(
+                "Scheduling uses Windows Task Scheduler and is only available "
+                "when running the packaged .exe on Windows."
+            ))
+            layout.addStretch()
+            return widget
+
+        for attr_prefix, title, cli_flag, task_name, section, label in self._SCHEDULE_MODES:
+            group = QGroupBox(title)
+            group_layout = QVBoxLayout(group)
+
+            enabled_box = QCheckBox("Enabled")
+            enabled_box.setChecked(self.cfg[section]["enabled"])
+            setattr(self, f"{attr_prefix}_enabled", enabled_box)
+            group_layout.addWidget(enabled_box)
+
+            form = QFormLayout()
+            interval_box = QSpinBox()
+            interval_box.setRange(1, 10080)  # up to a week, in minutes
+            interval_box.setValue(self.cfg[section]["interval_minutes"])
+            setattr(self, f"{attr_prefix}_interval", interval_box)
+            form.addRow(label, interval_box)
+            group_layout.addLayout(form)
+            layout.addWidget(group)
+
+        apply_btn = QPushButton("Apply schedules")
+        apply_btn.clicked.connect(self._apply_schedule)
+        layout.addWidget(apply_btn)
+        layout.addStretch()
+        return widget
+
+    def _apply_schedule(self):
+        cfg = self._collect_config()
+        messages = []
+        for attr_prefix, title, cli_flag, task_name, section, _label in self._SCHEDULE_MODES:
+            enabled = getattr(self, f"{attr_prefix}_enabled").isChecked()
+            interval = getattr(self, f"{attr_prefix}_interval").value()
+            cfg[section]["enabled"] = enabled
+            cfg[section]["interval_minutes"] = interval
+            try:
+                if enabled:
+                    windows_task.install(sys.executable, cli_flag, interval, task_name,
+                                          self.config_path)
+                    messages.append(f"{title}: scheduled every {interval} min")
+                else:
+                    windows_task.remove(task_name)
+                    messages.append(f"{title}: removed")
+            except Exception as exc:  # noqa: BLE001
+                messages.append(f"{title}: FAILED ({exc})")
+        save_config(self.config_path, cfg)
+        QMessageBox.information(self, "Schedules updated", "\n".join(messages))
+
+
+def launch(config_path):
+    app = QApplication(sys.argv)
+    window = MainWindow(config_path)
+    window.show()
+    return app.exec()

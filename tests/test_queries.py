@@ -1,0 +1,170 @@
+from app.db import queries
+
+
+class FakeCursor:
+    def __init__(self, table_rows):
+        self.table_rows = table_rows
+        self._rows = []
+
+    def execute(self, sql, params=None):
+        sql_upper = sql.upper()
+        for table, rows in self.table_rows.items():
+            if f"FROM {table}" in sql_upper:
+                self._rows = rows
+                return
+        raise Exception(f"no such table (simulated): {sql}")
+
+    def fetchall(self):
+        return self._rows
+
+
+class FakeConnection:
+    def __init__(self, table_rows):
+        self.table_rows = table_rows
+
+    def cursor(self):
+        return FakeCursor(self.table_rows)
+
+
+def _article_row(ref, designation, prestation, codefamille="FAM1"):
+    # Order must match queries.ARTICLE_COLUMNS.
+    return (
+        ref, codefamille, designation,
+        10.0, 12.0, 20.0, 24.0,        # prix achat/vente
+        None, None, 0, None, None,     # promo fields
+        19, True, None,                # taux_tva, ctrl_stock, photo
+        prestation,                     # ART_PRESTATION
+    )
+
+
+def _make_con(article_rows, famille_rows=None, barcode_rows=None, item_rows=None):
+    tables = {
+        "ARTICLE": article_rows,
+        "FAMILLE": famille_rows or [("FAM1", "Stylos", 1)],
+        "EQUIV_CBARRES": barcode_rows or [],
+        "ITEM": item_rows if item_rows is not None else [],
+    }
+    return FakeConnection(tables)
+
+
+def test_fetch_articles_excludes_art_prestation():
+    con = _make_con([
+        _article_row("REF1", "Stylo bleu", prestation=False),
+        _article_row("REF2", "Livraison a domicile", prestation=True),
+    ])
+    familles = queries.fetch_familles(con)
+    articles = queries.fetch_articles(con, familles, filter_boutique_visible=True)
+    refs = [a["ref_art"] for a in articles]
+    assert refs == ["REF1"]
+
+
+def test_fetch_articles_respects_boutique_visible_filter():
+    con = _make_con(
+        [_article_row("REF1", "Stylo bleu", prestation=False, codefamille="FAM_HIDDEN")],
+        famille_rows=[("FAM_HIDDEN", "Interne", 0)],
+    )
+    familles = queries.fetch_familles(con)
+
+    assert queries.fetch_articles(con, familles, filter_boutique_visible=True) == []
+    assert len(queries.fetch_articles(con, familles, filter_boutique_visible=False)) == 1
+
+
+def test_fetch_familles_treats_null_boutiq_visible_as_visible():
+    # Real DIFA2.FDB data: some families never had BOUTIQ_VISIBLE set at
+    # all (NULL). That must NOT be treated the same as an explicit 0, or
+    # every article in those families silently vanishes from the sync.
+    con = _make_con(
+        [_article_row("REF1", "Stylo bleu", prestation=False, codefamille="FAM_UNSET")],
+        famille_rows=[("FAM_UNSET", "Non classee", None)],
+    )
+    familles = queries.fetch_familles(con)
+    assert familles["FAM_UNSET"]["boutiq_visible"] is True
+    assert len(queries.fetch_articles(con, familles, filter_boutique_visible=True)) == 1
+
+
+def test_fetch_stock_quantities_computes_from_item_ledger():
+    # Matches the real DIFA2.FDB install: no STOCK/FICHE_STOCK table, but
+    # the old tool's proven query shows stock = SUM(QTE * COEFF) per article.
+    con = _make_con(
+        [_article_row("REF1", "Stylo bleu", prestation=False)],
+        item_rows=[("REF1", 42), ("REF2", 7)],
+    )
+    assert queries.fetch_stock_quantities(con) == {"REF1": 42, "REF2": 7}
+
+
+def test_fetch_stock_quantities_clamps_negative_to_zero():
+    con = _make_con(
+        [_article_row("REF1", "Stylo bleu", prestation=False)],
+        item_rows=[("REF1", -5)],
+    )
+    assert queries.fetch_stock_quantities(con) == {"REF1": 0}
+
+
+def test_fetch_stock_quantities_empty_when_no_item_rows():
+    con = _make_con([_article_row("REF1", "Stylo bleu", prestation=False)])
+    assert queries.fetch_stock_quantities(con) == {}
+
+
+def test_fetch_articles_stock_qty_none_when_article_has_no_item_rows():
+    con = _make_con([_article_row("REF1", "Stylo bleu", prestation=False)])
+    familles = queries.fetch_familles(con)
+    articles = queries.fetch_articles(con, familles, filter_boutique_visible=True)
+    assert articles[0]["stock_qty"] is None
+
+
+def test_fetch_articles_wires_stock_qty_from_item_ledger():
+    con = _make_con(
+        [_article_row("REF1", "Stylo bleu", prestation=False)],
+        item_rows=[("REF1", 42)],
+    )
+    familles = queries.fetch_familles(con)
+    articles = queries.fetch_articles(con, familles, filter_boutique_visible=True)
+    assert articles[0]["stock_qty"] == 42
+
+
+class _TypePieceCursor:
+    def __init__(self, with_label):
+        self.with_label = with_label
+
+    def execute(self, sql, params=None):
+        if not self.with_label:
+            raise Exception("simulated: no INTITULE column on this install")
+
+    def fetchall(self):
+        return [("PC_VE_COM", "Commande de vente"), ("PC_VE_B", "Bon de livraison"), ("", "Empty code")]
+
+
+class _TypePieceCursorFallback:
+    def execute(self, sql, params=None):
+        pass
+
+    def fetchall(self):
+        return [("PC_VE_COM",), ("PC_VE_B",)]
+
+
+class _TypePieceConnection:
+    def __init__(self, with_label):
+        self.with_label = with_label
+        self._calls = 0
+
+    def cursor(self):
+        self._calls += 1
+        if self.with_label:
+            return _TypePieceCursor(True)
+        # First call (with INTITULE) fails; second call (fallback) succeeds.
+        return _TypePieceCursor(False) if self._calls == 1 else _TypePieceCursorFallback()
+
+
+def test_fetch_type_pieces_with_label_column():
+    con = _TypePieceConnection(with_label=True)
+    result = queries.fetch_type_pieces(con)
+    assert {"code": "PC_VE_COM", "label": "Commande de vente"} in result
+    assert {"code": "PC_VE_B", "label": "Bon de livraison"} in result
+    assert not any(r["code"] == "" for r in result)  # blank codes filtered out
+
+
+def test_fetch_type_pieces_falls_back_without_label_column():
+    con = _TypePieceConnection(with_label=False)
+    result = queries.fetch_type_pieces(con)
+    assert {"code": "PC_VE_COM", "label": "PC_VE_COM"} in result
+    assert {"code": "PC_VE_B", "label": "PC_VE_B"} in result

@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+config.json
+*.sqlite3
+packaging/fbclient/
+dist/
+build/
+*.spec.bak
+.pytest_cache/
