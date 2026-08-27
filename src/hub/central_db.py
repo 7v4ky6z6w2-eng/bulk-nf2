@@ -1076,6 +1076,31 @@ def apply_item_edit_local(con: sqlite3.Connection, store_id: int, edits: list) -
     con.commit()
 
 
+def apply_item_add_local(con: sqlite3.Connection, store_id: int, imp_result: dict) -> None:
+    """Répercute une op item_add (nouvelles lignes ajoutées à une pièce déjà
+    existante — synchro fournisseur) sur le miroir central : insère les
+    nouvelles lignes item et pose le total déjà recalculé par add_items
+    (exact, pas besoin de resommer depuis le miroir comme
+    apply_item_edit_local — on a directement le résultat de l'écriture)."""
+    nopiece = imp_result.get("nopiece")
+    if not nopiece:
+        return
+    now = now_iso()
+    for it in imp_result.get("items") or []:
+        con.execute(
+            "INSERT OR REPLACE INTO item "
+            "(store_id, nopiece, noitem, ref_art, qte, prixht, synced_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (store_id, nopiece, it["noitem"], it["ref_art"], it["qte"], it["prix"], now))
+    ht = imp_result.get("montant_ht")
+    if ht is not None:
+        con.execute(
+            "UPDATE piece SET montantht=?, montantttc=?, synced_at=? "
+            "WHERE store_id=? AND nopiece=?",
+            (ht, imp_result.get("montant_ttc", ht), now, store_id, nopiece))
+    con.commit()
+
+
 def apply_price_changes_local(con: sqlite3.Connection, store_id: int,
                               changes: list) -> None:
     """Répercute une op price_update appliquée sur le miroir central (même
@@ -1150,6 +1175,20 @@ def fournisseur_sync_state_set(con: sqlite3.Connection, store_id: int, src_nopie
         (store_id, src_nopiece, src_noitem, dest_ref_art, dest_nopiece, dest_noitem,
          qte, prix, now_iso()))
     con.commit()
+
+
+def fournisseur_known_dest_nopiece(con: sqlite3.Connection, store_id: int,
+                                   src_nopiece: str) -> str | None:
+    """Le NOPIECE de réception déjà créé pour ce bon de livraison fournisseur
+    (src_nopiece), s'il en existe déjà un — via n'importe laquelle de ses
+    lignes soeurs déjà synchronisées. Sert à décider, quand le fournisseur
+    ajoute des articles à un bon déjà connu, d'AJOUTER ces lignes à cette
+    réception plutôt que d'en créer une seconde pour le même bon."""
+    row = con.execute(
+        "SELECT dest_nopiece FROM fournisseur_sync_state "
+        "WHERE store_id=? AND src_nopiece=? AND dest_nopiece <> '' "
+        "LIMIT 1", (store_id, src_nopiece)).fetchone()
+    return row["dest_nopiece"] if row else None
 
 
 def fournisseur_pending_add(con: sqlite3.Connection, store_id: int, src_nopiece: str,

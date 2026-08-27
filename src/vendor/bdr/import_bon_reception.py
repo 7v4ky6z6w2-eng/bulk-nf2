@@ -1355,6 +1355,66 @@ def edit_items(cfg, edits):
         con.close()
 
 
+def add_items(cfg, nopiece, lines, date_piece=None):
+    """Ajoute des lignes ITEM à une PIECE DÉJÀ EXISTANTE (nopiece connu), sans
+    en recréer une deuxième — contrairement à run_import qui crée toujours
+    une nouvelle pièce. Sert à la synchro fournisseur : le fournisseur ajoute
+    des articles à un bon de livraison déjà synchronisé -> ces nouveaux
+    articles doivent rejoindre la réception déjà créée, pas en générer une
+    seconde pour le même bon.
+
+    Ne rappelle PAS ensure_famille/ensure_unite/ensure_tiers ni create_piece
+    (déjà faits lors de la création initiale de `nopiece`). Recalcule les
+    totaux de la PIECE à partir de TOUTES ses lignes (existantes + nouvelles),
+    comme edit_items — même raisonnement de sécurité vis-à-vis du stock (pas
+    de compteur stocké, SPSTOCK/SPSTOCKDEP recalculent à la volée)."""
+    date_piece = date_piece or datetime.datetime.now()
+    con = connect(cfg)
+    imp = Importer(con, cfg)
+    try:
+        item_no = imp.next_base("NEXTITEM", "ITEM", "NOITEM")
+        created, existing, updated, items = [], [], [], []
+        for line in lines:
+            state = imp.upsert_article(line)
+            if state == "created":
+                created.append(line["ref_art"])
+            elif state == "updated":
+                updated.append(line["ref_art"])
+            else:
+                existing.append(line["ref_art"])
+            item_no += 1
+            noitem = str(item_no)
+            imp.add_item(noitem, nopiece, line, date_piece)
+            items.append({"ref_art": line["ref_art"], "noitem": noitem,
+                         "qte": line["qte"], "prix": line["prix"]})
+        imp.advance_generator("NEXTITEM", item_no)
+
+        cur = con.cursor()
+        cur.execute(
+            "SELECT COALESCE(SUM(QTE * PRIXHT), 0), "
+            "       COALESCE(SUM(QTE * PRIXHT * COALESCE(TVA, 0) / 100.0), 0) "
+            "FROM ITEM WHERE NOPIECE = ?", (nopiece,))
+        ht, tva_amt = cur.fetchone()
+        ht = round(float(ht or 0), 4)
+        tva_amt = round(float(tva_amt or 0), 4)
+        ttc = round(ht + tva_amt, 4)
+        imp.update_totaux(nopiece, ht, tva_amt, ttc)
+
+        result = {
+            "nopiece": nopiece, "items": items,
+            "created": created, "existing": existing, "updated": updated,
+            "barcode_added": len(imp.barcode_added), "barcode_skipped": imp.barcode_skipped,
+            "montant_ht": ht, "tva": tva_amt, "montant_ttc": ttc,
+        }
+        con.commit()
+        return result
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def mode_list_tiers(cfg, out_path):
     """Liste fournisseurs (sous-arbre FO) et depots (sous-arbre DP) et ecrit le JSON."""
     data = list_tiers(cfg)

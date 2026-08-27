@@ -10,15 +10,15 @@ import sqlite3
 
 from hub.central_db import (
     enqueue_op, apply_barcode_ops_local, apply_price_changes_local,
-    apply_item_edit_local, completed_op_result, record_completed_op,
-    log_immediate_op,
+    apply_item_edit_local, apply_item_add_local, completed_op_result,
+    record_completed_op, log_immediate_op,
 )
 from hub.write_back import (
     is_reachable, write_bdr, write_prices, write_barcode_ops, write_item_edit,
-    WriteError,
+    write_items_added, WriteError,
 )
 
-OP_TYPES = ("bdr_import", "price_update", "barcode_ops", "item_edit")
+OP_TYPES = ("bdr_import", "price_update", "barcode_ops", "item_edit", "item_add")
 
 
 def submit_op(con: sqlite3.Connection, registry, store_id: int,
@@ -52,6 +52,7 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
     if online:
         try:
             kw = store.connect_kwargs()
+            extra: dict = {}
             if op_type == "bdr_import":
                 write_bdr(kw, payload.get("config") or {}, payload.get("lines") or [])
                 n = len(payload.get("lines") or [])
@@ -68,12 +69,19 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
                 write_barcode_ops(kw, bops)
                 apply_barcode_ops_local(con, store_id, bops)
                 n = len(bops)
-            else:  # item_edit
+            elif op_type == "item_edit":
                 edits = payload.get("edits") or []
                 write_item_edit(kw, edits)
                 apply_item_edit_local(con, store_id, edits)
                 n = len(edits)
-            result = {"status": "applied", "count": n}
+            else:  # item_add
+                nopiece = payload.get("nopiece")
+                lines = payload.get("lines") or []
+                imp_result = write_items_added(kw, payload.get("config") or {}, nopiece, lines)
+                apply_item_add_local(con, store_id, imp_result)
+                n = len(lines)
+                extra = {"nopiece": imp_result["nopiece"], "items": imp_result["items"]}
+            result = {"status": "applied", "count": n, **extra}
             if op_uid:
                 record_completed_op(con, op_uid, result)
             log_immediate_op(con, store_id, op_type, payload, "applied", op_uid=op_uid)

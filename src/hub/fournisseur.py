@@ -36,7 +36,7 @@ if _BDR_DIR not in sys.path:
 
 from hub.central_db import (
     fournisseur_mapping, fournisseur_sync_state_get, fournisseur_sync_state_set,
-    fournisseur_pending_add,
+    fournisseur_pending_add, fournisseur_known_dest_nopiece,
 )
 from hub.ops import submit_op
 
@@ -90,12 +90,12 @@ def process_line(con: sqlite3.Connection, registry, line: dict) -> dict:
     if state:
         if state["last_qte"] == qte and state["last_prix"] == prix:
             return {"status": "unchanged", "store_id": store_id}
-        if not state["dest_nopiece"]:
-            # La création initiale est encore en file (magasin hors ligne au
-            # moment du premier passage) : pas de ligne à éditer pour l'instant,
-            # elle sera créée avec les valeurs déjà en file — on ne peut pas
-            # encore répercuter ce changement. Cas rare, se corrigera au
-            # prochain passage une fois la création appliquée.
+        if not state["dest_nopiece"] or not state["dest_noitem"]:
+            # La création (nouvelle pièce OU ajout à une pièce existante) est
+            # encore en file (magasin hors ligne au moment du dernier passage) :
+            # pas de ligne à éditer pour l'instant — on ne peut pas encore
+            # répercuter ce changement. Cas rare, se corrigera au prochain
+            # passage une fois la création appliquée.
             return {"status": "pending_creation", "store_id": store_id}
         edits = [{"nopiece": state["dest_nopiece"], "noitem": state["dest_noitem"],
                  "qte": qte, "prix": prix, "maj_prix_achat": True}]
@@ -131,13 +131,39 @@ def process_line(con: sqlite3.Connection, registry, line: dict) -> dict:
 
 def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece: str,
                    src_noitem: str, dest_ref: str, line: dict) -> dict:
-    """Crée la réception pour UNE ligne dont la référence destinataire est
-    déjà connue (rapprochement automatique 'exact'/'new' DANS process_line, ou
-    résolution humaine d'une ligne 'pending' depuis le tableau de bord) —
-    même chemin online/offline que tout le reste (submit_op)."""
+    """Crée (ou rejoint) la réception pour UNE ligne dont la référence
+    destinataire est déjà connue (rapprochement automatique 'exact'/'new'
+    DANS process_line, ou résolution humaine d'une ligne 'pending' depuis le
+    tableau de bord) — même chemin online/offline que tout le reste
+    (submit_op).
+
+    Si ce bon de livraison (src_nopiece) a DÉJÀ une réception créée via une
+    autre de ses lignes, cette ligne la rejoint (item_add) au lieu d'en créer
+    une seconde pour le même bon — c'est le cas où le fournisseur ajoute des
+    articles à un BL déjà synchronisé."""
     qte = float(line.get("qte") or 0)
     prix = float(line.get("prix") or 0)
     bdr_line = _build_bdr_line(dest_ref, line)
+
+    known_nopiece = fournisseur_known_dest_nopiece(con, store_id, src_nopiece)
+    if known_nopiece:
+        import import_bon_reception as bdr  # type: ignore
+        result = submit_op(con, registry, store_id, "item_add",
+                           {"config": bdr.load_config(None), "nopiece": known_nopiece,
+                            "lines": [bdr_line]})
+        if result.get("status") == "applied":
+            items = result.get("items") or []
+            noitem = items[0]["noitem"] if items else ""
+            fournisseur_sync_state_set(con, store_id, src_nopiece, src_noitem, dest_ref,
+                                       known_nopiece, noitem, qte, prix)
+        elif result.get("status") == "queued":
+            # La pièce est déjà connue, mais le NOITEM de CETTE ligne ne le
+            # sera qu'une fois la file appliquée par l'agent -> laissé vide
+            # (cf. la vérification élargie dans process_line qui couvre aussi
+            # ce cas, pas seulement dest_nopiece vide).
+            fournisseur_sync_state_set(con, store_id, src_nopiece, src_noitem,
+                                       dest_ref, known_nopiece, "", qte, prix)
+        return result
 
     store = registry.get(store_id) if registry else None
     online = False

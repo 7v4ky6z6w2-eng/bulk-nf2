@@ -46,8 +46,35 @@ def apply_op(op: dict, connect_kwargs: dict) -> None:
         _apply_barcode(payload, connect_kwargs)
     elif op_type == "item_edit":
         _apply_item_edit(payload, connect_kwargs)
+    elif op_type == "item_add":
+        _apply_item_add(payload, connect_kwargs)
     else:
         raise ApplyError("Type d'opération inconnu : %s" % op_type)
+
+
+# --------------------------------------------------------------------------- #
+def _apply_item_add(payload: dict, connect_kwargs: dict) -> None:
+    """Ajoute des lignes à une PIECE déjà existante (synchro fournisseur : le
+    fournisseur ajoute des articles à un bon de livraison déjà synchronisé)."""
+    import import_bon_reception as bdr  # type: ignore
+
+    cfg = bdr.load_config(None)
+    cfg.update({
+        "host": "localhost",
+        "port": connect_kwargs.get("port", 3050),
+        "database": connect_kwargs["database"],
+        "user": connect_kwargs.get("user", "SYSDBA"),
+        "password": connect_kwargs.get("password", ""),
+        "charset": connect_kwargs.get("charset", "WIN1256"),
+    })
+    nopiece = payload.get("nopiece")
+    lines = payload.get("lines") or []
+    if not nopiece or not lines:
+        raise ApplyError("Ajout de ligne(s) sans pièce cible ou sans lignes.")
+    try:
+        bdr.add_items(cfg, nopiece, lines)
+    except Exception as exc:  # noqa: BLE001
+        raise ApplyError("Ajout de ligne(s) échoué : %s" % exc) from exc
 
 
 # --------------------------------------------------------------------------- #

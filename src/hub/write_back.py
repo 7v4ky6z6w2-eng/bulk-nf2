@@ -127,6 +127,29 @@ def write_bdr_result(connect_kwargs: dict, config: dict, lines: list) -> dict:
         raise WriteError("Import BDR échoué : %s" % exc) from exc
 
 
+def write_items_added(connect_kwargs: dict, config: dict, nopiece: str, lines: list) -> dict:
+    """Ajoute des lignes à une PIECE déjà existante (nopiece connu), sans en
+    créer une seconde — synchro fournisseur : le fournisseur ajoute des
+    articles à un bon de livraison déjà synchronisé, ces articles rejoignent
+    la réception déjà créée. Voir import_bon_reception.add_items."""
+    import import_bon_reception as bdr  # type: ignore
+    if not lines:
+        raise WriteError("Aucune ligne à ajouter.")
+    cfg = dict(config)
+    cfg.update({
+        "host": connect_kwargs.get("host", "localhost"),
+        "port": connect_kwargs.get("port", 3050),
+        "database": connect_kwargs["database"],
+        "user": connect_kwargs.get("user", "SYSDBA"),
+        "password": connect_kwargs.get("password", ""),
+        "charset": connect_kwargs.get("charset", "WIN1256"),
+    })
+    try:
+        return bdr.add_items(cfg, nopiece, lines)
+    except Exception as exc:  # noqa: BLE001
+        raise WriteError("Ajout de ligne(s) échoué : %s" % exc) from exc
+
+
 def write_item_edit(connect_kwargs: dict, edits: list) -> None:
     """Modifie en place des lignes ITEM déjà créées (nopiece/noitem connus) —
     quantité/prix d'une réception déjà importée qui change ensuite (synchro
