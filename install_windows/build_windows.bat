@@ -64,7 +64,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [2/2] Construction de PrimeNFHub.exe (application bureau)...
+echo [2/3] Construction de PrimeNFHub.exe (application bureau)...
 %PYCMD% -m PyInstaller --onefile ^
   --name PrimeNFHub ^
   --add-data "src;src" ^
@@ -82,9 +82,25 @@ if errorlevel 1 (
   exit /b 1
 )
 
+echo [3/3] Construction de PrimeNFFournisseurSync.exe (poste du fournisseur)...
+%PYCMD% -m PyInstaller --onefile ^
+  --name PrimeNFFournisseurSync ^
+  --add-data "src;src" ^
+  --hidden-import fdb ^
+  --hidden-import requests ^
+  --hidden-import PySide6 ^
+  fournisseur_sync.py
+
+if errorlevel 1 (
+  echo ERREUR : pyinstaller a echoue pour PrimeNFFournisseurSync
+  pause
+  exit /b 1
+)
+
 echo.
 echo Construction terminee.
-echo   dist\PrimeNFAgent.exe  -- a copier sur les postes 2 et 3
-echo   dist\PrimeNFHub.exe    -- application bureau (tout poste)
+echo   dist\PrimeNFAgent.exe            -- a copier sur les postes 2 et 3
+echo   dist\PrimeNFHub.exe              -- application bureau (tout poste)
+echo   dist\PrimeNFFournisseurSync.exe  -- a copier sur le poste du fournisseur
 echo.
 pause
