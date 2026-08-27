@@ -101,6 +101,46 @@ def bdr_reconcile(connect_kwargs: dict, lines: list) -> list:
     return bdr.reconcile_lines(_bdr_cfg(connect_kwargs), lines)
 
 
+def write_bdr_result(connect_kwargs: dict, config: dict, lines: list) -> dict:
+    """Comme write_bdr, mais appelle run_import DIRECTEMENT (pas de
+    fichiers temporaires ni de sys.argv/bdr.main()) et renvoie le résultat
+    structuré (NOPIECE/NOITEM créés, entre autres) — nécessaire pour la
+    synchro fournisseur, qui doit retrouver la ligne créée si le fournisseur
+    modifie prix/qté après coup. Pas besoin du verrou de write_bdr : aucun
+    état partagé au niveau process (pas de sys.argv), donc pas de risque de
+    collision entre deux appels concurrents."""
+    import import_bon_reception as bdr  # type: ignore
+    if not lines:
+        raise WriteError("BDR sans lignes.")
+    cfg = dict(config)
+    cfg.update({
+        "host": connect_kwargs.get("host", "localhost"),
+        "port": connect_kwargs.get("port", 3050),
+        "database": connect_kwargs["database"],
+        "user": connect_kwargs.get("user", "SYSDBA"),
+        "password": connect_kwargs.get("password", ""),
+        "charset": connect_kwargs.get("charset", "WIN1256"),
+    })
+    try:
+        return bdr.run_import(cfg, lines)
+    except Exception as exc:  # noqa: BLE001
+        raise WriteError("Import BDR échoué : %s" % exc) from exc
+
+
+def write_item_edit(connect_kwargs: dict, edits: list) -> None:
+    """Modifie en place des lignes ITEM déjà créées (nopiece/noitem connus) —
+    quantité/prix d'une réception déjà importée qui change ensuite (synchro
+    fournisseur). Voir import_bon_reception.edit_items pour la justification
+    de sécurité vis-à-vis du stock (calculé à la volée, pas un compteur)."""
+    import import_bon_reception as bdr  # type: ignore
+    if not edits:
+        raise WriteError("Aucune modification à appliquer.")
+    try:
+        bdr.edit_items(_bdr_cfg(connect_kwargs), edits)
+    except Exception as exc:  # noqa: BLE001
+        raise WriteError("Modification de ligne échouée : %s" % exc) from exc
+
+
 def write_prices(connect_kwargs: dict, changes: list) -> None:
     """Met à jour les prix directement sur le magasin (host = IP Tailscale ou localhost)."""
     import article_db  # type: ignore

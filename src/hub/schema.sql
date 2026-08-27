@@ -233,3 +233,56 @@ CREATE TABLE IF NOT EXISTS digest_log (
     sent_at      TEXT NOT NULL,
     PRIMARY KEY (digest_type, digest_date)
 );
+
+-- ──────────────────── Synchro fournisseur (BL -> BDR) ──────────────────────
+-- Correspondance CODE_TIERS (client dans le Firebird du fournisseur) ->
+-- magasin destinataire. Éditable depuis le tableau de bord web ; alimentée au
+-- premier lancement de l'outil de synchro (qui liste les clients de son
+-- propre Firebird pour que l'utilisateur choisisse).
+CREATE TABLE IF NOT EXISTS fournisseur_tiers_map (
+    code_tiers      TEXT PRIMARY KEY,
+    store_id        INTEGER NOT NULL,
+    raison_sociale  TEXT,
+    created_at      TEXT NOT NULL
+);
+
+-- Une ligne par ligne de BON DE LIVRAISON fournisseur déjà traitée, indexée
+-- par la pièce/ligne D'ORIGINE (chez le fournisseur) : empêche de recréer une
+-- ligne déjà importée, et retrouve la ligne de réception déjà créée côté
+-- magasin quand le fournisseur modifie prix/qté après coup (édition en place
+-- via l'opération item_edit).
+CREATE TABLE IF NOT EXISTS fournisseur_sync_state (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id       INTEGER NOT NULL,
+    src_nopiece    TEXT    NOT NULL,        -- NOPIECE chez le fournisseur
+    src_noitem     TEXT    NOT NULL,        -- NOITEM chez le fournisseur
+    dest_ref_art   TEXT    NOT NULL,        -- référence retenue côté magasin
+    dest_nopiece   TEXT    NOT NULL,        -- NOPIECE créé côté magasin
+    dest_noitem    TEXT    NOT NULL,        -- NOITEM créé côté magasin
+    last_qte       REAL,
+    last_prix      REAL,
+    updated_at     TEXT    NOT NULL,
+    UNIQUE (store_id, src_nopiece, src_noitem)
+);
+
+-- Lignes de BL dont l'article n'a pu être rapproché qu'approximativement (par
+-- désignation, pas par référence/code-barres) : en attente de décision
+-- humaine sur le tableau de bord web — jamais appliquées automatiquement.
+CREATE TABLE IF NOT EXISTS fournisseur_pending (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id       INTEGER NOT NULL,
+    src_nopiece    TEXT    NOT NULL,
+    src_noitem     TEXT    NOT NULL,
+    ref_art        TEXT,                    -- référence côté fournisseur
+    designation    TEXT,
+    qte            REAL,
+    prix           REAL,
+    code_barres    TEXT,
+    candidates     TEXT,                    -- JSON : candidats de rapprochement
+    status         TEXT DEFAULT 'pending',  -- pending | resolved | ignored
+    resolution     TEXT,                    -- JSON du choix retenu
+    created_at     TEXT NOT NULL,
+    resolved_at    TEXT,
+    UNIQUE (store_id, src_nopiece, src_noitem)
+);
+CREATE INDEX IF NOT EXISTS idx_fourn_pending_status ON fournisseur_pending (status);

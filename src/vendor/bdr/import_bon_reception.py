@@ -638,14 +638,22 @@ _GENERIC_WORDS = {
 }
 
 
-def build_article_index(cur):
+def build_article_index(cur, extra_where=None, params=()):
     """Index memoire des articles existants par numero-token (une requete).
     Retourne (by_number, exact_refs, prix_achat_by_ref, common_words).
     common_words : mots presents dans beaucoup d'articles (categories generiques
     comme 'feutre', 'gomme', 'compas') -> non-discriminants, exclus du calcul de
     similarite pour eviter les faux rapprochements par simple coincidence de
-    categorie + numero de conditionnement."""
-    cur.execute("SELECT REF_ART, DESIGNATION, PRIXACHATHT FROM ARTICLE")
+    categorie + numero de conditionnement.
+
+    `extra_where`/`params` : clause WHERE optionnelle (ex. restreindre a un
+    magasin quand `cur` interroge le miroir central multi-magasins au lieu
+    d'un ARTICLE Firebird mono-magasin) — vide par defaut, comportement
+    inchange pour tous les appelants existants."""
+    sql = "SELECT REF_ART, DESIGNATION, PRIXACHATHT FROM ARTICLE"
+    if extra_where:
+        sql += " WHERE " + extra_where
+    cur.execute(sql, params)
     rows = cur.fetchall()
 
     # 1) frequence documentaire des mots (sur TOUS les articles) pour detecter
@@ -1292,6 +1300,61 @@ def mode_list_familles(cfg, out_path):
     print("Familles : %d -> %s" % (len(out), out_path))
 
 
+def edit_items(cfg, edits):
+    """Modifie EN PLACE des lignes ITEM déjà créées (nopiece/noitem connus),
+    recalcule les totaux de la PIECE parente, et met à jour le prix d'achat de
+    l'article si demandé. Sert à la synchro fournisseur : un bon de livraison
+    fournisseur déjà importé dont la quantité ou le prix change ensuite doit
+    répercuter le changement SANS créer une seconde réception.
+
+    `edits` : liste de {"nopiece", "noitem", "qte", "prix", "maj_prix_achat"}.
+
+    Le stock n'est PAS un compteur stocké dans ce logiciel : SPSTOCK/SPSTOCKDEP
+    le recalculent à la volée à partir des lignes ITEM actuelles (confirmé :
+    aucun trigger d'INSERT sur ITEM, aucune table de stock écrite par ce
+    script — seule ANNULEE déclenche une répercussion, via UPDATE_PIECE).
+    Modifier QTE/PRIXHT directement est donc sans risque pour le stock, tant
+    que REF_ART/COEFF/COEFF_TR/NOPIECE ne changent pas — ce que cette fonction
+    ne touche jamais."""
+    con = connect(cfg)
+    cur = con.cursor()
+    try:
+        touched_pieces = set()
+        for e in edits:
+            cur.execute(
+                "UPDATE ITEM SET QTE = ?, PRIXHT = ? WHERE NOPIECE = ? AND NOITEM = ?",
+                (e["qte"], e["prix"], e["nopiece"], e["noitem"]))
+            touched_pieces.add(e["nopiece"])
+            if e.get("maj_prix_achat"):
+                cur.execute("SELECT REF_ART FROM ITEM WHERE NOPIECE = ? AND NOITEM = ?",
+                           (e["nopiece"], e["noitem"]))
+                row = cur.fetchone()
+                if row and row[0]:
+                    cur.execute(
+                        "UPDATE ARTICLE SET PRIXACHATHT = ?, PRIXACHATTTC = ? "
+                        "WHERE REF_ART = ?",
+                        (e["prix"], e["prix"], row[0]))
+        for nopiece in touched_pieces:
+            cur.execute(
+                "SELECT COALESCE(SUM(QTE * PRIXHT), 0), "
+                "       COALESCE(SUM(QTE * PRIXHT * COALESCE(TVA, 0) / 100.0), 0) "
+                "FROM ITEM WHERE NOPIECE = ?", (nopiece,))
+            ht, tva_amt = cur.fetchone()
+            ht = round(float(ht or 0), 4)
+            tva_amt = round(float(tva_amt or 0), 4)
+            ttc = round(ht + tva_amt, 4)
+            cur.execute(
+                "UPDATE PIECE SET MONTANTHT = ?, TVA = ?, MONTANTTTC = ?, MONTANT = ? "
+                "WHERE NOPIECE = ?",
+                (ht, tva_amt, ttc, ttc, nopiece))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def mode_list_tiers(cfg, out_path):
     """Liste fournisseurs (sous-arbre FO) et depots (sous-arbre DP) et ecrit le JSON."""
     data = list_tiers(cfg)
@@ -1406,6 +1469,72 @@ def mode_cancel_piece(cfg, nopiece):
         con.close()
 
 
+def run_import(cfg, lines, date_piece=None, dry_run=False):
+    """Coeur de l'import : ouvre une connexion, cree la piece + ses lignes,
+    calcule les totaux, commit (ou rollback si dry_run). Renvoie un dict
+    structure — utilise par main() (CLI, qui affiche le resume a partir de ce
+    dict) ET par tout appelant qui a besoin du NOPIECE/NOITEM crees (ex.
+    synchro fournisseur : retrouver plus tard la ligne a editer si le
+    fournisseur change prix/qte apres coup, sans re-analyser tout le bon)."""
+    date_piece = date_piece or datetime.datetime.now()
+    con = connect(cfg)
+    imp = Importer(con, cfg)
+    try:
+        imp.ensure_famille(cfg["default_famille"], cfg["default_famille_intitule"])
+        imp.ensure_unite(cfg.get("default_unite"), cfg["default_unite_intitule"])
+        if cfg.get("create_missing_tiers"):
+            imp.ensure_tiers(cfg.get("code_tiers"), cfg.get("raison_sociale"), "fournisseur")
+            imp.ensure_tiers(cfg.get("code_depot"), cfg.get("code_depot"), "depot")
+
+        nopiece = str(imp.next_base("NEXTPIECE", "PIECE", "NOPIECE") + 1)
+        item_no = imp.next_base("NEXTITEM", "ITEM", "NOITEM")
+        imp.create_piece(nopiece, date_piece)
+
+        created, existing, updated, items = [], [], [], []
+        montant_ht = tva_tot = 0.0
+        for line in lines:
+            state = imp.upsert_article(line)
+            if state == "created":
+                created.append(line["ref_art"])
+            elif state == "updated":
+                updated.append(line["ref_art"])
+            else:
+                existing.append(line["ref_art"])
+            item_no += 1
+            noitem = str(item_no)
+            imp.add_item(noitem, nopiece, line, date_piece)
+            items.append({"ref_art": line["ref_art"], "noitem": noitem,
+                         "qte": line["qte"], "prix": line["prix"]})
+            ht = line["qte"] * line["prix"]
+            montant_ht += ht
+            tva_tot += ht * line["tva"] / 100.0
+
+        montant_ttc = montant_ht + tva_tot
+        imp.update_totaux(nopiece, round(montant_ht, 4),
+                          round(tva_tot, 4), round(montant_ttc, 4))
+        imp.advance_generator("NEXTPIECE", int(nopiece))
+        imp.advance_generator("NEXTITEM", item_no)
+        ref_piece = imp.get_ref_piece(nopiece)
+
+        result = {
+            "nopiece": nopiece, "ref_piece": ref_piece, "items": items,
+            "created": created, "existing": existing, "updated": updated,
+            "barcode_added": len(imp.barcode_added), "barcode_skipped": imp.barcode_skipped,
+            "montant_ht": round(montant_ht, 2), "tva": round(tva_tot, 2),
+            "montant_ttc": round(montant_ttc, 2), "dry_run": dry_run,
+        }
+        if dry_run:
+            con.rollback()
+        else:
+            con.commit()
+        return result
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def make_template(path):
     """Ecrit un modele Excel avec les colonnes reconnues par l'outil."""
     wb = openpyxl.Workbook()
@@ -1492,74 +1621,9 @@ def main():
     else:
         date_piece = datetime.datetime.now()
 
-    # 2) Connexion + import (transaction unique)
-    con = connect(cfg)
-    imp = Importer(con, cfg)
     try:
-        # referentiels minimaux  (PIECE.USERNAME = utilisateur de connexion)
-        imp.ensure_famille(cfg["default_famille"], cfg["default_famille_intitule"])
-        imp.ensure_unite(cfg.get("default_unite"), cfg["default_unite_intitule"])
-        if cfg.get("create_missing_tiers"):
-            imp.ensure_tiers(cfg.get("code_tiers"), cfg.get("raison_sociale"), "fournisseur")
-            imp.ensure_tiers(cfg.get("code_depot"), cfg.get("code_depot"), "depot")
-
-        # numerotation collision-safe (MAX existant ou generateur)
-        nopiece = str(imp.next_base("NEXTPIECE", "PIECE", "NOPIECE") + 1)
-        item_no = imp.next_base("NEXTITEM", "ITEM", "NOITEM")
-
-        imp.create_piece(nopiece, date_piece)
-
-        created, existing, updated = [], [], []
-        montant_ht = tva_tot = 0.0
-        for line in lines:
-            state = imp.upsert_article(line)
-            if state == "created":
-                created.append(line["ref_art"])
-            elif state == "updated":
-                updated.append(line["ref_art"])
-            else:
-                existing.append(line["ref_art"])
-            item_no += 1
-            imp.add_item(str(item_no), nopiece, line, date_piece)
-            ht = line["qte"] * line["prix"]
-            montant_ht += ht
-            tva_tot += ht * line["tva"] / 100.0
-
-        montant_ttc = montant_ht + tva_tot
-        imp.update_totaux(nopiece, round(montant_ht, 4),
-                          round(tva_tot, 4), round(montant_ttc, 4))
-        # tenir les generateurs a jour (au cas ou l'appli les utilise)
-        imp.advance_generator("NEXTPIECE", int(nopiece))
-        imp.advance_generator("NEXTITEM", item_no)
-        ref_piece = imp.get_ref_piece(nopiece)
-
-        # 3) Resume
-        print("-" * 60)
-        print("Bon de reception : NOPIECE=%s  REF_PIECE=%s  (type %s)"
-              % (nopiece, ref_piece, cfg["code_type_piece"]))
-        print("Fournisseur : %s    Depot : %s"
-              % (cfg.get("code_tiers") or "(aucun)", cfg.get("code_depot") or "(aucun)"))
-        print("Articles crees   : %d  %s"
-              % (len(created), created if len(created) <= 20 else created[:20] + ["..."]))
-        print("Articles existants : %d" % len(existing))
-        print("Articles mis a jour (prix achat) : %d" % len(updated))
-        print("Codes-barres renseignes : %d" % len(imp.barcode_added))
-        if imp.barcode_skipped:
-            print("Codes-barres ignores (doublon/conflit) : %d  %s"
-                  % (len(imp.barcode_skipped),
-                     [b for _r, b in imp.barcode_skipped[:10]]))
-        print("Total HT  : %.2f" % montant_ht)
-        print("Total TVA : %.2f" % tva_tot)
-        print("Total TTC : %.2f" % montant_ttc)
-
-        if args.dry_run:
-            con.rollback()
-            print("\n[DRY-RUN] Aucune modification enregistree (rollback).")
-        else:
-            con.commit()
-            print("\nImport termine et enregistre (commit).")
+        result = run_import(cfg, lines, date_piece, dry_run=args.dry_run)
     except Exception as exc:
-        con.rollback()
         msg = str(exc)
         print("\nECHEC : aucune ecriture (transaction annulee).", file=sys.stderr)
         print("Detail : %s" % msg, file=sys.stderr)
@@ -1570,8 +1634,30 @@ def main():
                   "(WIN1252 recommande pour ces bases ; sinon NONE)."
                   % cfg.get("charset"), file=sys.stderr)
         sys.exit(1)
-    finally:
-        con.close()
+
+    print("-" * 60)
+    print("Bon de reception : NOPIECE=%s  REF_PIECE=%s  (type %s)"
+          % (result["nopiece"], result["ref_piece"], cfg["code_type_piece"]))
+    print("Fournisseur : %s    Depot : %s"
+          % (cfg.get("code_tiers") or "(aucun)", cfg.get("code_depot") or "(aucun)"))
+    created, existing, updated = result["created"], result["existing"], result["updated"]
+    print("Articles crees   : %d  %s"
+          % (len(created), created if len(created) <= 20 else created[:20] + ["..."]))
+    print("Articles existants : %d" % len(existing))
+    print("Articles mis a jour (prix achat) : %d" % len(updated))
+    print("Codes-barres renseignes : %d" % result["barcode_added"])
+    if result["barcode_skipped"]:
+        print("Codes-barres ignores (doublon/conflit) : %d  %s"
+              % (len(result["barcode_skipped"]),
+                 [b for _r, b in result["barcode_skipped"][:10]]))
+    print("Total HT  : %.2f" % result["montant_ht"])
+    print("Total TVA : %.2f" % result["tva"])
+    print("Total TTC : %.2f" % result["montant_ttc"])
+
+    if args.dry_run:
+        print("\n[DRY-RUN] Aucune modification enregistree (rollback).")
+    else:
+        print("\nImport termine et enregistre (commit).")
 
 
 if __name__ == "__main__":

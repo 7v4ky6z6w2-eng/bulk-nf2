@@ -44,8 +44,33 @@ def apply_op(op: dict, connect_kwargs: dict) -> None:
         _apply_price(payload, connect_kwargs)
     elif op_type == "barcode_ops":
         _apply_barcode(payload, connect_kwargs)
+    elif op_type == "item_edit":
+        _apply_item_edit(payload, connect_kwargs)
     else:
         raise ApplyError("Type d'opération inconnu : %s" % op_type)
+
+
+# --------------------------------------------------------------------------- #
+def _apply_item_edit(payload: dict, connect_kwargs: dict) -> None:
+    """Modifie en place des lignes ITEM déjà créées (synchro fournisseur : une
+    quantité/un prix change après coup sur une réception déjà importée)."""
+    import import_bon_reception as bdr  # type: ignore
+
+    cfg = {
+        "host": "localhost",
+        "port": connect_kwargs.get("port", 3050),
+        "database": connect_kwargs["database"],
+        "user": connect_kwargs.get("user", "SYSDBA"),
+        "password": connect_kwargs.get("password", ""),
+        "charset": connect_kwargs.get("charset", "WIN1256"),
+    }
+    edits = payload.get("edits") or []
+    if not edits:
+        raise ApplyError("Modification de ligne sans changements.")
+    try:
+        bdr.edit_items(cfg, edits)
+    except Exception as exc:  # noqa: BLE001
+        raise ApplyError("Modification de ligne échouée : %s" % exc) from exc
 
 
 def _apply_barcode(payload: dict, connect_kwargs: dict) -> None:

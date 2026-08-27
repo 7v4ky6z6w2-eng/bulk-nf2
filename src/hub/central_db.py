@@ -1038,6 +1038,44 @@ _PRICE_MIRROR_COLS = {
 }
 
 
+def apply_item_edit_local(con: sqlite3.Connection, store_id: int, edits: list) -> None:
+    """Répercute une op item_edit (qte/prix d'une ligne déjà créée modifiée —
+    synchro fournisseur) sur le miroir central : la ligne item, le prix
+    d'achat de l'article si demandé, et le total de la pièce (recalculé à
+    partir des lignes item du miroir — TVA non mirée sur item, montantttc
+    approximé = montantht, cohérent avec le "TTC = HT (pas de TVA)" déjà
+    utilisé ailleurs pour l'éditeur de prix ; corrigé au prochain sync complet)."""
+    touched_pieces = set()
+    for e in edits or []:
+        nopiece, noitem = e.get("nopiece"), e.get("noitem")
+        if not nopiece or not noitem:
+            continue
+        con.execute(
+            "UPDATE item SET qte=?, prixht=?, synced_at=? "
+            "WHERE store_id=? AND nopiece=? AND noitem=?",
+            (e.get("qte"), e.get("prix"), now_iso(), store_id, nopiece, noitem))
+        touched_pieces.add(nopiece)
+        if e.get("maj_prix_achat"):
+            row = con.execute(
+                "SELECT ref_art FROM item WHERE store_id=? AND nopiece=? AND noitem=?",
+                (store_id, nopiece, noitem)).fetchone()
+            if row and row["ref_art"]:
+                con.execute(
+                    "UPDATE article SET prixachatht=?, synced_at=? "
+                    "WHERE store_id=? AND ref_art=?",
+                    (e.get("prix"), now_iso(), store_id, row["ref_art"]))
+    for nopiece in touched_pieces:
+        row = con.execute(
+            "SELECT COALESCE(SUM(qte * prixht), 0) FROM item "
+            "WHERE store_id=? AND nopiece=?", (store_id, nopiece)).fetchone()
+        ht = round(float(row[0] or 0), 4)
+        con.execute(
+            "UPDATE piece SET montantht=?, montantttc=?, synced_at=? "
+            "WHERE store_id=? AND nopiece=?",
+            (ht, ht, now_iso(), store_id, nopiece))
+    con.commit()
+
+
 def apply_price_changes_local(con: sqlite3.Connection, store_id: int,
                               changes: list) -> None:
     """Répercute une op price_update appliquée sur le miroir central (même
@@ -1056,4 +1094,113 @@ def apply_price_changes_local(con: sqlite3.Connection, store_id: int,
         params += [now_iso(), store_id, ref]
         con.execute("UPDATE article SET %s WHERE store_id=? AND ref_art=?"
                     % ", ".join(sets), params)
+    con.commit()
+
+
+# --------------------------------------------------------------------------- #
+#  Synchro fournisseur (bon de livraison fournisseur -> bon de réception)
+# --------------------------------------------------------------------------- #
+def fournisseur_mapping(con: sqlite3.Connection) -> dict:
+    """{code_tiers: {"store_id":, "raison_sociale":}} — la correspondance
+    client-fournisseur -> magasin destinataire, éditable sur le tableau de
+    bord web."""
+    rows = con.execute(
+        "SELECT code_tiers, store_id, raison_sociale FROM fournisseur_tiers_map"
+    ).fetchall()
+    return {r["code_tiers"]: {"store_id": r["store_id"],
+                              "raison_sociale": r["raison_sociale"]} for r in rows}
+
+
+def fournisseur_set_mapping(con: sqlite3.Connection, code_tiers: str, store_id: int,
+                            raison_sociale: str | None = None) -> None:
+    con.execute(
+        "INSERT INTO fournisseur_tiers_map (code_tiers, store_id, raison_sociale, created_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(code_tiers) DO UPDATE SET store_id=excluded.store_id, "
+        "  raison_sociale=excluded.raison_sociale",
+        (code_tiers, store_id, raison_sociale, now_iso()))
+    con.commit()
+
+
+def fournisseur_delete_mapping(con: sqlite3.Connection, code_tiers: str) -> None:
+    con.execute("DELETE FROM fournisseur_tiers_map WHERE code_tiers=?", (code_tiers,))
+    con.commit()
+
+
+def fournisseur_sync_state_get(con: sqlite3.Connection, store_id: int,
+                               src_nopiece: str, src_noitem: str) -> dict | None:
+    row = con.execute(
+        "SELECT * FROM fournisseur_sync_state "
+        "WHERE store_id=? AND src_nopiece=? AND src_noitem=?",
+        (store_id, src_nopiece, src_noitem)).fetchone()
+    return dict(row) if row else None
+
+
+def fournisseur_sync_state_set(con: sqlite3.Connection, store_id: int, src_nopiece: str,
+                               src_noitem: str, dest_ref_art: str, dest_nopiece: str,
+                               dest_noitem: str, qte: float, prix: float) -> None:
+    con.execute(
+        "INSERT INTO fournisseur_sync_state "
+        "(store_id, src_nopiece, src_noitem, dest_ref_art, dest_nopiece, dest_noitem, "
+        " last_qte, last_prix, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(store_id, src_nopiece, src_noitem) DO UPDATE SET "
+        "  dest_ref_art=excluded.dest_ref_art, dest_nopiece=excluded.dest_nopiece, "
+        "  dest_noitem=excluded.dest_noitem, last_qte=excluded.last_qte, "
+        "  last_prix=excluded.last_prix, updated_at=excluded.updated_at",
+        (store_id, src_nopiece, src_noitem, dest_ref_art, dest_nopiece, dest_noitem,
+         qte, prix, now_iso()))
+    con.commit()
+
+
+def fournisseur_pending_add(con: sqlite3.Connection, store_id: int, src_nopiece: str,
+                            src_noitem: str, ref_art: str | None, designation: str | None,
+                            qte: float | None, prix: float | None,
+                            code_barres: str | None, candidates: list) -> None:
+    con.execute(
+        "INSERT OR IGNORE INTO fournisseur_pending "
+        "(store_id, src_nopiece, src_noitem, ref_art, designation, qte, prix, "
+        " code_barres, candidates, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+        (store_id, src_nopiece, src_noitem, ref_art, designation, qte, prix,
+         code_barres, json.dumps(candidates or []), now_iso()))
+    con.commit()
+
+
+def _fournisseur_pending_row(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    try:
+        d["candidates"] = json.loads(d.get("candidates") or "[]")
+    except (TypeError, ValueError):
+        d["candidates"] = []
+    resolution = d.get("resolution")
+    if resolution:
+        try:
+            d["resolution"] = json.loads(resolution)
+        except (TypeError, ValueError):
+            pass
+    return d
+
+
+def fournisseur_pending_list(con: sqlite3.Connection, status: str = "pending") -> list:
+    rows = con.execute(
+        "SELECT * FROM fournisseur_pending WHERE status=? ORDER BY created_at",
+        (status,)).fetchall()
+    return [_fournisseur_pending_row(r) for r in rows]
+
+
+def fournisseur_pending_get(con: sqlite3.Connection, pending_id: int) -> dict | None:
+    row = con.execute("SELECT * FROM fournisseur_pending WHERE id=?", (pending_id,)).fetchone()
+    return _fournisseur_pending_row(row) if row else None
+
+
+def fournisseur_pending_resolve(con: sqlite3.Connection, pending_id: int, resolution: dict) -> None:
+    con.execute(
+        "UPDATE fournisseur_pending SET status='resolved', resolution=?, resolved_at=? WHERE id=?",
+        (json.dumps(resolution), now_iso(), pending_id))
+    con.commit()
+
+
+def fournisseur_pending_ignore(con: sqlite3.Connection, pending_id: int) -> None:
+    con.execute("UPDATE fournisseur_pending SET status='ignored', resolved_at=? WHERE id=?",
+               (now_iso(), pending_id))
     con.commit()

@@ -10,11 +10,15 @@ import sqlite3
 
 from hub.central_db import (
     enqueue_op, apply_barcode_ops_local, apply_price_changes_local,
-    completed_op_result, record_completed_op, log_immediate_op,
+    apply_item_edit_local, completed_op_result, record_completed_op,
+    log_immediate_op,
 )
-from hub.write_back import is_reachable, write_bdr, write_prices, write_barcode_ops, WriteError
+from hub.write_back import (
+    is_reachable, write_bdr, write_prices, write_barcode_ops, write_item_edit,
+    WriteError,
+)
 
-OP_TYPES = ("bdr_import", "price_update", "barcode_ops")
+OP_TYPES = ("bdr_import", "price_update", "barcode_ops", "item_edit")
 
 
 def submit_op(con: sqlite3.Connection, registry, store_id: int,
@@ -59,11 +63,16 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
                 # rattraperait donc jamais ces nouvelles valeurs.
                 apply_price_changes_local(con, store_id, changes)
                 n = len(changes)
-            else:  # barcode_ops
+            elif op_type == "barcode_ops":
                 bops = payload.get("ops") or []
                 write_barcode_ops(kw, bops)
                 apply_barcode_ops_local(con, store_id, bops)
                 n = len(bops)
+            else:  # item_edit
+                edits = payload.get("edits") or []
+                write_item_edit(kw, edits)
+                apply_item_edit_local(con, store_id, edits)
+                n = len(edits)
             result = {"status": "applied", "count": n}
             if op_uid:
                 record_completed_op(con, op_uid, result)
