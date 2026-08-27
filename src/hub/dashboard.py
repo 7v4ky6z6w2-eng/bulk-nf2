@@ -26,6 +26,9 @@ from hub.central_db import (
     stock_value, stock_value_top, low_stock, negative_stock, transfer_suggestions,
     sales_by_product, dead_stock, VENTE_TYPES,
     piece_type_breakdown, tresorerie_range_by_store,
+    fournisseur_mapping, fournisseur_set_mapping, fournisseur_delete_mapping,
+    fournisseur_pending_list, fournisseur_pending_get, fournisseur_pending_resolve,
+    fournisseur_pending_ignore, fournisseur_sync_state_set,
 )
 from hub.ops import submit_op
 
@@ -364,6 +367,78 @@ def diagnostic_types():
     rows = piece_type_breakdown(_db())
     return render_template("diagnostic_types.html", rows=rows, vente_types=list(VENTE_TYPES),
                            store_names=_store_names())
+
+
+# ── Synchro fournisseur : mapping client -> magasin, et file d'attente ───────
+@bp.get("/fournisseur-mapping")
+def fournisseur_mapping_view():
+    con = _db()
+    reg = _registry()
+    mapping = fournisseur_mapping(con)
+    return render_template("fournisseur_mapping.html", mapping=mapping,
+                           stores=(reg.stores if reg else []), store_names=_store_names())
+
+
+@bp.post("/fournisseur-mapping/set")
+def fournisseur_mapping_set():
+    code_tiers = (request.form.get("code_tiers") or "").strip()
+    store_id = request.form.get("store_id")
+    raison = (request.form.get("raison_sociale") or "").strip() or None
+    if code_tiers and store_id:
+        fournisseur_set_mapping(_db(), code_tiers, int(store_id), raison)
+    return redirect(url_for("dashboard.fournisseur_mapping_view"))
+
+
+@bp.post("/fournisseur-mapping/delete")
+def fournisseur_mapping_delete():
+    code_tiers = (request.form.get("code_tiers") or "").strip()
+    if code_tiers:
+        fournisseur_delete_mapping(_db(), code_tiers)
+    return redirect(url_for("dashboard.fournisseur_mapping_view"))
+
+
+@bp.get("/fournisseur-pending")
+def fournisseur_pending_view():
+    pending = fournisseur_pending_list(_db())
+    return render_template("fournisseur_pending.html", pending=pending,
+                           store_names=_store_names())
+
+
+@bp.post("/fournisseur-pending/resolve")
+def fournisseur_pending_resolve_route():
+    from hub.fournisseur import apply_new_line
+    con = _db()
+    reg = _registry()
+    try:
+        pending_id = int(request.form.get("pending_id") or 0)
+    except ValueError:
+        pending_id = 0
+    action = request.form.get("action") or ""
+    item = fournisseur_pending_get(con, pending_id) if pending_id else None
+    error = None
+
+    if not item or item["status"] != "pending":
+        error = "Ligne introuvable ou déjà traitée."
+    elif action == "ignore":
+        fournisseur_pending_ignore(con, pending_id)
+    else:
+        dest_ref = (request.form.get("link_ref") or "").strip() if action == "link" \
+            else (item.get("ref_art") or "").strip()
+        if not dest_ref:
+            error = "Référence manquante."
+        else:
+            result = apply_new_line(con, reg, item["store_id"], item["src_nopiece"],
+                                    item["src_noitem"], dest_ref, item)
+            if result.get("status") == "error":
+                error = result.get("error")
+            else:
+                fournisseur_pending_resolve(con, pending_id,
+                                            {"action": action, "ref_art": dest_ref,
+                                             "result": result.get("status")})
+
+    pending = fournisseur_pending_list(con)
+    return render_template("fournisseur_pending.html", pending=pending,
+                           store_names=_store_names(), error=error)
 
 
 @bp.get("/sync")

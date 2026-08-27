@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Synchro fournisseur — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Synchro fournisseur — correspondance client → magasin</h4>
+<p class="text-muted small">
+  Quand l'outil installé chez le fournisseur détecte un bon de livraison, il regarde le
+  code client (CODE_TIERS) de la pièce pour savoir à quel magasin l'envoyer. Cette liste
+  fait cette correspondance — modifiable ici à tout moment, sans toucher au poste du
+  fournisseur.
+</p>
+
+<div class="table-responsive mb-4">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr><th>Code client (CODE_TIERS)</th><th>Nom</th><th>Magasin</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for code, m in mapping.items() %}
+      <tr>
+        <td class="font-monospace">{{ code }}</td>
+        <td>{{ m.raison_sociale or "—" }}</td>
+        <td>{{ store_names.get(m.store_id, m.store_id) }}</td>
+        <td>
+          <form method="post" action="{{ url_for('dashboard.fournisseur_mapping_delete') }}"
+                onsubmit="return confirm('Supprimer cette correspondance ?');">
+            <input type="hidden" name="code_tiers" value="{{ code }}">
+            <button type="submit" class="btn btn-sm btn-outline-danger">Supprimer</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-muted text-center">Aucune correspondance pour le moment.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card" style="max-width:520px">
+  <div class="card-header">Ajouter / modifier</div>
+  <div class="card-body">
+    <form method="post" action="{{ url_for('dashboard.fournisseur_mapping_set') }}">
+      <div class="mb-2">
+        <label class="form-label small mb-0">Code client (CODE_TIERS)</label>
+        <input type="text" name="code_tiers" class="form-control form-control-sm" required
+               placeholder="ex. CLI-STH">
+      </div>
+      <div class="mb-2">
+        <label class="form-label small mb-0">Nom (facultatif, pour s'y retrouver)</label>
+        <input type="text" name="raison_sociale" class="form-control form-control-sm">
+      </div>
+      <div class="mb-3">
+        <label class="form-label small mb-0">Magasin</label>
+        <select name="store_id" class="form-select form-select-sm" required>
+          {% for s in stores %}
+          <option value="{{ s.id }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit" class="btn btn-sm btn-primary">Enregistrer</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

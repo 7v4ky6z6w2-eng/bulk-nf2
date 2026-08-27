@@ -350,3 +350,48 @@ def submit_op():
     registry = current_app.config.get("registry")
     result = _submit_op(_db(), registry, store_id, op_type, payload, op_uid=op_uid)
     return jsonify(**result)
+
+
+# ── Synchro fournisseur (bon de livraison -> bon de réception) ───────────────
+#  Appelé par l'exe qui tourne CHEZ le fournisseur : lignes brutes de son
+#  Firebird, jamais de logique métier côté exe (tout le rapprochement se fait
+#  ici, cf. hub/fournisseur.py — plus facile à corriger sans redéployer un
+#  binaire sur un poste distant qu'on ne contrôle pas directement).
+@bp.post("/api/fournisseur/lines")
+def fournisseur_lines():
+    err = _check_key()
+    if err:
+        return err
+    from hub.fournisseur import process_batch
+    data = request.get_json(force=True) or {}
+    lines = data.get("lines") or []
+    if not lines:
+        return jsonify(error="Aucune ligne."), 400
+    registry = current_app.config.get("registry")
+    results = process_batch(_db(), registry, lines)
+    return jsonify(results=results)
+
+
+@bp.post("/api/fournisseur/mapping")
+def fournisseur_mapping_bootstrap():
+    """Premier lancement de l'exe fournisseur : il propose une liste de
+    CODE_TIERS -> magasin (choisis par l'utilisateur dans son Firebird) : on
+    les enregistre. Éditable ensuite sur le tableau de bord web
+    (/fournisseur-mapping), qui reste la source de vérité — l'exe n'a jamais
+    besoin de relire ce mapping."""
+    err = _check_key()
+    if err:
+        return err
+    from hub.central_db import fournisseur_set_mapping
+    data = request.get_json(force=True) or {}
+    entries = data.get("mapping") or []
+    con = _db()
+    n = 0
+    for e in entries:
+        code_tiers = (e.get("code_tiers") or "").strip()
+        store_id = e.get("store_id")
+        if not code_tiers or not store_id:
+            continue
+        fournisseur_set_mapping(con, code_tiers, int(store_id), e.get("raison_sociale"))
+        n += 1
+    return jsonify(ok=True, count=n)

@@ -124,6 +124,19 @@ def process_line(con: sqlite3.Connection, registry, line: dict) -> dict:
     dest_ref = (line.get("ref_art") or "").strip()
     if not dest_ref:
         return {"status": "error", "error": "ref_art manquant"}
+    result = apply_new_line(con, registry, store_id, src_nopiece, src_noitem, dest_ref, line)
+    result["store_id"] = store_id
+    return result
+
+
+def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece: str,
+                   src_noitem: str, dest_ref: str, line: dict) -> dict:
+    """Crée la réception pour UNE ligne dont la référence destinataire est
+    déjà connue (rapprochement automatique 'exact'/'new' DANS process_line, ou
+    résolution humaine d'une ligne 'pending' depuis le tableau de bord) —
+    même chemin online/offline que tout le reste (submit_op)."""
+    qte = float(line.get("qte") or 0)
+    prix = float(line.get("prix") or 0)
     bdr_line = _build_bdr_line(dest_ref, line)
 
     store = registry.get(store_id) if registry else None
@@ -138,17 +151,16 @@ def process_line(con: sqlite3.Connection, registry, line: dict) -> dict:
         try:
             imp_result = write_bdr_result(store.connect_kwargs(), bdr.load_config(None), [bdr_line])
         except WriteError as exc:
-            return {"status": "error", "error": str(exc), "store_id": store_id}
+            return {"status": "error", "error": str(exc)}
         item = imp_result["items"][0]
         fournisseur_sync_state_set(con, store_id, src_nopiece, src_noitem, dest_ref,
                                    imp_result["nopiece"], item["noitem"], qte, prix)
-        return {"status": "applied", "store_id": store_id, "ref_art": dest_ref,
-               "nopiece": imp_result["nopiece"]}
+        return {"status": "applied", "ref_art": dest_ref, "nopiece": imp_result["nopiece"]}
 
     # Hors ligne : file d'attente normale (l'agent applique la création à sa
     # prochaine synchro) — le NOPIECE/NOITEM créé ne sera connu qu'à ce
     # moment-là, donc dest_nopiece reste vide pour l'instant (cf. la
-    # vérification "pending_creation" plus haut, qui évite une double
+    # vérification "pending_creation" dans process_line, qui évite une double
     # création tant qu'il n'est pas encore renseigné). Config par défaut
     # complète (comme le chemin en ligne) : un dict partiel ferait planter
     # Importer.__init__ (code_type_piece, default_famille... manquants).
@@ -158,7 +170,6 @@ def process_line(con: sqlite3.Connection, registry, line: dict) -> dict:
     if result.get("status") == "queued":
         fournisseur_sync_state_set(con, store_id, src_nopiece, src_noitem,
                                    dest_ref, "", "", qte, prix)
-    result["store_id"] = store_id
     return result
 
 
