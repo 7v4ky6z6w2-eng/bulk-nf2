@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 
 import requests
 
@@ -20,11 +21,21 @@ _TG_API = "https://api.telegram.org/bot%s/sendMessage"
 
 class Notifier:
     def __init__(self, bot_token: str = "", chat_id: str = "",
-                 ntfy_topic: str = "", store_names: dict | None = None):
+                 ntfy_topic: str = "", store_names: dict | None = None,
+                 retry_cooldown_sec: float = 60.0):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.ntfy_topic = ntfy_topic
         self.store_names = store_names or {}
+        # Anti-spam : un canal en panne (mauvais token, ntfy.sh injoignable...)
+        # ne doit pas ré-essayer un op à CHAQUE appel de notify_pending — celui-ci
+        # est déclenché par report_op sur CHAQUE op terminée par un agent (bien
+        # plus fréquent que la boucle de fond toutes les 2 min), donc sans ce
+        # cooldown un canal cassé peut journaliser des dizaines de lignes
+        # "Notification échouée" par minute pour le même op, indéfiniment tant
+        # qu'il reste notified=0.
+        self.retry_cooldown_sec = retry_cooldown_sec
+        self._last_attempt: dict[int, float] = {}
 
     @property
     def enabled(self) -> bool:
@@ -55,7 +66,14 @@ class Notifier:
             r = requests.post(_TG_API % self.bot_token,
                               json={"chat_id": self.chat_id, "text": text},
                               timeout=10)
-            return r.status_code == 200
+            if r.status_code != 200:
+                # Journalise la vraie cause (token/chat_id invalide, etc.) —
+                # sans ça, un 4xx échoue silencieusement et seul l'appelant
+                # log "Notification échouée", impossible à diagnostiquer.
+                log.warning("Telegram échoué (HTTP %d) : %s",
+                           r.status_code, r.text[:200])
+                return False
+            return True
         except Exception as exc:  # noqa: BLE001
             log.warning("Telegram échoué : %s", exc)
             return False
@@ -68,7 +86,10 @@ class Notifier:
                               data=text.encode("utf-8"),
                               headers={"Content-Type": "text/plain; charset=utf-8"},
                               timeout=10)
-            return r.status_code in (200, 201)
+            if r.status_code not in (200, 201):
+                log.warning("ntfy échoué (HTTP %d) : %s", r.status_code, r.text[:200])
+                return False
+            return True
         except Exception as exc:  # noqa: BLE001
             log.warning("ntfy échoué : %s", exc)
             return False
@@ -80,17 +101,29 @@ class Notifier:
         return ok
 
     def notify_pending(self, con: sqlite3.Connection | None = None) -> int:
-        """Envoie les notifications pour les ops non encore notifiées. Renvoie le nombre envoyé."""
+        """Envoie les notifications pour les ops non encore notifiées. Renvoie le nombre envoyé.
+
+        Appelé à la fois par la boucle de fond (toutes les 2 min) ET par
+        report_op à CHAQUE op terminée par un agent — donc potentiellement
+        plusieurs fois par seconde. Le cooldown par op évite qu'un canal en
+        panne ne journalise en boucle pour le même op à chaque appel."""
         if not self.enabled or con is None:
             return 0
         ops = ops_to_notify(con)
+        now = time.monotonic()
         sent = 0
         for op in ops:
+            last = self._last_attempt.get(op["id"])
+            if last is not None and (now - last) < self.retry_cooldown_sec:
+                continue
+            self._last_attempt[op["id"]] = now
             msg = self._format(op)
             if self.send(msg):
                 mark_notified(con, op["id"])
+                self._last_attempt.pop(op["id"], None)
                 sent += 1
                 log.info("Notifié : %s", msg)
             else:
-                log.warning("Notification échouée pour op #%d", op["id"])
+                log.warning("Notification échouée pour op #%d (nouvelle tentative dans %ds)",
+                           op["id"], int(self.retry_cooldown_sec))
         return sent
