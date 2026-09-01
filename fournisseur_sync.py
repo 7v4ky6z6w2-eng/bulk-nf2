@@ -234,10 +234,10 @@ def run_cycle(cfg: dict, log_fn=log.info) -> dict:
 #  Interface graphique
 # --------------------------------------------------------------------------- #
 def run_gui() -> None:
-    from PySide6.QtCore import Qt, QTimer, QThread, Signal
+    from PySide6.QtCore import QTimer, QThread, Signal
     from PySide6.QtGui import QAction
     from PySide6.QtWidgets import (
-        QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
+        QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
         QLabel, QLineEdit, QPushButton, QTextEdit, QSpinBox, QMessageBox,
         QSystemTrayIcon, QMenu, QTableWidget, QTableWidgetItem, QComboBox,
         QCheckBox, QFileDialog,
@@ -505,9 +505,9 @@ def run_gui() -> None:
                                    "Toujours actif en arrière-plan.",
                                    QSystemTrayIcon.Information, 3000)
 
-    class TiersDialog(QWidget):
+    class TiersDialog(QDialog):
         def __init__(self, tiers: list, stores: list, client: HubClient, parent=None):
-            super().__init__(parent, Qt.Window)
+            super().__init__(parent)
             self.setWindowTitle("Correspondance clients → magasins")
             self.resize(560, 480)
             self._tiers = tiers
