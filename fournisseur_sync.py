@@ -129,7 +129,7 @@ def read_recent_bl(con, code_type_piece: str, lookback_days: int,
             "         WHERE e.REF_ART = i.REF_ART) AS BARCODE "
             "FROM ITEM i LEFT JOIN ARTICLE a ON a.REF_ART = i.REF_ART "
             "WHERE i.NOPIECE = ?", (nopiece,))
-        for noitem, ref_art, qte, prixht, tva, designation, barcode in item_cur.fetchall():
+        for noitem, ref_art, qte, prixht, _tva, designation, barcode in item_cur.fetchall():
             if not ref_art:
                 continue
             lines.append({
@@ -138,7 +138,10 @@ def read_recent_bl(con, code_type_piece: str, lookback_days: int,
                 "ref_art": str(ref_art).strip(),
                 "designation": (designation or "").strip() or None,
                 "qte": float(qte or 0), "prix": float(prixht or 0),
-                "tva": float(tva) if tva is not None else 19,
+                # Toujours 0, jamais lu depuis ITEM.TVA du fournisseur : c'est
+                # la même entreprise qui se vend à elle-même (transfert entre
+                # ses propres magasins), pas un achat externe soumis à TVA.
+                "tva": 0,
                 "code_barres": (str(barcode).strip() if barcode else None),
             })
     return lines

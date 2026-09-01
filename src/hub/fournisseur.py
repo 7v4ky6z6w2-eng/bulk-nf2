@@ -21,6 +21,9 @@ Règles (décidées avec l'utilisateur, ne pas les redériver) :
   * code_tiers -> magasin : table éditable (fournisseur_tiers_map), jamais
     codée en dur — une ligne dont le code_tiers n'est pas mappé est ignorée
     (ce n'est pas une erreur : le fournisseur a sûrement d'autres clients).
+  * TVA toujours 0 : le fournisseur est la MÊME entreprise que ses magasins
+    (transfert interne), pas un achat externe soumis à TVA. fournisseur_sync.py
+    n'envoie donc jamais la TVA lue dans Firebird — toujours 0.
 """
 
 from __future__ import annotations
@@ -57,16 +60,19 @@ def _match_line(con: sqlite3.Connection, store_id: int, line: dict) -> dict:
 
 
 def _build_bdr_line(ref_art: str, line: dict) -> dict:
+    # Le fournisseur est le même commerçant que ses magasins (transfert
+    # interne, pas un achat externe) : TVA toujours 0 en pratique — donc PAS
+    # "line.get('tva') or 0" (0 est falsy, ça écraserait un 0 valide envoyé
+    # volontairement). On distingue explicitement l'ABSENCE de la clé (vieille
+    # ligne en attente créée avant l'ajout de la colonne tva, NULL en base)
+    # d'une valeur 0 légitime.
+    tva = line.get("tva")
     return {
         "ref_art": ref_art,
         "designation": line.get("designation") or ref_art,
         "qte": float(line.get("qte") or 0),
         "prix": float(line.get("prix") or 0),
-        # `or 19` (pas .get(..., 19)) : une ligne en attente créée avant
-        # l'ajout de la colonne tva a NULL en base -> line["tva"] vaut alors
-        # None (clé présente), que .get(..., 19) ne rattrape pas puisque la
-        # clé existe. Le prix TTC planterait sinon (None / 100.0) plus loin.
-        "tva": line.get("tva") or 19,
+        "tva": tva if tva is not None else 0,
         "famille": "",
         "code_barres": (line.get("code_barres") or "").strip(),
     }
