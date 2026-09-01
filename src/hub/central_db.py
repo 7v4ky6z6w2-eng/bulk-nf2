@@ -137,6 +137,14 @@ def _migrate(con: sqlite3.Connection) -> None:
             if col not in art_cols:
                 con.execute("ALTER TABLE article ADD COLUMN %s %s" % (col, decl))
 
+    # Colonne tva sur fournisseur_pending (bases créées avant son ajout) : sans
+    # elle, une ligne mise en attente (rapprochement par nom) perdait son taux
+    # de TVA réel et retombait sur le défaut (19 %) une fois validée depuis le
+    # tableau de bord — cf. fournisseur.apply_new_line / _build_bdr_line.
+    fp_cols = [r[1] for r in con.execute("PRAGMA table_info(fournisseur_pending)").fetchall()]
+    if fp_cols and "tva" not in fp_cols:
+        con.execute("ALTER TABLE fournisseur_pending ADD COLUMN tva REAL")
+
 
 # --------------------------------------------------------------------------- #
 #  Upsert générique
@@ -1194,14 +1202,31 @@ def fournisseur_known_dest_nopiece(con: sqlite3.Connection, store_id: int,
 def fournisseur_pending_add(con: sqlite3.Connection, store_id: int, src_nopiece: str,
                             src_noitem: str, ref_art: str | None, designation: str | None,
                             qte: float | None, prix: float | None,
-                            code_barres: str | None, candidates: list) -> None:
-    con.execute(
-        "INSERT OR IGNORE INTO fournisseur_pending "
-        "(store_id, src_nopiece, src_noitem, ref_art, designation, qte, prix, "
-        " code_barres, candidates, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-        (store_id, src_nopiece, src_noitem, ref_art, designation, qte, prix,
-         code_barres, json.dumps(candidates or []), now_iso()))
+                            code_barres: str | None, candidates: list,
+                            tva: float | None = None) -> None:
+    """Met en file une ligne à rapprocher manuellement (statut 'pending').
+
+    L'exe fournisseur renvoie TOUTES les lignes à CHAQUE passage (voir sa
+    docstring) : tant qu'une ligne reste non résolue par un humain, elle
+    repasse ici à chaque synchro — on en profite pour RAFRAÎCHIR qte/prix/tva
+    /désignation/candidats (le fournisseur a pu corriger le BL entre-temps),
+    au lieu de figer les valeurs du tout premier passage. Ne touche jamais une
+    ligne déjà 'resolved'/'ignored' (WHERE status='pending' sur l'UPDATE) —
+    dans ce cas l'INSERT OR IGNORE qui suit est un no-op, la clé existe déjà."""
+    cur = con.execute(
+        "UPDATE fournisseur_pending SET ref_art=?, designation=?, qte=?, prix=?, tva=?, "
+        " code_barres=?, candidates=? "
+        "WHERE store_id=? AND src_nopiece=? AND src_noitem=? AND status='pending'",
+        (ref_art, designation, qte, prix, tva, code_barres, json.dumps(candidates or []),
+         store_id, src_nopiece, src_noitem))
+    if cur.rowcount == 0:
+        con.execute(
+            "INSERT OR IGNORE INTO fournisseur_pending "
+            "(store_id, src_nopiece, src_noitem, ref_art, designation, qte, prix, tva, "
+            " code_barres, candidates, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+            (store_id, src_nopiece, src_noitem, ref_art, designation, qte, prix, tva,
+             code_barres, json.dumps(candidates or []), now_iso()))
     con.commit()
 
 

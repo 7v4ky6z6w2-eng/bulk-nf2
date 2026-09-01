@@ -240,7 +240,7 @@ def run_gui() -> None:
         QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
         QLabel, QLineEdit, QPushButton, QTextEdit, QSpinBox, QMessageBox,
         QSystemTrayIcon, QMenu, QTableWidget, QTableWidgetItem, QComboBox,
-        QCheckBox, QFileDialog,
+        QCheckBox, QFileDialog, QStyle,
     )
 
     class SyncThread(QThread):
@@ -352,7 +352,14 @@ def run_gui() -> None:
             layout.addWidget(QLabel("Journal :"))
             layout.addWidget(self._log)
 
-            self._tray = QSystemTrayIcon(self)
+            # QSystemTrayIcon reste invisible sans icone (Qt refuse de l'afficher,
+            # avertissement silencieux "No Icon set") : sans elle, closeEvent
+            # cache la fenetre dans une icone que l'utilisateur ne peut jamais
+            # rouvrir, sinon en tuant le processus. Icone standard Qt (aucun
+            # fichier a empaqueter avec PyInstaller).
+            icon = self.style().standardIcon(QStyle.SP_ComputerIcon)
+            self.setWindowIcon(icon)
+            self._tray = QSystemTrayIcon(icon, self)
             self._tray.setToolTip("Synchro fournisseur")
             menu = QMenu()
             show_action = QAction("Afficher", self)

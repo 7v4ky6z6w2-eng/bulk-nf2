@@ -277,6 +277,7 @@ CREATE TABLE IF NOT EXISTS fournisseur_pending (
     designation    TEXT,
     qte            REAL,
     prix           REAL,
+    tva            REAL,
     code_barres    TEXT,
     candidates     TEXT,                    -- JSON : candidats de rapprochement
     status         TEXT DEFAULT 'pending',  -- pending | resolved | ignored

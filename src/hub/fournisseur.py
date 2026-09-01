@@ -62,7 +62,11 @@ def _build_bdr_line(ref_art: str, line: dict) -> dict:
         "designation": line.get("designation") or ref_art,
         "qte": float(line.get("qte") or 0),
         "prix": float(line.get("prix") or 0),
-        "tva": line.get("tva", 19),
+        # `or 19` (pas .get(..., 19)) : une ligne en attente créée avant
+        # l'ajout de la colonne tva a NULL en base -> line["tva"] vaut alors
+        # None (clé présente), que .get(..., 19) ne rattrape pas puisque la
+        # clé existe. Le prix TTC planterait sinon (None / 100.0) plus loin.
+        "tva": line.get("tva") or 19,
         "famille": "",
         "code_barres": (line.get("code_barres") or "").strip(),
     }
@@ -114,7 +118,8 @@ def process_line(con: sqlite3.Connection, registry, line: dict) -> dict:
         # ailleurs dans l'appli — un humain doit confirmer sur le dashboard.
         fournisseur_pending_add(con, store_id, src_nopiece, src_noitem,
                                 line.get("ref_art"), line.get("designation"),
-                                qte, prix, line.get("code_barres"), [match])
+                                qte, prix, line.get("code_barres"), [match],
+                                tva=line.get("tva"))
         return {"status": "pending", "store_id": store_id}
 
     # "exact" (référence déjà connue côté magasin) ou "new" (aucune
