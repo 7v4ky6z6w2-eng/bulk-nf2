@@ -212,3 +212,80 @@ def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece
 
 def process_batch(con: sqlite3.Connection, registry, lines: list) -> list:
     return [process_line(con, registry, line) for line in lines]
+
+
+def reconcile_article(con: sqlite3.Connection, registry, ref: str | None,
+                      designation: str | None, days: int, father_lines: list) -> list:
+    """Diagnostic manuel (onglet « Vérification article » de l'exe fournisseur)
+    — jamais appelé par la synchro automatique, ne modifie RIEN.
+
+    `ref`/`designation` : le même filtre article que l'exe a utilisé pour lire
+    `father_lines` sur SON Firebird (mêmes clés que process_line : src_nopiece,
+    code_tiers, ref_art, designation, qte...) — réutilisé tel quel côté magasin
+    pour comparer sur le MÊME article, pas un article reconstruit à partir des
+    lignes reçues (fragile si plusieurs références partagent une désignation).
+
+    Regroupe father_lines par magasin destinataire (via fournisseur_mapping)
+    et, pour chaque magasin JOIGNABLE, interroge sa base en direct :
+      * bdr_reconcile (même moteur que l'aperçu BDR) pour savoir si la
+        référence du père correspond à une référence DIFFÉRENTE côté magasin
+        (rapprochement par nom) ou n'existe pas du tout côté magasin ;
+      * reception_summary pour la quantité déjà reçue sur la même période,
+        à comparer visuellement à la quantité livrée par le père.
+
+    Toujours UNE ligne par magasin mappé (même à 0 côté père) pour un tableau
+    à nombre de lignes stable, plus une ligne « non mappé » s'il existe des
+    codes clients non mappés dans father_lines."""
+    from hub.write_back import is_reachable, bdr_reconcile, reception_summary
+    import datetime
+
+    mapping = fournisseur_mapping(con)
+    by_store: dict = {}
+    unmapped_qte = 0.0
+    for fl in father_lines or []:
+        m = mapping.get(str(fl.get("code_tiers") or ""))
+        if not m:
+            unmapped_qte += float(fl.get("qte") or 0)
+            continue
+        sid = m["store_id"]
+        entry = by_store.setdefault(sid, {"lines": [], "qte": 0.0})
+        entry["lines"].append(fl)
+        entry["qte"] += float(fl.get("qte") or 0)
+
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    report = []
+    for store_id in sorted({m["store_id"] for m in mapping.values()}):
+        store = registry.get(store_id) if registry else None
+        row = {"store_id": store_id,
+              "store_name": store.name if store else "Magasin %s" % store_id,
+              "qte_pere": round(by_store.get(store_id, {}).get("qte", 0.0), 4),
+              "online": False, "reception_qte": None, "matches": []}
+        if store:
+            row["online"] = is_reachable(store.host, store.port)
+        if row["online"] and store:
+            kw = store.connect_kwargs()
+            lines_for_store = by_store.get(store_id, {}).get("lines", [])
+            if lines_for_store:
+                # Une entrée par référence distincte : pas la peine de
+                # rappeler le rapprochement pour chaque ligne d'un même
+                # article livré plusieurs fois sur la période.
+                distinct = {}
+                for fl in lines_for_store:
+                    distinct.setdefault(fl.get("ref_art"), {
+                        "ref_art": fl.get("ref_art"), "designation": fl.get("designation")})
+                try:
+                    row["matches"] = bdr_reconcile(kw, list(distinct.values()))
+                except Exception as exc:  # noqa: BLE001
+                    row["match_error"] = str(exc)
+            try:
+                summary = reception_summary(kw, "PC_AC_B", cutoff, ref, designation)
+                row["reception_qte"] = summary["qte_total"]
+            except Exception as exc:  # noqa: BLE001
+                row["reception_error"] = str(exc)
+        report.append(row)
+
+    if unmapped_qte:
+        report.append({"store_id": None, "store_name": "(code client non mappé)",
+                       "qte_pere": round(unmapped_qte, 4), "online": None,
+                       "reception_qte": None, "matches": []})
+    return report

@@ -395,3 +395,27 @@ def fournisseur_mapping_bootstrap():
         fournisseur_set_mapping(con, code_tiers, int(store_id), e.get("raison_sociale"))
         n += 1
     return jsonify(ok=True, count=n)
+
+
+@bp.post("/api/fournisseur/reconcile")
+def fournisseur_reconcile():
+    """Onglet « Vérification article » de l'exe fournisseur — diagnostic
+    manuel en LECTURE SEULE (jamais appelé par la synchro automatique) : pour
+    un article recherché, compare ce que le père a livré (father_lines, lues
+    par l'exe sur son propre Firebird) à ce que chaque magasin destinataire a
+    déjà reçu sur la même période, et signale si la référence du père
+    correspond à une référence DIFFÉRENTE côté magasin."""
+    err = _check_key()
+    if err:
+        return err
+    from hub.fournisseur import reconcile_article
+    data = request.get_json(force=True) or {}
+    ref = (data.get("ref") or "").strip() or None
+    designation = (data.get("designation") or "").strip() or None
+    if not ref and not designation:
+        return jsonify(error="Indiquez ref ou designation."), 400
+    days = int(data.get("days") or 30)
+    father_lines = data.get("father_lines") or []
+    registry = current_app.config.get("registry")
+    report = reconcile_article(_db(), registry, ref, designation, days, father_lines)
+    return jsonify(report=report)

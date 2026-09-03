@@ -101,6 +101,42 @@ def bdr_reconcile(connect_kwargs: dict, lines: list) -> list:
     return bdr.reconcile_lines(_bdr_cfg(connect_kwargs), lines)
 
 
+def reception_summary(connect_kwargs: dict, code_type_piece: str, cutoff,
+                      ref: str | None, designation: str | None) -> dict:
+    """Total déjà reçu (pièces de type `code_type_piece`, ex PC_AC_B) pour un
+    article, depuis `cutoff` — connexion live, LECTURE SEULE. Sert à l'onglet
+    « Vérification article » de la synchro fournisseur : comparer ce qu'un
+    magasin a déjà reçu à ce que le père a livré sur la même période, pour
+    repérer ce qui a déjà été saisi à la main avant la synchro automatique."""
+    import fdb  # type: ignore
+    clauses, params = [], []
+    if ref:
+        clauses.append("i.REF_ART = ?")
+        params.append(ref)
+    if designation:
+        clauses.append("a.DESIGNATION CONTAINING ?")
+        params.append(designation)
+    if not clauses:
+        return {"qte_total": 0.0, "lines": []}
+    con = fdb.connect(**connect_kwargs)
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT p.NOPIECE, p.DATEPIECE, i.REF_ART, a.DESIGNATION, i.QTE, i.PRIXHT "
+            "FROM PIECE p JOIN ITEM i ON i.NOPIECE = p.NOPIECE "
+            "LEFT JOIN ARTICLE a ON a.REF_ART = i.REF_ART "
+            "WHERE p.CODE_TYPE_PIECE = ? AND p.DATEPIECE >= ? AND (%s) "
+            "ORDER BY p.DATEPIECE" % " OR ".join(clauses),
+            [code_type_piece, cutoff] + params)
+        rows = cur.fetchall()
+    finally:
+        con.close()
+    lines = [{"nopiece": str(r[0]), "date": str(r[1])[:10], "ref_art": r[2],
+             "designation": r[3], "qte": float(r[4] or 0), "prix": float(r[5] or 0)}
+            for r in rows]
+    return {"qte_total": round(sum(l["qte"] for l in lines), 4), "lines": lines}
+
+
 def write_bdr_result(connect_kwargs: dict, config: dict, lines: list) -> dict:
     """Comme write_bdr, mais appelle run_import DIRECTEMENT (pas de
     fichiers temporaires ni de sys.argv/bdr.main()) et renvoie le résultat

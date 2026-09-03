@@ -155,6 +155,48 @@ def read_recent_bl(con, code_type_piece: str, lookback_days: int,
     return lines
 
 
+def read_bl_for_article(con, code_type_piece: str, days: int, ref: str | None,
+                        designation: str | None, filtrer_annulee: bool = False) -> list:
+    """Comme read_recent_bl, mais filtré sur UN article (référence exacte et/ou
+    sous-chaîne de désignation) au lieu de tout lire — pour l'onglet
+    « Vérification article » (diagnostic manuel, jamais utilisé par la
+    synchro automatique elle-même)."""
+    art_clauses, art_params = [], []
+    if ref:
+        art_clauses.append("i.REF_ART = ?")
+        art_params.append(ref)
+    if designation:
+        art_clauses.append("a.DESIGNATION CONTAINING ?")
+        art_params.append(designation)
+    if not art_clauses:
+        return []
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    sql = (
+        "SELECT p.NOPIECE, p.DATEPIECE, p.CODE_TIERS, i.NOITEM, i.REF_ART, "
+        "       a.DESIGNATION, i.QTE, i.PRIXHT "
+        "FROM PIECE p JOIN ITEM i ON i.NOPIECE = p.NOPIECE "
+        "LEFT JOIN ARTICLE a ON a.REF_ART = i.REF_ART "
+        "WHERE p.CODE_TYPE_PIECE = ? AND p.DATEPIECE >= ? AND (%s)" % " OR ".join(art_clauses)
+    )
+    params = [code_type_piece, cutoff] + art_params
+    if filtrer_annulee:
+        sql += " AND (p.ANNULEE IS NULL OR p.ANNULEE = 0)"
+    sql += " ORDER BY p.DATEPIECE"
+    cur = con.cursor()
+    cur.execute(sql, params)
+    lines = []
+    for nopiece, date, code_tiers, noitem, ref_art, desig, qte, prixht in cur.fetchall():
+        if not code_tiers or not ref_art:
+            continue
+        lines.append({
+            "src_nopiece": str(nopiece), "src_noitem": str(noitem),
+            "date": str(date)[:10], "code_tiers": str(code_tiers).strip(),
+            "ref_art": str(ref_art).strip(), "designation": (desig or "").strip() or None,
+            "qte": float(qte or 0), "prix": float(prixht or 0),
+        })
+    return lines
+
+
 # --------------------------------------------------------------------------- #
 #  Hub (HTTP)
 # --------------------------------------------------------------------------- #
@@ -210,10 +252,46 @@ class HubClient:
             results.extend(r.json().get("results", []))
         return results
 
+    def reconcile(self, ref: str | None, designation: str | None, days: int,
+                  father_lines: list) -> list:
+        import requests
+        r = requests.post(self.base + "/api/fournisseur/reconcile",
+                          json={"ref": ref, "designation": designation, "days": days,
+                                "father_lines": father_lines},
+                          headers=self._headers(), timeout=self.lines_timeout)
+        r.raise_for_status()
+        return r.json().get("report", [])
+
 
 # --------------------------------------------------------------------------- #
 #  Un cycle de synchro (utilisé par le GUI ET par --once)
 # --------------------------------------------------------------------------- #
+_STATUS_LABELS = {
+    "applied": "appliqué", "queued": "en file (magasin hors ligne)",
+    "pending": "à valider (rapprochement par nom — tableau de bord)",
+    "pending_creation": "en attente (création encore en file)",
+    "unchanged": "inchangé", "skipped": "ignoré (code client non mappé)",
+    "error": "ERREUR",
+}
+
+
+def _describe_result(line: dict, result: dict, store_names: dict) -> str:
+    """Une ligne de journal lisible par ligne de BL traitée — sans ça, l'outil
+    tournait « à l'aveugle » (aucun détail, juste un total en fin de passage)."""
+    store_id = result.get("store_id")
+    store = store_names.get(store_id, "magasin %s" % store_id) if store_id else "?"
+    status = result.get("status", "?")
+    label = _STATUS_LABELS.get(status, status)
+    txt = "  [%s] %s « %s » x%s -> %s" % (
+        store, line.get("ref_art"), line.get("designation") or line.get("ref_art"),
+        line.get("qte"), label)
+    if status == "error":
+        txt += " (%s)" % result.get("error")
+    elif status == "skipped":
+        txt += " (code_tiers=%s)" % line.get("code_tiers")
+    return txt
+
+
 def run_cycle(cfg: dict, log_fn=log.info) -> dict:
     con = fb_connect(cfg["firebird"])
     try:
@@ -228,10 +306,15 @@ def run_cycle(cfg: dict, log_fn=log.info) -> dict:
                "unchanged": 0, "skipped": 0, "errors": 0}
 
     client = HubClient(cfg["hub_url"], cfg["hub_api_key"])
+    try:
+        store_names = {s["id"]: s["name"] for s in client.stores()}
+    except Exception:  # noqa: BLE001
+        store_names = {}  # pas bloquant : le détail affichera juste "magasin <id>"
     results = client.post_lines(lines)
     tally = {"lines": len(lines), "applied": 0, "queued": 0, "pending": 0,
             "unchanged": 0, "skipped": 0, "errors": 0}
-    for r in results:
+    for line, r in zip(lines, results):
+        log_fn(_describe_result(line, r, store_names))
         status = r.get("status")
         if status in tally:
             tally[status] += 1
@@ -239,13 +322,29 @@ def run_cycle(cfg: dict, log_fn=log.info) -> dict:
             tally["pending"] += 1
         else:
             tally["errors"] += 1
-        if status == "error":
-            log_fn("Erreur sur une ligne : %s" % r.get("error"))
     log_fn("Résultat : %d appliquée(s), %d en file, %d à valider, "
           "%d inchangée(s), %d ignorée(s), %d erreur(s)."
           % (tally["applied"], tally["queued"], tally["pending"],
              tally["unchanged"], tally["skipped"], tally["errors"]))
     return tally
+
+
+# --------------------------------------------------------------------------- #
+#  Vérification article (onglet dédié — diagnostic manuel, lecture seule des
+#  DEUX côtés, jamais utilisé par la synchro automatique elle-même) :
+#  compare, pour un article recherché, la quantité livrée par le père à
+#  chaque magasin (via fournisseur_mapping) à ce que ce magasin a DÉJÀ reçu
+#  sur la même période, et signale si sa référence diffère de celle du père.
+# --------------------------------------------------------------------------- #
+def run_reconcile(cfg: dict, ref: str | None, designation: str | None, days: int) -> list:
+    con = fb_connect(cfg["firebird"])
+    try:
+        father_lines = read_bl_for_article(con, cfg["code_type_piece_bl"], days,
+                                           ref, designation, cfg.get("filtrer_annulee", False))
+    finally:
+        con.close()
+    client = HubClient(cfg["hub_url"], cfg["hub_api_key"])
+    return client.reconcile(ref, designation, days, father_lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -258,7 +357,7 @@ def run_gui() -> None:
         QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
         QLabel, QLineEdit, QPushButton, QTextEdit, QSpinBox, QMessageBox,
         QSystemTrayIcon, QMenu, QTableWidget, QTableWidgetItem, QComboBox,
-        QCheckBox, QFileDialog, QStyle, QInputDialog,
+        QCheckBox, QFileDialog, QStyle, QInputDialog, QTabWidget, QHeaderView,
     )
 
     class SyncThread(QThread):
@@ -277,6 +376,21 @@ def run_gui() -> None:
             except Exception as exc:  # noqa: BLE001
                 self.failed.emit(str(exc))
 
+    class ReconcileThread(QThread):
+        done = Signal(list)
+        failed = Signal(str)
+
+        def __init__(self, cfg: dict, ref: str | None, designation: str | None, days: int):
+            super().__init__()
+            self._cfg, self._ref, self._designation, self._days = cfg, ref, designation, days
+
+        def run(self) -> None:
+            try:
+                report = run_reconcile(self._cfg, self._ref, self._designation, self._days)
+                self.done.emit(report)
+            except Exception as exc:  # noqa: BLE001
+                self.failed.emit(str(exc))
+
     class MainWindow(QWidget):
         def __init__(self):
             super().__init__()
@@ -284,6 +398,7 @@ def run_gui() -> None:
             self.resize(640, 560)
             self._cfg = load_config() or json.loads(json.dumps(DEFAULT_CONFIG))
             self._thread: SyncThread | None = None
+            self._reconcile_thread: ReconcileThread | None = None
 
             # -- Connexion Firebird --
             fb = self._cfg["firebird"]
@@ -362,16 +477,58 @@ def run_gui() -> None:
             self._status = QLabel("Jamais synchronisé.")
             self._log = QTextEdit(); self._log.setReadOnly(True)
 
+            sync_tab = QWidget()
+            sync_layout = QVBoxLayout(sync_tab)
+            sync_layout.addWidget(fb_box)
+            sync_layout.addWidget(hub_box)
+            sync_layout.addWidget(opt_box)
+            sync_layout.addLayout(top_row)
+            sync_layout.addWidget(self._sync_btn)
+            sync_layout.addWidget(self._status)
+            sync_layout.addWidget(QLabel("Journal (détail ligne par ligne à chaque passage) :"))
+            sync_layout.addWidget(self._log)
+
+            # -- Onglet Vérification article --
+            self._verif_ref = QLineEdit()
+            self._verif_ref.setPlaceholderText("ex. 70010 (référence exacte, optionnel)")
+            self._verif_desig = QLineEdit()
+            self._verif_desig.setPlaceholderText("ex. recharge marqueur (sous-chaîne, optionnel)")
+            self._verif_days = QSpinBox(); self._verif_days.setRange(1, 3650)
+            self._verif_days.setSuffix(" jours"); self._verif_days.setValue(60)
+            verif_search_btn = QPushButton("Rechercher")
+            verif_search_btn.clicked.connect(self._search_reconcile)
+            verif_form = QFormLayout()
+            verif_form.addRow("Référence article", self._verif_ref)
+            verif_form.addRow("Ou désignation (contient)", self._verif_desig)
+            verif_form.addRow("Période", self._verif_days)
+            verif_form.addRow(verif_search_btn)
+
+            self._verif_table = QTableWidget(0, 6)
+            self._verif_table.setHorizontalHeaderLabels([
+                "Magasin", "Qté livrée (père)", "Qté déjà reçue (magasin)",
+                "Réf. chez le père", "Correspondance côté magasin", "État"])
+            self._verif_table.setEditTriggers(QTableWidget.NoEditTriggers)
+            self._verif_table.horizontalHeader().setSectionResizeMode(
+                QHeaderView.ResizeMode.Stretch)
+            self._verif_status = QLabel(
+                "Recherchez un article par référence et/ou désignation : compare, pour chaque "
+                "magasin, ce que le père a livré à ce qu'il a déjà reçu sur la même période, et "
+                "signale si la référence diffère entre les deux bases.")
+            self._verif_status.setWordWrap(True)
+
+            verif_tab = QWidget()
+            verif_layout = QVBoxLayout(verif_tab)
+            verif_layout.addLayout(verif_form)
+            verif_layout.addWidget(self._verif_status)
+            verif_layout.addWidget(self._verif_table)
+
+            tabs = QTabWidget()
+            tabs.addTab(sync_tab, "Synchro")
+            tabs.addTab(verif_tab, "Vérification article")
+
             layout = QVBoxLayout(self)
             layout.addWidget(QLabel("<h3>Synchro fournisseur → magasins</h3>"))
-            layout.addWidget(fb_box)
-            layout.addWidget(hub_box)
-            layout.addWidget(opt_box)
-            layout.addLayout(top_row)
-            layout.addWidget(self._sync_btn)
-            layout.addWidget(self._status)
-            layout.addWidget(QLabel("Journal :"))
-            layout.addWidget(self._log)
+            layout.addWidget(tabs)
 
             # QSystemTrayIcon reste invisible sans icone (Qt refuse de l'afficher,
             # avertissement silencieux "No Icon set") : sans elle, closeEvent
@@ -553,6 +710,69 @@ def run_gui() -> None:
             self._backlog_btn.setEnabled(True)
             self._status.setText("Échec de la dernière synchro.")
             self._log_msg("ÉCHEC : %s" % msg)
+
+        def _search_reconcile(self) -> None:
+            if self._reconcile_thread is not None and self._reconcile_thread.isRunning():
+                return
+            ref = self._verif_ref.text().strip() or None
+            designation = self._verif_desig.text().strip() or None
+            if not ref and not designation:
+                QMessageBox.warning(self, "Filtre manquant",
+                                   "Indiquez une référence et/ou une désignation à rechercher.")
+                return
+            cfg = self._current_cfg()
+            if not cfg["firebird"]["database"] or not cfg["hub_url"]:
+                QMessageBox.warning(self, "Configuration incomplète",
+                                   "Renseignez la connexion Firebird et le hub (testez-les si "
+                                   "besoin) avant de rechercher — inutile d'enregistrer d'abord.")
+                return
+            self._verif_table.setRowCount(0)
+            self._verif_status.setText("Recherche en cours…")
+            self._reconcile_thread = ReconcileThread(cfg, ref, designation,
+                                                      self._verif_days.value())
+            self._reconcile_thread.done.connect(self._reconcile_done)
+            self._reconcile_thread.failed.connect(self._reconcile_failed)
+            self._reconcile_thread.start()
+
+        def _reconcile_done(self, report: list) -> None:
+            self._verif_table.setRowCount(len(report))
+            for row, entry in enumerate(report):
+                matches = entry.get("matches") or []
+                m = matches[0] if matches else None
+                if m is None:
+                    corres = "-"
+                elif m.get("status") == "exact":
+                    corres = "identique (%s)" % m.get("match_ref")
+                elif m.get("status") == "matched":
+                    corres = "RÉF. DIFFÉRENTE : %s — « %s » (nom, %.0f%%)" % (
+                        m.get("match_ref"), m.get("match_designation") or "",
+                        (m.get("match_score") or 0) * 100)
+                else:
+                    corres = "aucune correspondance côté magasin"
+                ref_pere = (matches[0].get("ref_art") if matches else None) or "-"
+                if entry.get("online") is False:
+                    etat = "hors ligne (pas de vérification possible)"
+                elif entry.get("match_error") or entry.get("reception_error"):
+                    etat = "erreur : %s" % (entry.get("match_error") or entry.get("reception_error"))
+                elif entry.get("online") is None:
+                    etat = "-"
+                else:
+                    etat = "en ligne"
+                reception = entry.get("reception_qte")
+                values = [entry.get("store_name"), "%.2f" % entry.get("qte_pere", 0.0),
+                         "%.2f" % reception if reception is not None else "-",
+                         ref_pere, corres, etat]
+                for col, val in enumerate(values):
+                    self._verif_table.setItem(row, col, QTableWidgetItem(str(val)))
+            self._verif_status.setText(
+                "%d magasin(s). Comparez « Qté livrée » et « Qté déjà reçue » sur la période : "
+                "si elles correspondent déjà, c'est probablement saisi à la main. Une ligne "
+                "« RÉF. DIFFÉRENTE » signale un article connu sous une autre référence côté "
+                "magasin — à vérifier avant d'activer la synchro automatique sur cet article."
+                % len(report))
+
+        def _reconcile_failed(self, msg: str) -> None:
+            self._verif_status.setText("Échec de la recherche : %s" % msg)
 
         def _show_from_tray(self) -> None:
             self.showNormal()
