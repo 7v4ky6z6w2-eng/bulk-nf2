@@ -56,7 +56,15 @@ DEFAULT_CONFIG = {
     "hub_url": "",
     "hub_api_key": "",
     "poll_interval_seconds": 300,
-    "lookback_days": 60,
+    # Petite fenêtre glissante DÉLIBÉRÉMENT courte : la synchro tourne en continu
+    # (chaque passage relit ces N derniers jours), donc pas besoin de remonter
+    # loin pour ne rien manquer — et une valeur haute par défaut risquerait de
+    # renvoyer, dès le tout premier lancement, des BL déjà saisis à la main
+    # AVANT que cet outil n'existe (voir reconcile_fournisseur.py pour
+    # vérifier manuellement jusqu'où c'est déjà saisi, et --backlog-days /
+    # le bouton "Importer un historique…" pour un rattrapage volontaire
+    # au-delà de cette fenêtre, une seule fois).
+    "lookback_days": 3,
     "code_type_piece_bl": "PC_VE_B",
     # cf. l'avertissement ANNULEE dans le docstring du module.
     "filtrer_annulee": False,
@@ -151,10 +159,17 @@ def read_recent_bl(con, code_type_piece: str, lookback_days: int,
 #  Hub (HTTP)
 # --------------------------------------------------------------------------- #
 class HubClient:
-    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0):
+    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0,
+                lines_timeout: float = 180.0):
         self.base = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        # /api/fournisseur/lines peut écrire une ligne à la fois, en direct,
+        # sur un magasin joignable (submit_op synchrone) — un lot de lignes
+        # peut donc légitimement prendre bien plus que le timeout "rapide"
+        # utilisé pour ping/stores/mapping. Distinct du timeout général : on
+        # ne veut pas attendre 180s sur un simple ping qui ne répond pas.
+        self.lines_timeout = lines_timeout
 
     def _headers(self) -> dict:
         return {"X-Api-Key": self.api_key} if self.api_key else {}
@@ -183,14 +198,14 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
-    def post_lines(self, lines: list, batch_size: int = 200) -> list:
+    def post_lines(self, lines: list, batch_size: int = 50) -> list:
         import requests
         results = []
         for i in range(0, len(lines), batch_size):
             batch = lines[i:i + batch_size]
             r = requests.post(self.base + "/api/fournisseur/lines",
                               json={"lines": batch}, headers=self._headers(),
-                              timeout=self.timeout)
+                              timeout=self.lines_timeout)
             r.raise_for_status()
             results.extend(r.json().get("results", []))
         return results
@@ -243,7 +258,7 @@ def run_gui() -> None:
         QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
         QLabel, QLineEdit, QPushButton, QTextEdit, QSpinBox, QMessageBox,
         QSystemTrayIcon, QMenu, QTableWidget, QTableWidgetItem, QComboBox,
-        QCheckBox, QFileDialog, QStyle,
+        QCheckBox, QFileDialog, QStyle, QInputDialog,
     )
 
     class SyncThread(QThread):
@@ -335,9 +350,12 @@ def run_gui() -> None:
             save_btn.clicked.connect(self._save)
             tiers_btn = QPushButton("Correspondance clients → magasins…")
             tiers_btn.clicked.connect(self._open_tiers_dialog)
+            self._backlog_btn = QPushButton("Importer un historique…")
+            self._backlog_btn.clicked.connect(self._import_backlog)
             top_row = QHBoxLayout()
             top_row.addWidget(save_btn)
             top_row.addWidget(tiers_btn)
+            top_row.addWidget(self._backlog_btn)
 
             self._sync_btn = QPushButton("Synchroniser maintenant")
             self._sync_btn.clicked.connect(self._sync_now)
@@ -486,9 +504,39 @@ def run_gui() -> None:
                 QMessageBox.warning(self, "Configuration manquante",
                                    "Enregistrez les paramètres avant de synchroniser.")
                 return
+            self._start_thread(load_config(), "Synchronisation en cours…")
+
+        def _import_backlog(self) -> None:
+            if self._thread is not None and self._thread.isRunning():
+                return
+            cfg = load_config()
+            if not cfg:
+                QMessageBox.warning(self, "Configuration manquante",
+                                   "Enregistrez les paramètres avant d'importer un historique.")
+                return
+            days, ok = QInputDialog.getInt(
+                self, "Importer un historique",
+                "Nombre de jours à remonter (au-delà de la fenêtre habituelle de %d jour(s)) :"
+                % cfg.get("lookback_days", 3), cfg.get("lookback_days", 3), 1, 3650)
+            if not ok:
+                return
+            answer = QMessageBox.question(
+                self, "Confirmer l'import",
+                "Ceci va relire et renvoyer TOUS les bons de livraison des %d derniers "
+                "jours, une seule fois (sans changer vos paramètres habituels).\n\n"
+                "Si des bons de cette période ont déjà été saisis à la main dans un "
+                "magasin, ça créera des doublons — vérifiez d'abord avec "
+                "reconcile_fournisseur.py si vous n'êtes pas sûr. Continuer ?" % days)
+            if answer != QMessageBox.Yes:
+                return
+            self._start_thread(dict(cfg, lookback_days=days),
+                              "Import de l'historique (%d jours) en cours…" % days)
+
+        def _start_thread(self, cfg: dict, status_text: str) -> None:
             self._sync_btn.setEnabled(False)
-            self._status.setText("Synchronisation en cours…")
-            self._thread = SyncThread(load_config())
+            self._backlog_btn.setEnabled(False)
+            self._status.setText(status_text)
+            self._thread = SyncThread(cfg)
             self._thread.logged.connect(self._log_msg)
             self._thread.done.connect(self._sync_done)
             self._thread.failed.connect(self._sync_failed)
@@ -496,11 +544,13 @@ def run_gui() -> None:
 
         def _sync_done(self, tally: dict) -> None:
             self._sync_btn.setEnabled(True)
+            self._backlog_btn.setEnabled(True)
             ts = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             self._status.setText("Dernière synchro : %s — %d ligne(s)" % (ts, tally["lines"]))
 
         def _sync_failed(self, msg: str) -> None:
             self._sync_btn.setEnabled(True)
+            self._backlog_btn.setEnabled(True)
             self._status.setText("Échec de la dernière synchro.")
             self._log_msg("ÉCHEC : %s" % msg)
 
@@ -579,6 +629,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Synchro fournisseur -> magasins.")
     ap.add_argument("--once", action="store_true",
                     help="Une seule synchro en ligne de commande, sans interface.")
+    ap.add_argument("--backlog-days", type=int, default=None,
+                    help="Rattrapage PONCTUEL : relit les N derniers jours (au lieu de la "
+                         "petite fenêtre glissante configurée) et les envoie une seule fois, "
+                         "sans modifier la configuration. À utiliser après avoir vérifié avec "
+                         "reconcile_fournisseur.py jusqu'où c'est déjà saisi à la main côté "
+                         "magasin, pour rattraper ce qui ne l'est pas encore.")
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
 
@@ -586,11 +642,13 @@ def main() -> None:
                         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
                         datefmt="%Y-%m-%d %H:%M:%S")
 
-    if args.once:
+    if args.once or args.backlog_days is not None:
         cfg = load_config()
         if not cfg or not cfg.get("hub_url") or not cfg["firebird"].get("database"):
             sys.exit("Configuration manquante ou incomplète (%s) — lancez l'outil sans "
                      "--once une première fois pour la créer." % CONFIG_PATH)
+        if args.backlog_days is not None:
+            cfg = dict(cfg, lookback_days=args.backlog_days)
         run_cycle(cfg)
         return
 
