@@ -81,4 +81,35 @@
     </form>
   </div>
 </div>
+
+<div class="card mb-4" style="max-width:640px">
+  <div class="card-header">Fournisseur (le père) comme tiers, par magasin</div>
+  <div class="card-body">
+    <p class="text-muted small">
+      Le CODE_TIERS et le CODE_DEPOT à utiliser pour rattacher les réceptions créées par
+      la synchro à un vrai fournisseur/dépôt côté magasin — sinon elles sont créées sans
+      fournisseur ni dépôt attaché. Peut être différent d'un magasin à l'autre.
+    </p>
+    {% for s in stores %}
+    <form method="post" action="{{ url_for('dashboard.fournisseur_store_settings_set_route') }}"
+          class="row g-2 align-items-end mb-2">
+      <input type="hidden" name="store_id" value="{{ s.id }}">
+      <div class="col-3"><span class="fw-semibold small">{{ s.name }}</span></div>
+      <div class="col-3">
+        <label class="form-label small mb-0">Code tiers</label>
+        <input type="text" name="code_tiers" class="form-control form-control-sm"
+               value="{{ store_settings.get(s.id, {}).get('code_tiers', '') }}">
+      </div>
+      <div class="col-3">
+        <label class="form-label small mb-0">Code dépôt</label>
+        <input type="text" name="code_depot" class="form-control form-control-sm"
+               value="{{ store_settings.get(s.id, {}).get('code_depot', '') }}">
+      </div>
+      <div class="col-3">
+        <button type="submit" class="btn btn-sm btn-primary">Enregistrer</button>
+      </div>
+    </form>
+    {% endfor %}
+  </div>
+</div>
 {% endblock %}

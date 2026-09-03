@@ -30,6 +30,9 @@ from hub.central_db import (
     fournisseur_pending_list, fournisseur_pending_get, fournisseur_pending_resolve,
     fournisseur_pending_ignore, fournisseur_sync_state_set,
     fournisseur_settings_get, fournisseur_settings_set,
+    fournisseur_store_settings_get, fournisseur_store_settings_set,
+    fournisseur_receptions_history, fournisseur_reception_lines,
+    fournisseur_sync_state_clear_by_dest, fournisseur_pending_creation_clear,
 )
 from hub.ops import submit_op
 
@@ -377,8 +380,11 @@ def fournisseur_mapping_view():
     reg = _registry()
     mapping = fournisseur_mapping(con)
     settings = fournisseur_settings_get(con)
+    stores = reg.stores if reg else []
+    store_settings = {s.id: fournisseur_store_settings_get(con, s.id) for s in stores}
     return render_template("fournisseur_mapping.html", mapping=mapping, settings=settings,
-                           stores=(reg.stores if reg else []), store_names=_store_names())
+                           stores=stores, store_names=_store_names(),
+                           store_settings=store_settings)
 
 
 @bp.post("/fournisseur-mapping/set")
@@ -395,6 +401,19 @@ def fournisseur_mapping_set():
 def fournisseur_settings_set_route():
     code_type_piece_reception = (request.form.get("code_type_piece_reception") or "").strip()
     fournisseur_settings_set(_db(), code_type_piece_reception)
+    return redirect(url_for("dashboard.fournisseur_mapping_view"))
+
+
+@bp.post("/fournisseur-mapping/store-settings")
+def fournisseur_store_settings_set_route():
+    try:
+        store_id = int(request.form.get("store_id") or 0)
+    except ValueError:
+        store_id = 0
+    code_tiers = (request.form.get("code_tiers") or "").strip()
+    code_depot = (request.form.get("code_depot") or "").strip()
+    if store_id:
+        fournisseur_store_settings_set(_db(), store_id, code_tiers, code_depot)
     return redirect(url_for("dashboard.fournisseur_mapping_view"))
 
 
@@ -447,6 +466,60 @@ def fournisseur_pending_resolve_route():
 
     pending = fournisseur_pending_list(con)
     return render_template("fournisseur_pending.html", pending=pending,
+                           store_names=_store_names(), error=error)
+
+
+@bp.get("/fournisseur-historique")
+def fournisseur_history_view():
+    con = _db()
+    history = fournisseur_receptions_history(con)
+    return render_template("fournisseur_history.html", history=history,
+                           store_names=_store_names())
+
+
+@bp.get("/fournisseur-historique/detail")
+def fournisseur_history_detail():
+    con = _db()
+    try:
+        store_id = int(request.args.get("store_id") or 0)
+    except ValueError:
+        store_id = 0
+    dest_nopiece = request.args.get("dest_nopiece") or ""
+    lines = fournisseur_reception_lines(con, store_id, dest_nopiece) if store_id and dest_nopiece else []
+    return jsonify(lines)
+
+
+@bp.post("/fournisseur-historique/annuler")
+def fournisseur_history_cancel():
+    con = _db()
+    reg = _registry()
+    try:
+        store_id = int(request.form.get("store_id") or 0)
+    except ValueError:
+        store_id = 0
+    dest_nopiece = (request.form.get("dest_nopiece") or "").strip()
+    error = None
+    if not store_id or not dest_nopiece:
+        error = "Réception introuvable."
+    else:
+        result = submit_op(con, reg, store_id, "cancel_piece", {"nopiece": dest_nopiece})
+        if result.get("status") == "error":
+            error = result.get("error")
+        elif result.get("status") == "applied":
+            # Annulée tout de suite (magasin en ligne) : purger le suivi
+            # pour que cette ligne de BL soit retraitée comme neuve si le
+            # fournisseur la redonne encore (voir docstring de la fonction).
+            srcs = fournisseur_sync_state_clear_by_dest(con, store_id, dest_nopiece)
+            for src in srcs:
+                fournisseur_pending_creation_clear(con, store_id, src)
+        # Si "queued" (magasin hors ligne) : l'annulation partira dès son
+        # retour en ligne, mais fournisseur_sync_state reste en l'état tant
+        # qu'on ne sait pas si l'annulation a réellement été appliquée —
+        # évite de rouvrir la ligne comme "neuve" pour rien si l'agent est
+        # simplement débranché quelques minutes.
+
+    history = fournisseur_receptions_history(con)
+    return render_template("fournisseur_history.html", history=history,
                            store_names=_store_names(), error=error)
 
 
