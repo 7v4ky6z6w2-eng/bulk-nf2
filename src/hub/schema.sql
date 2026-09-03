@@ -147,9 +147,10 @@ CREATE TABLE IF NOT EXISTS piece (
     synced_at        TEXT    NOT NULL,
     UNIQUE (store_id, nopiece)
 );
-CREATE INDEX IF NOT EXISTS idx_piece_store ON piece (store_id);
-CREATE INDEX IF NOT EXISTS idx_piece_date  ON piece (datepiece);
-CREATE INDEX IF NOT EXISTS idx_piece_type  ON piece (code_type_piece);
+CREATE INDEX IF NOT EXISTS idx_piece_store  ON piece (store_id);
+CREATE INDEX IF NOT EXISTS idx_piece_date   ON piece (datepiece);
+CREATE INDEX IF NOT EXISTS idx_piece_type   ON piece (code_type_piece);
+CREATE INDEX IF NOT EXISTS idx_piece_refdoc ON piece (store_id, refdoc);
 
 -- ──────────────────────── ITEM (lignes ventes) ────────────────────────────
 CREATE TABLE IF NOT EXISTS item (
@@ -260,10 +261,29 @@ CREATE TABLE IF NOT EXISTS fournisseur_sync_state (
     dest_ref_art   TEXT    NOT NULL,        -- référence retenue côté magasin
     dest_nopiece   TEXT    NOT NULL,        -- NOPIECE créé côté magasin
     dest_noitem    TEXT    NOT NULL,        -- NOITEM créé côté magasin
+    op_id          INTEGER,                 -- pending_ops.id de la création tant
+                                             -- qu'elle est en file (permet de
+                                             -- distinguer "encore en attente" de
+                                             -- "a échoué" plutôt que de supposer
+                                             -- que la file finit toujours par
+                                             -- réussir)
     last_qte       REAL,
     last_prix      REAL,
     updated_at     TEXT    NOT NULL,
     UNIQUE (store_id, src_nopiece, src_noitem)
+);
+
+-- Suit, PAR BON DE LIVRAISON (pas par ligne), l'op bdr_import encore EN FILE
+-- qui va créer sa réception -- permet à une ligne suivante du MÊME bon de
+-- rejoindre cette op déjà en file (une pièce, pas une par ligne) au lieu d'en
+-- mettre une seconde en file pour le même bon. Purgée dès que l'op n'est plus
+-- 'pending' (voir hub.fournisseur).
+CREATE TABLE IF NOT EXISTS fournisseur_pending_creation (
+    store_id       INTEGER NOT NULL,
+    src_nopiece    TEXT    NOT NULL,
+    op_id          INTEGER NOT NULL,
+    created_at     TEXT    NOT NULL,
+    PRIMARY KEY (store_id, src_nopiece)
 );
 
 -- Lignes de BL dont l'article n'a pu être rapproché qu'approximativement (par
@@ -300,4 +320,15 @@ CREATE INDEX IF NOT EXISTS idx_fourn_pending_status ON fournisseur_pending (stat
 CREATE TABLE IF NOT EXISTS fournisseur_settings (
     id                        INTEGER PRIMARY KEY CHECK (id = 1),
     code_type_piece_reception TEXT DEFAULT ''
+);
+
+-- Le fournisseur (le père) EN TANT QUE TIERS dans chacun des 3 magasins :
+-- son CODE_TIERS/CODE_DEPOT propres à CE magasin (pas forcément le même
+-- d'un magasin à l'autre). Sans ça, les réceptions créées par la synchro
+-- n'ont ni fournisseur ni dépôt attaché côté Firebird. Vide par défaut
+-- (à confirmer sur site, un magasin à la fois, sur le tableau de bord).
+CREATE TABLE IF NOT EXISTS fournisseur_store_settings (
+    store_id    INTEGER PRIMARY KEY,
+    code_tiers  TEXT DEFAULT '',
+    code_depot  TEXT DEFAULT ''
 );

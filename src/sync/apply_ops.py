@@ -15,6 +15,7 @@ puis acquitte (done/failed) au hub. Le hub envoie ensuite la notification.
 from __future__ import annotations
 
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -48,6 +49,8 @@ def apply_op(op: dict, connect_kwargs: dict) -> None:
         _apply_item_edit(payload, connect_kwargs)
     elif op_type == "item_add":
         _apply_item_add(payload, connect_kwargs)
+    elif op_type == "cancel_piece":
+        _apply_cancel_piece(payload, connect_kwargs)
     else:
         raise ApplyError("Type d'opération inconnu : %s" % op_type)
 
@@ -71,10 +74,43 @@ def _apply_item_add(payload: dict, connect_kwargs: dict) -> None:
     lines = payload.get("lines") or []
     if not nopiece or not lines:
         raise ApplyError("Ajout de ligne(s) sans pièce cible ou sans lignes.")
+    date_piece = None
+    raw_date = payload.get("date_piece")
+    if raw_date:
+        try:
+            date_piece = datetime.datetime.strptime(str(raw_date)[:10], "%Y-%m-%d")
+        except ValueError:
+            date_piece = None
     try:
-        bdr.add_items(cfg, nopiece, lines)
+        bdr.add_items(cfg, nopiece, lines, date_piece=date_piece)
     except Exception as exc:  # noqa: BLE001
         raise ApplyError("Ajout de ligne(s) échoué : %s" % exc) from exc
+
+
+# --------------------------------------------------------------------------- #
+def _apply_cancel_piece(payload: dict, connect_kwargs: dict) -> None:
+    """Annule une pièce (ANNULEE=0, reprise native du stock par le trigger
+    UPDATE_PIECE) — sert au bouton « Annuler cette réception » du tableau de
+    bord (historique synchro fournisseur), pour retirer à la main une
+    réception créée par erreur ou en double malgré les protections
+    automatiques."""
+    import import_bon_reception as bdr  # type: ignore
+
+    cfg = {
+        "host": "localhost",
+        "port": connect_kwargs.get("port", 3050),
+        "database": connect_kwargs["database"],
+        "user": connect_kwargs.get("user", "SYSDBA"),
+        "password": connect_kwargs.get("password", ""),
+        "charset": connect_kwargs.get("charset", "WIN1256"),
+    }
+    nopiece = payload.get("nopiece")
+    if not nopiece:
+        raise ApplyError("Annulation sans NOPIECE.")
+    try:
+        bdr.cancel_piece(cfg, nopiece)
+    except Exception as exc:  # noqa: BLE001
+        raise ApplyError("Annulation échouée : %s" % exc) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -174,6 +210,13 @@ def _apply_bdr(payload: dict, connect_kwargs: dict) -> None:
         json.dump(lines, fh, ensure_ascii=False)
 
     argv = ["import_bon_reception", "--config", cfg_path, "--lines", lines_path]
+    date_piece = payload.get("date_piece")
+    if date_piece:
+        # Date du BL d'origine (synchro fournisseur) : la réception créée
+        # doit porter cette date, pas celle du jour où l'agent applique la
+        # file — sinon un rattrapage tardif daterait la réception du jour de
+        # la synchro au lieu du jour de la livraison réelle.
+        argv += ["--date", str(date_piece)[:10]]
     old_argv = sys.argv
     buf = io.StringIO()
     try:

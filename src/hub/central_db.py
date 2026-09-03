@@ -153,6 +153,14 @@ def _migrate(con: sqlite3.Connection) -> None:
     if piece_cols and "refdoc" not in piece_cols:
         con.execute("ALTER TABLE piece ADD COLUMN refdoc TEXT")
 
+    # Colonne op_id sur fournisseur_sync_state (bases créées avant son ajout) :
+    # sans elle, une création mise en file dont l'application échoue ensuite
+    # restait signalée "unchanged" pour toujours (rien ne permettait de
+    # vérifier le sort réel de l'op) — voir hub.fournisseur.process_line.
+    fss_cols = [r[1] for r in con.execute("PRAGMA table_info(fournisseur_sync_state)").fetchall()]
+    if fss_cols and "op_id" not in fss_cols:
+        con.execute("ALTER TABLE fournisseur_sync_state ADD COLUMN op_id INTEGER")
+
 
 # --------------------------------------------------------------------------- #
 #  Upsert générique
@@ -1083,7 +1091,7 @@ def apply_item_edit_local(con: sqlite3.Connection, store_id: int, edits: list) -
             "WHERE store_id=? AND nopiece=? AND noitem=?",
             (e.get("qte"), e.get("prix"), now_iso(), store_id, nopiece, noitem))
         touched_pieces.add(nopiece)
-        if e.get("maj_prix_achat"):
+        if e.get("maj_prix_achat") and float(e.get("prix") or 0) > 0:
             row = con.execute(
                 "SELECT ref_art FROM item WHERE store_id=? AND nopiece=? AND noitem=?",
                 (store_id, nopiece, noitem)).fetchone()
@@ -1101,6 +1109,17 @@ def apply_item_edit_local(con: sqlite3.Connection, store_id: int, edits: list) -
             "UPDATE piece SET montantht=?, montantttc=?, synced_at=? "
             "WHERE store_id=? AND nopiece=?",
             (ht, ht, now_iso(), store_id, nopiece))
+    con.commit()
+
+
+def apply_cancel_piece_local(con: sqlite3.Connection, store_id: int, nopiece: str) -> None:
+    """Répercute une annulation de pièce sur le miroir : ANNULEE=0 tout de
+    suite (visible immédiatement dans l'historique du tableau de bord) — le
+    stock repris par le trigger Firebird, lui, n'arrivera dans stock_snapshot
+    qu'à la prochaine synchro complète de l'agent (délai normal, déjà le cas
+    pour toute écriture directe qui touche le stock)."""
+    con.execute("UPDATE piece SET annulee=0, synced_at=? WHERE store_id=? AND nopiece=?",
+               (now_iso(), store_id, nopiece))
     con.commit()
 
 
@@ -1208,17 +1227,38 @@ def fournisseur_sync_state_get(con: sqlite3.Connection, store_id: int,
 
 def fournisseur_sync_state_set(con: sqlite3.Connection, store_id: int, src_nopiece: str,
                                src_noitem: str, dest_ref_art: str, dest_nopiece: str,
-                               dest_noitem: str, qte: float, prix: float) -> None:
+                               dest_noitem: str, qte: float, prix: float,
+                               op_id: int | None = None) -> None:
+    """`op_id` : pending_ops.id de la création tant qu'elle est encore en
+    file (dest_nopiece vide) — None une fois la pièce/ligne réellement
+    connues (créée en ligne, ou retrouvée via REFDOC). Sert à distinguer
+    "encore en attente" de "a échoué" au lieu de supposer que la file finit
+    toujours par réussir (voir process_line)."""
     con.execute(
         "INSERT INTO fournisseur_sync_state "
         "(store_id, src_nopiece, src_noitem, dest_ref_art, dest_nopiece, dest_noitem, "
-        " last_qte, last_prix, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " op_id, last_qte, last_prix, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(store_id, src_nopiece, src_noitem) DO UPDATE SET "
         "  dest_ref_art=excluded.dest_ref_art, dest_nopiece=excluded.dest_nopiece, "
-        "  dest_noitem=excluded.dest_noitem, last_qte=excluded.last_qte, "
+        "  dest_noitem=excluded.dest_noitem, op_id=excluded.op_id, "
+        "  last_qte=excluded.last_qte, "
         "  last_prix=excluded.last_prix, updated_at=excluded.updated_at",
         (store_id, src_nopiece, src_noitem, dest_ref_art, dest_nopiece, dest_noitem,
-         qte, prix, now_iso()))
+         op_id, qte, prix, now_iso()))
+    con.commit()
+
+
+def fournisseur_sync_state_clear(con: sqlite3.Connection, store_id: int,
+                                 src_nopiece: str, src_noitem: str) -> None:
+    """Supprime l'état d'une ligne — sert quand la création mise en file a
+    ÉCHOUÉ (l'op est en status 'failed') : sans ça, la ligne resterait
+    signalée "inchangé" pour toujours alors que la marchandise n'est jamais
+    arrivée côté magasin (voir process_line). Après suppression, la ligne
+    est retraitée depuis zéro au prochain passage, comme si elle était
+    nouvelle."""
+    con.execute(
+        "DELETE FROM fournisseur_sync_state WHERE store_id=? AND src_nopiece=? AND src_noitem=?",
+        (store_id, src_nopiece, src_noitem))
     con.commit()
 
 
@@ -1237,7 +1277,7 @@ def fournisseur_known_dest_nopiece(con: sqlite3.Connection, store_id: int,
 
 
 def fournisseur_dest_nopiece_by_refdoc(con: sqlite3.Connection, store_id: int,
-                                       src_nopiece: str) -> str | None:
+                                       src_nopiece: str, code_type_piece: str) -> str | None:
     """Repli quand fournisseur_sync_state ne connaît PAS (encore) le NOPIECE
     créé pour ce BL : arrive quand la réception a été créée HORS LIGNE (mise
     en file) puis appliquée par l'agent — rien ne revient alors mettre à jour
@@ -1247,10 +1287,19 @@ def fournisseur_dest_nopiece_by_refdoc(con: sqlite3.Connection, store_id: int,
     celle-ci). apply_new_line stocke le NOPIECE du BL d'origine dans
     PIECE.REFDOC à la création (voir son docstring) ; ce champ arrive dans le
     miroir via la synchro régulière de l'agent (aucune action supplémentaire
-    nécessaire — se corrige tout seul dès le prochain passage de l'agent)."""
+    nécessaire — se corrige tout seul dès le prochain passage de l'agent).
+
+    `code_type_piece` : IMPORTANT — REFDOC est un champ texte libre que le
+    personnel du magasin peut aussi remplir à la main sur SES PROPRES pièces
+    (ex. y recopier le n° du bon papier du père). Sans filtrer sur le type de
+    pièce des réceptions, une collision purement textuelle pourrait faire
+    "retrouver" un document du magasin qui n'a rien à voir (une vente, par
+    exemple) et y injecter des lignes de réception. On exclut aussi les
+    pièces annulées (ANNULEE=0 pour une réception — voir mode_cancel_piece)."""
     row = con.execute(
-        "SELECT nopiece FROM piece WHERE store_id=? AND refdoc=? "
-        "ORDER BY id DESC LIMIT 1", (store_id, src_nopiece)).fetchone()
+        "SELECT nopiece FROM piece WHERE store_id=? AND refdoc=? AND code_type_piece=? "
+        "AND (annulee IS NULL OR annulee <> 0) "
+        "ORDER BY id DESC LIMIT 1", (store_id, src_nopiece, code_type_piece)).fetchone()
     return row["nopiece"] if row else None
 
 
@@ -1258,22 +1307,112 @@ def fournisseur_dest_noitem_by_ref(con: sqlite3.Connection, store_id: int,
                                    nopiece: str, ref_art: str) -> str | None:
     """Le NOITEM d'une ligne déjà créée dans une réception connue via le
     repli REFDOC ci-dessus (nécessaire pour item_edit, qui a besoin du
-    NOITEM précis à modifier, pas seulement du NOPIECE de la pièce)."""
-    row = con.execute(
-        "SELECT noitem FROM item WHERE store_id=? AND nopiece=? AND ref_art=? "
-        "LIMIT 1", (store_id, nopiece, ref_art)).fetchone()
+    NOITEM précis à modifier, pas seulement du NOPIECE de la pièce).
+
+    Si le PÈRE a mis la MÊME référence deux fois sur un même bon (deux lots,
+    deux prix...), cette pièce a deux lignes ITEM pour cette ref_art — il n'y
+    a alors AUCUN moyen sûr de savoir laquelle correspond à la ligne source
+    qu'on cherche à éditer (rien ne les distingue côté magasin). Renvoyer
+    None plutôt que deviner : le résultat visible est "pending_creation"
+    (rien n'est modifié) au lieu de risquer d'éditer la MAUVAISE ligne."""
+    rows = con.execute(
+        "SELECT noitem FROM item WHERE store_id=? AND nopiece=? AND ref_art=?",
+        (store_id, nopiece, ref_art)).fetchall()
+    if len(rows) != 1:
+        return None
     # item.noitem est INTEGER dans le miroir (contrairement à
     # fournisseur_sync_state.dest_noitem et au reste du code, qui traitent
     # tous noitem comme une chaîne) — cast pour rester cohérent.
-    return str(row["noitem"]) if row else None
+    return str(rows[0]["noitem"])
+
+
+def pending_op_status(con: sqlite3.Connection, op_id: int) -> str | None:
+    row = con.execute("SELECT status FROM pending_ops WHERE id=?", (op_id,)).fetchone()
+    return row["status"] if row else None
+
+
+def pending_op_append_line(con: sqlite3.Connection, op_id: int, line: dict) -> bool:
+    """Ajoute une ligne au payload d'une op bdr_import ENCORE en file (avant
+    que l'agent ne l'applique) — sert à fusionner plusieurs lignes d'un même
+    bon de livraison arrivées pendant que le magasin est hors ligne dans UNE
+    seule création au lieu d'une par ligne (voir hub.fournisseur). Renvoie
+    False (rien fait) si l'op n'existe plus ou n'est plus 'pending' —
+    l'appelant doit alors créer une nouvelle op comme si de rien n'était."""
+    row = con.execute("SELECT payload FROM pending_ops WHERE id=? AND status='pending'",
+                      (op_id,)).fetchone()
+    if not row:
+        return False
+    payload = json.loads(row["payload"])
+    payload.setdefault("lines", []).append(line)
+    con.execute("UPDATE pending_ops SET payload=? WHERE id=?",
+               (json.dumps(payload, ensure_ascii=False), op_id))
+    con.commit()
+    return True
+
+
+def fournisseur_pending_creation_get(con: sqlite3.Connection, store_id: int,
+                                     src_nopiece: str) -> int | None:
+    """op_id d'une création bdr_import ENCORE en file pour ce bon de
+    livraison, s'il y en a une — pour qu'une ligne suivante du MÊME bon la
+    rejoigne (pending_op_append_line) au lieu de mettre une seconde création
+    en file pour le même bon. None si l'op a déjà été traitée (appliquée ou
+    en échec) : purgée automatiquement dans ce cas (elle ne sert plus)."""
+    row = con.execute(
+        "SELECT c.op_id, o.status FROM fournisseur_pending_creation c "
+        "JOIN pending_ops o ON o.id = c.op_id "
+        "WHERE c.store_id=? AND c.src_nopiece=?", (store_id, src_nopiece)).fetchone()
+    if not row:
+        return None
+    if row["status"] != "pending":
+        fournisseur_pending_creation_clear(con, store_id, src_nopiece)
+        return None
+    return row["op_id"]
+
+
+def fournisseur_pending_creation_set(con: sqlite3.Connection, store_id: int,
+                                     src_nopiece: str, op_id: int) -> None:
+    con.execute(
+        "INSERT INTO fournisseur_pending_creation (store_id, src_nopiece, op_id, created_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(store_id, src_nopiece) DO UPDATE SET op_id=excluded.op_id, "
+        "  created_at=excluded.created_at",
+        (store_id, src_nopiece, op_id, now_iso()))
+    con.commit()
+
+
+def fournisseur_pending_creation_clear(con: sqlite3.Connection, store_id: int,
+                                       src_nopiece: str) -> None:
+    con.execute("DELETE FROM fournisseur_pending_creation WHERE store_id=? AND src_nopiece=?",
+               (store_id, src_nopiece))
+    con.commit()
+
+
+def fournisseur_store_settings_get(con: sqlite3.Connection, store_id: int) -> dict:
+    row = con.execute(
+        "SELECT code_tiers, code_depot FROM fournisseur_store_settings WHERE store_id=?",
+        (store_id,)).fetchone()
+    return {"code_tiers": (row["code_tiers"] if row else "") or "",
+           "code_depot": (row["code_depot"] if row else "") or ""}
+
+
+def fournisseur_store_settings_set(con: sqlite3.Connection, store_id: int,
+                                   code_tiers: str, code_depot: str) -> None:
+    con.execute(
+        "INSERT INTO fournisseur_store_settings (store_id, code_tiers, code_depot) "
+        "VALUES (?, ?, ?) "
+        "ON CONFLICT(store_id) DO UPDATE SET code_tiers=excluded.code_tiers, "
+        "  code_depot=excluded.code_depot",
+        (store_id, (code_tiers or "").strip(), (code_depot or "").strip()))
+    con.commit()
 
 
 def fournisseur_pending_add(con: sqlite3.Connection, store_id: int, src_nopiece: str,
                             src_noitem: str, ref_art: str | None, designation: str | None,
                             qte: float | None, prix: float | None,
                             code_barres: str | None, candidates: list,
-                            tva: float | None = None) -> None:
+                            tva: float | None = None) -> str:
     """Met en file une ligne à rapprocher manuellement (statut 'pending').
+    Renvoie le statut réel de la ligne après l'appel (voir plus bas).
 
     L'exe fournisseur renvoie TOUTES les lignes à CHAQUE passage (voir sa
     docstring) : tant qu'une ligne reste non résolue par un humain, elle
@@ -1297,6 +1436,14 @@ def fournisseur_pending_add(con: sqlite3.Connection, store_id: int, src_nopiece:
             (store_id, src_nopiece, src_noitem, ref_art, designation, qte, prix, tva,
              code_barres, json.dumps(candidates or []), now_iso()))
     con.commit()
+    # 'pending' pour une ligne fraîche/rafraîchie ; le statut RÉEL (ex.
+    # 'ignored') pour une ligne déjà traitée par un humain — sinon l'appelant
+    # (process_line) rapporterait "à valider" indéfiniment au fournisseur pour
+    # une ligne qu'un humain a déjà explicitement écartée.
+    row = con.execute(
+        "SELECT status FROM fournisseur_pending WHERE store_id=? AND src_nopiece=? "
+        "AND src_noitem=?", (store_id, src_nopiece, src_noitem)).fetchone()
+    return row["status"] if row else "pending"
 
 
 def _fournisseur_pending_row(row: sqlite3.Row) -> dict:
@@ -1337,3 +1484,89 @@ def fournisseur_pending_ignore(con: sqlite3.Connection, pending_id: int) -> None
     con.execute("UPDATE fournisseur_pending SET status='ignored', resolved_at=? WHERE id=?",
                (now_iso(), pending_id))
     con.commit()
+
+
+def fournisseur_receptions_history(con: sqlite3.Connection, limit: int = 200) -> list:
+    """Historique des réceptions créées par la synchro fournisseur — une ligne
+    par PIÈCE créée côté magasin (regroupe fournisseur_sync_state par
+    dest_nopiece), les plus récentes d'abord. Les BL encore EN FILE (magasin
+    resté hors ligne au moment de la création, dest_nopiece pas encore connu)
+    apparaissent aussi, groupés par op_id à la place, avec le statut de cette
+    op ('queued' tant qu'elle est 'pending' côté pending_ops, 'failed' si
+    l'agent n'a pas pu l'appliquer — bascule vers une vraie ligne "created"
+    tout seul au prochain passage une fois appliquée). Sert à la page de
+    confirmation/historique du tableau de bord (vérifier ce qui a été
+    importé, et pouvoir l'annuler)."""
+    created = con.execute(
+        "SELECT store_id, dest_nopiece, "
+        "       GROUP_CONCAT(DISTINCT src_nopiece) AS src_nopieces, "
+        "       COUNT(*) AS nb_lignes, SUM(last_qte) AS qte_totale, "
+        "       SUM(COALESCE(last_qte,0) * COALESCE(last_prix,0)) AS montant_ht, "
+        "       MIN(updated_at) AS first_seen, MAX(updated_at) AS updated_at "
+        "FROM fournisseur_sync_state WHERE dest_nopiece <> '' "
+        "GROUP BY store_id, dest_nopiece "
+        "ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+    out = []
+    for r in created:
+        d = dict(r)
+        piece = con.execute(
+            "SELECT datepiece, code_tiers, annulee FROM piece WHERE store_id=? AND nopiece=?",
+            (d["store_id"], d["dest_nopiece"])).fetchone()
+        d["datepiece"] = piece["datepiece"] if piece else None
+        d["code_tiers"] = piece["code_tiers"] if piece else None
+        cancelled = bool(piece and piece["annulee"] == 0)
+        d["status"] = "cancelled" if cancelled else "created"
+        out.append(d)
+
+    queued = con.execute(
+        "SELECT store_id, src_nopiece AS src_nopieces, op_id, "
+        "       COUNT(*) AS nb_lignes, SUM(last_qte) AS qte_totale, "
+        "       SUM(COALESCE(last_qte,0) * COALESCE(last_prix,0)) AS montant_ht, "
+        "       MIN(updated_at) AS first_seen, MAX(updated_at) AS updated_at "
+        "FROM fournisseur_sync_state WHERE dest_nopiece = '' AND op_id IS NOT NULL "
+        "GROUP BY store_id, src_nopiece, op_id "
+        "ORDER BY updated_at DESC").fetchall()
+    for r in queued:
+        d = dict(r)
+        d["dest_nopiece"] = None
+        d["datepiece"] = None
+        d["code_tiers"] = None
+        op_status = pending_op_status(con, d["op_id"]) if d["op_id"] else None
+        d["status"] = "failed" if op_status == "failed" else "queued"
+        out.append(d)
+
+    out.sort(key=lambda d: d["updated_at"] or "", reverse=True)
+    return out[:limit]
+
+
+def fournisseur_reception_lines(con: sqlite3.Connection, store_id: int,
+                                dest_nopiece: str) -> list:
+    """Détail (une ligne par article) d'une réception créée par la synchro,
+    pour l'affichage détaillé sur la page d'historique."""
+    rows = con.execute(
+        "SELECT src_nopiece, src_noitem, dest_ref_art, dest_noitem, "
+        "       last_qte, last_prix, updated_at FROM fournisseur_sync_state "
+        "WHERE store_id=? AND dest_nopiece=? ORDER BY CAST(src_noitem AS INTEGER)",
+        (store_id, dest_nopiece)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fournisseur_sync_state_clear_by_dest(con: sqlite3.Connection, store_id: int,
+                                         dest_nopiece: str) -> list:
+    """Supprime toutes les lignes fournisseur_sync_state d'une réception
+    annulée depuis le tableau de bord (une pièce peut avoir plusieurs lignes)
+    — renvoie les src_nopiece concernés pour purger aussi
+    fournisseur_pending_creation. Après ça, si le fournisseur redonne encore
+    ce même BL au prochain passage (toujours dans la fenêtre de rattrapage),
+    il est retraité depuis zéro comme une ligne jamais vue : c'est le
+    comportement voulu d'une VRAIE annulation (pas un simple masquage
+    d'affichage) — à ne déclencher que sur une réception qu'on veut vraiment
+    voir disparaître et, si la marchandise est toujours due, revenir."""
+    rows = con.execute(
+        "SELECT DISTINCT src_nopiece FROM fournisseur_sync_state "
+        "WHERE store_id=? AND dest_nopiece=?", (store_id, dest_nopiece)).fetchall()
+    srcs = [r["src_nopiece"] for r in rows]
+    con.execute("DELETE FROM fournisseur_sync_state WHERE store_id=? AND dest_nopiece=?",
+               (store_id, dest_nopiece))
+    con.commit()
+    return srcs

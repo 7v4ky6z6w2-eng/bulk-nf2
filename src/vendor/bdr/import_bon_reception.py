@@ -1325,7 +1325,10 @@ def edit_items(cfg, edits):
                 "UPDATE ITEM SET QTE = ?, PRIXHT = ? WHERE NOPIECE = ? AND NOITEM = ?",
                 (e["qte"], e["prix"], e["nopiece"], e["noitem"]))
             touched_pieces.add(e["nopiece"])
-            if e.get("maj_prix_achat"):
+            # prix > 0 : même garde qu'à la création (upsert_article) — un
+            # prix à 0 (ligne gratuite/promo/erreur de saisie) ne doit jamais
+            # écraser le prix d'achat réel de l'article.
+            if e.get("maj_prix_achat") and float(e.get("prix") or 0) > 0:
                 cur.execute("SELECT REF_ART FROM ITEM WHERE NOPIECE = ? AND NOITEM = ?",
                            (e["nopiece"], e["noitem"]))
                 row = cur.fetchone()
@@ -1509,24 +1512,37 @@ def mode_apply_barcodes(cfg, lines, out_path=None):
         con.close()
 
 
-def mode_cancel_piece(cfg, nopiece):
+def cancel_piece(cfg, nopiece):
     """Annule un bon (ANNULEE=0) : le trigger UPDATE_PIECE repercute sur les
-    items et le stock est repris (annulation native du logiciel)."""
+    items et le stock est repris (annulation native du logiciel). Renvoie
+    {"nopiece", "code_type_piece"} ; lève ValueError si la pièce n'existe
+    pas, ou toute autre exception en cas d'échec SQL (avec rollback)."""
     con = connect(cfg)
     try:
         cur = con.cursor()
         cur.execute("SELECT CODE_TYPE_PIECE, ANNULEE FROM PIECE WHERE NOPIECE = ?", (nopiece,))
         row = cur.fetchone()
         if not row:
-            con.close(); sys.exit("Bon introuvable : NOPIECE=%s" % nopiece)
+            raise ValueError("Bon introuvable : NOPIECE=%s" % nopiece)
         cur.execute("UPDATE PIECE SET ANNULEE = 0 WHERE NOPIECE = ?", (nopiece,))
         con.commit()
-        print("Bon NOPIECE=%s annule (stock repris)." % nopiece)
-    except Exception as exc:
+        return {"nopiece": nopiece, "code_type_piece": row[0]}
+    except Exception:
         con.rollback()
-        print("ECHEC annulation : %s" % exc, file=sys.stderr); sys.exit(1)
+        raise
     finally:
         con.close()
+
+
+def mode_cancel_piece(cfg, nopiece):
+    """Mode CLI : annule un bon et affiche le résultat (voir cancel_piece)."""
+    try:
+        cancel_piece(cfg, nopiece)
+        print("Bon NOPIECE=%s annule (stock repris)." % nopiece)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        print("ECHEC annulation : %s" % exc, file=sys.stderr); sys.exit(1)
 
 
 def run_import(cfg, lines, date_piece=None, dry_run=False):

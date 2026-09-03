@@ -128,7 +128,8 @@ def read_recent_bl(con, code_type_piece: str, lookback_days: int,
     récupéré, pour ne jamais rater une ligne par excès de prudence."""
     cur = con.cursor()
     cutoff = datetime.datetime.now() - datetime.timedelta(days=lookback_days)
-    sql = "SELECT NOPIECE, CODE_TIERS FROM PIECE WHERE CODE_TYPE_PIECE = ? AND DATEPIECE >= ?"
+    sql = ("SELECT NOPIECE, CODE_TIERS, DATEPIECE FROM PIECE "
+          "WHERE CODE_TYPE_PIECE = ? AND DATEPIECE >= ?")
     params = [code_type_piece, cutoff]
     if filtrer_annulee:
         sql += " AND (ANNULEE IS NULL OR ANNULEE = 0)"
@@ -140,7 +141,7 @@ def read_recent_bl(con, code_type_piece: str, lookback_days: int,
 
     lines = []
     item_cur = con.cursor()
-    for nopiece, code_tiers in pieces:
+    for nopiece, code_tiers, datepiece in pieces:
         if not code_tiers:
             continue
         item_cur.execute(
@@ -163,6 +164,7 @@ def read_recent_bl(con, code_type_piece: str, lookback_days: int,
                 # ses propres magasins), pas un achat externe soumis à TVA.
                 "tva": 0,
                 "code_barres": (str(barcode).strip() if barcode else None),
+                "date_piece": str(datepiece)[:10] if datepiece else None,
             })
     return lines
 

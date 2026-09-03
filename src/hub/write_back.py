@@ -32,8 +32,15 @@ class WriteError(Exception):
     pass
 
 
-def write_bdr(connect_kwargs: dict, config: dict, lines: list) -> None:
-    """Importe un BDR directement sur le magasin via ses connect_kwargs (Tailscale)."""
+def write_bdr(connect_kwargs: dict, config: dict, lines: list, date_piece=None) -> None:
+    """Importe un BDR directement sur le magasin via ses connect_kwargs (Tailscale).
+
+    `date_piece` (optionnel, "YYYY-MM-DD") : sert quand la synchro fournisseur
+    passe par CE chemin plutôt que write_bdr_result — ne devrait normalement
+    arriver que dans une fenêtre de course très étroite (magasin détecté hors
+    ligne par apply_new_line, mais de nouveau joignable pile au moment où
+    submit_op vérifie à son tour) ; les autres appelants (BDR bureau/mobile)
+    ne le passent jamais, la date du jour reste leur comportement normal."""
     import import_bon_reception as bdr  # type: ignore
 
     cfg = dict(config)
@@ -57,6 +64,8 @@ def write_bdr(connect_kwargs: dict, config: dict, lines: list) -> None:
         json.dump(lines, fh, ensure_ascii=False)
 
     argv = ["import_bon_reception", "--config", cfg_path, "--lines", lines_path]
+    if date_piece:
+        argv += ["--date", str(date_piece)[:10]]
     buf = io.StringIO()
     with _BDR_LOCK:  # sys.argv est global au process : sérialise les imports BDR
         old_argv = sys.argv
@@ -125,7 +134,12 @@ def reception_summary(connect_kwargs: dict, code_type_piece: str, cutoff,
             "SELECT p.NOPIECE, p.DATEPIECE, i.REF_ART, a.DESIGNATION, i.QTE, i.PRIXHT "
             "FROM PIECE p JOIN ITEM i ON i.NOPIECE = p.NOPIECE "
             "LEFT JOIN ARTICLE a ON a.REF_ART = i.REF_ART "
-            "WHERE p.CODE_TYPE_PIECE = ? AND p.DATEPIECE >= ? AND (%s) "
+            "WHERE p.CODE_TYPE_PIECE = ? AND p.DATEPIECE >= ? "
+            # ANNULEE=1 = réception ACTIVE, ANNULEE=0 = annulée (convention
+            # inversée pour ce type de pièce, voir mode_cancel_piece) : sans
+            # cette exclusion, une réception annulée gonflait quand même la
+            # quantité "déjà reçue" affichée dans Vérification article.
+            "AND (p.ANNULEE IS NULL OR p.ANNULEE <> 0) AND (%s) "
             "ORDER BY p.DATEPIECE" % " OR ".join(clauses),
             [code_type_piece, cutoff] + params)
         rows = cur.fetchall()
@@ -137,14 +151,22 @@ def reception_summary(connect_kwargs: dict, code_type_piece: str, cutoff,
     return {"qte_total": round(sum(l["qte"] for l in lines), 4), "lines": lines}
 
 
-def write_bdr_result(connect_kwargs: dict, config: dict, lines: list) -> dict:
+def write_bdr_result(connect_kwargs: dict, config: dict, lines: list, date_piece=None) -> dict:
     """Comme write_bdr, mais appelle run_import DIRECTEMENT (pas de
     fichiers temporaires ni de sys.argv/bdr.main()) et renvoie le résultat
     structuré (NOPIECE/NOITEM créés, entre autres) — nécessaire pour la
     synchro fournisseur, qui doit retrouver la ligne créée si le fournisseur
-    modifie prix/qté après coup. Pas besoin du verrou de write_bdr : aucun
-    état partagé au niveau process (pas de sys.argv), donc pas de risque de
-    collision entre deux appels concurrents."""
+    modifie prix/qté après coup.
+
+    Prend le MÊME verrou que write_bdr (_BDR_LOCK), pas pour sys.argv cette
+    fois mais parce que Importer.next_base numérote NOPIECE/NOITEM en lisant
+    MAX(...) dans SA PROPRE transaction : deux écritures concurrentes sur le
+    MÊME magasin (fournisseur + import bureau/mobile, ou deux lots
+    fournisseur qui se chevauchent) peuvent lire le même MAX avant que l'une
+    ou l'autre ne valide, et obtenir le même NOPIECE — un seul verrou par
+    process pour toute allocation de numéro suffit à l'empêcher (volumes
+    réels : quelques centaines de lignes/jour, le coût de sérialisation est
+    négligeable)."""
     import import_bon_reception as bdr  # type: ignore
     if not lines:
         raise WriteError("BDR sans lignes.")
@@ -158,16 +180,19 @@ def write_bdr_result(connect_kwargs: dict, config: dict, lines: list) -> dict:
         "charset": connect_kwargs.get("charset", "WIN1256"),
     })
     try:
-        return bdr.run_import(cfg, lines)
+        with _BDR_LOCK:
+            return bdr.run_import(cfg, lines, date_piece=date_piece)
     except Exception as exc:  # noqa: BLE001
         raise WriteError("Import BDR échoué : %s" % exc) from exc
 
 
-def write_items_added(connect_kwargs: dict, config: dict, nopiece: str, lines: list) -> dict:
+def write_items_added(connect_kwargs: dict, config: dict, nopiece: str, lines: list,
+                      date_piece=None) -> dict:
     """Ajoute des lignes à une PIECE déjà existante (nopiece connu), sans en
     créer une seconde — synchro fournisseur : le fournisseur ajoute des
     articles à un bon de livraison déjà synchronisé, ces articles rejoignent
-    la réception déjà créée. Voir import_bon_reception.add_items."""
+    la réception déjà créée. Voir import_bon_reception.add_items. Même
+    verrou que write_bdr_result, même raison (numérotation NOITEM)."""
     import import_bon_reception as bdr  # type: ignore
     if not lines:
         raise WriteError("Aucune ligne à ajouter.")
@@ -181,9 +206,23 @@ def write_items_added(connect_kwargs: dict, config: dict, nopiece: str, lines: l
         "charset": connect_kwargs.get("charset", "WIN1256"),
     })
     try:
-        return bdr.add_items(cfg, nopiece, lines)
+        with _BDR_LOCK:
+            return bdr.add_items(cfg, nopiece, lines, date_piece=date_piece)
     except Exception as exc:  # noqa: BLE001
         raise WriteError("Ajout de ligne(s) échoué : %s" % exc) from exc
+
+
+def write_cancel_piece(connect_kwargs: dict, nopiece: str) -> dict:
+    """Annule une pièce (ANNULEE=0, reprise native du stock) — sert au
+    bouton « Annuler cette réception » du tableau de bord (historique
+    synchro fournisseur). Voir import_bon_reception.cancel_piece."""
+    import import_bon_reception as bdr  # type: ignore
+    if not nopiece:
+        raise WriteError("Annulation sans NOPIECE.")
+    try:
+        return bdr.cancel_piece(_bdr_cfg(connect_kwargs), nopiece)
+    except Exception as exc:  # noqa: BLE001
+        raise WriteError("Annulation échouée : %s" % exc) from exc
 
 
 def write_item_edit(connect_kwargs: dict, edits: list) -> None:

@@ -10,15 +10,16 @@ import sqlite3
 
 from hub.central_db import (
     enqueue_op, apply_barcode_ops_local, apply_price_changes_local,
-    apply_item_edit_local, apply_item_add_local, completed_op_result,
-    record_completed_op, log_immediate_op,
+    apply_item_edit_local, apply_item_add_local, apply_cancel_piece_local,
+    completed_op_result, record_completed_op, log_immediate_op,
 )
 from hub.write_back import (
     is_reachable, write_bdr, write_prices, write_barcode_ops, write_item_edit,
-    write_items_added, WriteError,
+    write_items_added, write_cancel_piece, WriteError,
 )
 
-OP_TYPES = ("bdr_import", "price_update", "barcode_ops", "item_edit", "item_add")
+OP_TYPES = ("bdr_import", "price_update", "barcode_ops", "item_edit", "item_add",
+           "cancel_piece")
 
 
 def submit_op(con: sqlite3.Connection, registry, store_id: int,
@@ -54,7 +55,8 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
             kw = store.connect_kwargs()
             extra: dict = {}
             if op_type == "bdr_import":
-                write_bdr(kw, payload.get("config") or {}, payload.get("lines") or [])
+                write_bdr(kw, payload.get("config") or {}, payload.get("lines") or [],
+                         date_piece=payload.get("date_piece"))
                 n = len(payload.get("lines") or [])
             elif op_type == "price_update":
                 changes = payload.get("changes") or []
@@ -74,13 +76,19 @@ def submit_op(con: sqlite3.Connection, registry, store_id: int,
                 write_item_edit(kw, edits)
                 apply_item_edit_local(con, store_id, edits)
                 n = len(edits)
-            else:  # item_add
+            elif op_type == "item_add":
                 nopiece = payload.get("nopiece")
                 lines = payload.get("lines") or []
-                imp_result = write_items_added(kw, payload.get("config") or {}, nopiece, lines)
+                imp_result = write_items_added(kw, payload.get("config") or {}, nopiece, lines,
+                                               date_piece=payload.get("date_piece"))
                 apply_item_add_local(con, store_id, imp_result)
                 n = len(lines)
                 extra = {"nopiece": imp_result["nopiece"], "items": imp_result["items"]}
+            else:  # cancel_piece
+                nopiece = payload.get("nopiece")
+                write_cancel_piece(kw, nopiece)
+                apply_cancel_piece_local(con, store_id, nopiece)
+                n = 1
             result = {"status": "applied", "count": n, **extra}
             if op_uid:
                 record_completed_op(con, op_uid, result)
