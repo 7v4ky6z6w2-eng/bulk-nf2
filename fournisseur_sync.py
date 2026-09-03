@@ -881,9 +881,26 @@ def main() -> None:
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
 
+    # L'exe est construit --windowed (pas de fenêtre console à côté du tray,
+    # cf. build_fournisseur_sync.bat) : sys.stdout/sys.stderr valent alors
+    # None (comportement PyInstaller sous Windows sans console), un
+    # StreamHandler planterait au premier message. Un fichier journal à côté
+    # de l'exe reste donc la SEULE trace disponible en usage normal (GUI ou
+    # --once/--backlog-days lancés depuis une tâche planifiée sans console) —
+    # utile aussi pour diagnostiquer un passage automatique après coup.
+    from logging.handlers import RotatingFileHandler
+    handlers = []
+    try:
+        fh = RotatingFileHandler(os.path.join(app_dir(), "fournisseur_sync.log"),
+                                 maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        handlers.append(fh)
+    except OSError:
+        pass
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler())
     logging.basicConfig(level=getattr(logging, args.log_level),
                         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S")
+                        datefmt="%Y-%m-%d %H:%M:%S", handlers=handlers or None)
 
     if args.once or args.backlog_days is not None:
         cfg = load_config()

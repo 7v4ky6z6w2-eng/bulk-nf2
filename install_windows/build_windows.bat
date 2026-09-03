@@ -65,7 +65,10 @@ if errorlevel 1 (
 )
 
 echo [2/3] Construction de PrimeNFHub.exe (application bureau)...
-%PYCMD% -m PyInstaller --onefile ^
+REM --windowed : application PySide6 pure (erreurs via QMessageBox, jamais de
+REM print console) -- sans ce flag une fenetre console noire s'ouvre a cote
+REM de la fenetre Qt a chaque lancement.
+%PYCMD% -m PyInstaller --onefile --windowed ^
   --name PrimeNFHub ^
   --add-data "src;src" ^
   --add-data "stores.json.example;." ^
@@ -83,7 +86,10 @@ if errorlevel 1 (
 )
 
 echo [3/3] Construction de PrimeNFFournisseurSync.exe (poste du fournisseur)...
-%PYCMD% -m PyInstaller --onefile ^
+REM --windowed : idem PrimeNFHub -- sinon une console noire reste ouverte
+REM tant que l'appli tourne en arriere-plan (tray). --once/--backlog-days
+REM ecrivent dans fournisseur_sync.log (voir main()) plutot que la console.
+%PYCMD% -m PyInstaller --onefile --windowed ^
   --name PrimeNFFournisseurSync ^
   --add-data "src;src" ^
   --hidden-import fdb ^

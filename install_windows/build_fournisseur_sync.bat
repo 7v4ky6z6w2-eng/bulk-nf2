@@ -42,7 +42,12 @@ if errorlevel 1 (
 )
 
 echo Construction de PrimeNFFournisseurSync.exe (poste du fournisseur)...
-%PYCMD% -m PyInstaller --onefile ^
+REM --windowed : pas de fenetre console a cote de la fenetre/tray Qt (sinon
+REM une console noire reste ouverte tant que l'appli tourne en arriere-plan,
+REM y compris quand install_fournisseur_sync_task.bat lance l'exe via
+REM "cmd /c start ...". Les sorties --once/--backlog-days vont alors dans
+REM fournisseur_sync.log (voir main()) plutot que dans une console.
+%PYCMD% -m PyInstaller --onefile --windowed ^
   --name PrimeNFFournisseurSync ^
   --add-data "src;src" ^
   --hidden-import fdb ^
