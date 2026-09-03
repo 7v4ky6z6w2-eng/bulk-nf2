@@ -604,6 +604,18 @@ def low_stock(con: sqlite3.Connection, threshold: int = 3, limit: int = 300) -> 
     return [dict(r) for r in rows]
 
 
+def stock_by_ref(con: sqlite3.Connection, store_id: int, ref_art: str) -> float | None:
+    """Stock ACTUEL (cumulé sur tous les dépôts, positif ou négatif) d'un
+    article dans UN magasin — miroir (stock_snapshot), pas de connexion
+    Firebird live nécessaire. None si cet article n'a aucune ligne de stock
+    connue pour ce magasin (pas encore synchronisé / n'existe pas), à
+    distinguer d'un stock de 0 (article connu, réellement vide)."""
+    row = con.execute(
+        "SELECT SUM(qte_stock) FROM stock_snapshot WHERE store_id=? AND ref_art=?",
+        (store_id, ref_art)).fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
 def negative_stock(con: sqlite3.Connection, limit: int = 300) -> list:
     """Stock NÉGATIF cumulé par magasin — toujours une ANOMALIE de données
     (retour non rapproché, inventaire mal saisi, mouvement de stock au

@@ -387,7 +387,7 @@ def run_reconcile(cfg: dict, ref: str | None, designation: str | None, days: int
 #  Interface graphique
 # --------------------------------------------------------------------------- #
 def run_gui() -> None:
-    from PySide6.QtCore import QTimer, QThread, Signal
+    from PySide6.QtCore import Qt, QTimer, QThread, Signal
     from PySide6.QtGui import QAction
     from PySide6.QtWidgets import (
         QApplication, QWidget, QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
@@ -539,10 +539,10 @@ def run_gui() -> None:
             verif_form.addRow("Période", self._verif_days)
             verif_form.addRow(verif_search_btn)
 
-            self._verif_table = QTableWidget(0, 6)
+            self._verif_table = QTableWidget(0, 7)
             self._verif_table.setHorizontalHeaderLabels([
                 "Magasin", "Qté livrée (père)", "Qté déjà reçue (magasin)",
-                "Réf. chez le père", "Correspondance côté magasin", "État"])
+                "Stock actuel", "Réf. chez le père", "Correspondance côté magasin", "État"])
             self._verif_table.setEditTriggers(QTableWidget.NoEditTriggers)
             self._verif_table.horizontalHeader().setSectionResizeMode(
                 QHeaderView.ResizeMode.Stretch)
@@ -801,16 +801,23 @@ def run_gui() -> None:
                 else:
                     etat = "en ligne"
                 reception = entry.get("reception_qte")
+                stock = entry.get("stock")
+                stock_txt = "%+.2f" % stock if stock is not None else "-"
                 values = [entry.get("store_name"), "%.2f" % entry.get("qte_pere", 0.0),
                          "%.2f" % reception if reception is not None else "-",
-                         ref_pere, corres, etat]
+                         stock_txt, ref_pere, corres, etat]
                 for col, val in enumerate(values):
-                    self._verif_table.setItem(row, col, QTableWidgetItem(str(val)))
+                    item = QTableWidgetItem(str(val))
+                    if col == 3 and stock is not None and stock < 0:
+                        item.setForeground(Qt.red)
+                    self._verif_table.setItem(row, col, item)
             self._verif_status.setText(
                 "%d magasin(s). Comparez « Qté livrée » et « Qté déjà reçue » sur la période : "
                 "si elles correspondent déjà, c'est probablement saisi à la main. Une ligne "
                 "« RÉF. DIFFÉRENTE » signale un article connu sous une autre référence côté "
-                "magasin — à vérifier avant d'activer la synchro automatique sur cet article."
+                "magasin — à vérifier avant d'activer la synchro automatique sur cet article. "
+                "« Stock actuel » vient du miroir (pas besoin que le magasin soit en ligne) — en "
+                "rouge si négatif."
                 % len(report))
 
         def _reconcile_failed(self, msg: str) -> None:

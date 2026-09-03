@@ -283,11 +283,16 @@ def reconcile_article(con: sqlite3.Connection, registry, ref: str | None,
         (rapprochement par nom) ou n'existe pas du tout côté magasin ;
       * reception_summary pour la quantité déjà reçue sur la même période,
         à comparer visuellement à la quantité livrée par le père.
+    Le stock ACTUEL (positif ou négatif) vient lui du miroir (stock_snapshot,
+    déjà tenu à jour par la synchro régulière de l'agent) — pas besoin que le
+    magasin soit joignable pour l'afficher, contrairement au rapprochement/
+    aux réceptions ci-dessus.
 
     Toujours UNE ligne par magasin mappé (même à 0 côté père) pour un tableau
     à nombre de lignes stable, plus une ligne « non mappé » s'il existe des
     codes clients non mappés dans father_lines."""
     from hub.write_back import is_reachable, bdr_reconcile, reception_summary
+    from hub.central_db import stock_by_ref
     import datetime
 
     mapping = fournisseur_mapping(con)
@@ -315,7 +320,7 @@ def reconcile_article(con: sqlite3.Connection, registry, ref: str | None,
         row = {"store_id": store_id,
               "store_name": store.name if store else "Magasin %s" % store_id,
               "qte_pere": round(by_store.get(store_id, {}).get("qte", 0.0), 4),
-              "online": False, "reception_qte": None, "matches": []}
+              "online": False, "reception_qte": None, "matches": [], "stock": None}
         if store:
             row["online"] = is_reachable(store.host, store.port)
         if row["online"] and store:
@@ -338,10 +343,25 @@ def reconcile_article(con: sqlite3.Connection, registry, ref: str | None,
                 row["reception_qte"] = summary["qte_total"]
             except Exception as exc:  # noqa: BLE001
                 row["reception_error"] = str(exc)
+
+        # Stock actuel (miroir, pas besoin d'être en ligne) : la référence à
+        # regarder est celle du MAGASIN, pas forcément celle du père —
+        # d'abord la correspondance trouvée ci-dessus (exact/matched, celle
+        # que ce magasin utilise réellement), sinon la référence recherchée
+        # telle quelle si elle a été fournie (cas le plus courant : recherche
+        # par référence exacte). Rien à afficher si on n'a ni l'un ni l'autre
+        # (recherche par désignation seule, magasin injoignable pour le
+        # rapprochement) — pas de référence sûre à interroger.
+        m0 = row["matches"][0] if row["matches"] else None
+        stock_ref = (m0.get("match_ref") if m0 and m0.get("status") in ("exact", "matched")
+                    else None) or ref
+        if store and stock_ref:
+            row["stock"] = stock_by_ref(con, store_id, stock_ref)
+
         report.append(row)
 
     if unmapped_qte:
         report.append({"store_id": None, "store_name": "(code client non mappé)",
                        "qte_pere": round(unmapped_qte, 4), "online": None,
-                       "reception_qte": None, "matches": []})
+                       "reception_qte": None, "matches": [], "stock": None})
     return report
