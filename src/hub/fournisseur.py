@@ -176,7 +176,16 @@ def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece
                                        dest_ref, known_nopiece, "", qte, prix)
         return result
 
-    store = registry.get(store_id) if registry else None
+    store = None
+    if registry:
+        try:
+            store = registry.get(store_id)
+        except Exception:  # noqa: BLE001
+            # Mapping pointant vers un id absent de stores.json (magasin
+            # renuméroté/supprimé depuis) : une erreur propre pour CETTE
+            # ligne, pas une exception non rattrapée qui ferait planter tout
+            # le lot (500 générique côté exe, aucune ligne du lot appliquée).
+            return {"status": "error", "error": "Magasin inconnu (id=%s)." % store_id}
     online = False
     if store:
         from hub.write_back import is_reachable
@@ -211,7 +220,17 @@ def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece
 
 
 def process_batch(con: sqlite3.Connection, registry, lines: list) -> list:
-    return [process_line(con, registry, line) for line in lines]
+    """Une exception NON PRÉVUE sur une ligne (bug, donnée inattendue...) ne
+    doit jamais faire échouer tout le lot avec un 500 générique — l'exe
+    envoie potentiellement des dizaines de lignes par requête, la plupart
+    n'ayant rien à voir avec celle qui pose problème."""
+    results = []
+    for line in lines:
+        try:
+            results.append(process_line(con, registry, line))
+        except Exception as exc:  # noqa: BLE001
+            results.append({"status": "error", "error": str(exc)})
+    return results
 
 
 def reconcile_article(con: sqlite3.Connection, registry, ref: str | None,
@@ -255,7 +274,12 @@ def reconcile_article(con: sqlite3.Connection, registry, ref: str | None,
     cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
     report = []
     for store_id in sorted({m["store_id"] for m in mapping.values()}):
-        store = registry.get(store_id) if registry else None
+        store = None
+        if registry:
+            try:
+                store = registry.get(store_id)
+            except Exception:  # noqa: BLE001
+                pass  # mapping pointant vers un id absent de stores.json -> ligne "hors ligne"
         row = {"store_id": store_id,
               "store_name": store.name if store else "Magasin %s" % store_id,
               "qte_pere": round(by_store.get(store_id, {}).get("qte", 0.0), 4),
