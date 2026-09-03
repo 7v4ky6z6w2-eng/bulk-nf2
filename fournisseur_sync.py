@@ -114,15 +114,27 @@ def list_tiers(con) -> list:
 
 
 def read_recent_bl(con, code_type_piece: str, lookback_days: int,
-                   filtrer_annulee: bool = False) -> list:
+                   filtrer_annulee: bool = False, code_tiers_filter: list | None = None) -> list:
     """Lit les bons de livraison récents et leurs lignes ; renvoie une liste
-    de lignes brutes prêtes à poster au hub (une par ligne d'article)."""
+    de lignes brutes prêtes à poster au hub (une par ligne d'article).
+
+    `code_tiers_filter` : si fourni (liste des codes clients actuellement
+    mappés à un magasin, récupérée du hub), restreint la lecture à CES
+    clients uniquement — le fournisseur peut avoir des dizaines d'autres
+    clients dans son Firebird sans rapport avec nous ; sans ce filtre, TOUTES
+    leurs pièces sont lues (et envoyées au hub, qui les ignore une par une
+    côté serveur) à chaque passage, pour rien. None = pas de filtre (lit
+    tout, comme avant) — utilisé en repli si le mapping n'a pas pu être
+    récupéré, pour ne jamais rater une ligne par excès de prudence."""
     cur = con.cursor()
     cutoff = datetime.datetime.now() - datetime.timedelta(days=lookback_days)
     sql = "SELECT NOPIECE, CODE_TIERS FROM PIECE WHERE CODE_TYPE_PIECE = ? AND DATEPIECE >= ?"
     params = [code_type_piece, cutoff]
     if filtrer_annulee:
         sql += " AND (ANNULEE IS NULL OR ANNULEE = 0)"
+    if code_tiers_filter:
+        sql += " AND CODE_TIERS IN (%s)" % ", ".join("?" * len(code_tiers_filter))
+        params.extend(code_tiers_filter)
     cur.execute(sql, params)
     pieces = cur.fetchall()
 
@@ -300,19 +312,36 @@ def _describe_result(line: dict, result: dict, store_names: dict) -> str:
 
 
 def run_cycle(cfg: dict, log_fn=log.info) -> dict:
+    client = HubClient(cfg["hub_url"], cfg["hub_api_key"])
+    # Restreint la lecture Firebird aux SEULS clients actuellement mappés à
+    # un magasin (voir "Correspondance clients -> magasins") : sans ça, TOUTE
+    # pièce de type code_type_piece_bl est lue et envoyée au hub à chaque
+    # passage, quel que soit le client -- y compris les dizaines d'autres
+    # clients du fournisseur sans aucun rapport avec nous, que le hub se
+    # contentait d'ignorer une par une (statut 'skipped') côté serveur. Repli
+    # sans filtre (comme avant) si le mapping n'a pas pu être récupéré OU
+    # n'a encore aucune entrée -- jamais rater une ligne par excès de
+    # prudence plutôt que filtrer sur une liste possiblement incomplète.
+    try:
+        mapped_codes = list(client.get_mapping().keys())
+    except Exception:  # noqa: BLE001
+        mapped_codes = None
+        log_fn("Correspondance clients -> magasins injoignable : lecture non filtrée cette fois.")
+
     con = fb_connect(cfg["firebird"])
     try:
         lines = read_recent_bl(con, cfg["code_type_piece_bl"], cfg["lookback_days"],
-                               cfg.get("filtrer_annulee", False))
+                               cfg.get("filtrer_annulee", False),
+                               code_tiers_filter=mapped_codes)
     finally:
         con.close()
-    log_fn("%d ligne(s) de BL trouvée(s) sur les %d derniers jours."
-          % (len(lines), cfg["lookback_days"]))
+    log_fn("%d ligne(s) de BL trouvée(s) sur les %d derniers jours%s."
+          % (len(lines), cfg["lookback_days"],
+             " (%d client(s) mappé(s))" % len(mapped_codes) if mapped_codes else ""))
     if not lines:
         return {"lines": 0, "applied": 0, "queued": 0, "pending": 0,
                "unchanged": 0, "skipped": 0, "errors": 0}
 
-    client = HubClient(cfg["hub_url"], cfg["hub_api_key"])
     try:
         store_names = {s["id"]: s["name"] for s in client.stores()}
     except Exception:  # noqa: BLE001
