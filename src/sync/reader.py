@@ -182,7 +182,8 @@ class FirebirdReader:
         for real, alias in [("CODE_TIERS", "code_tiers"), ("CODE_DEPOT", "code_depot"),
                             ("MONTANTHT", "montantht"), ("MONTANTTTC", "montantttc"),
                             ("MONTANTVERSE", "montantverse"),
-                            ("CODE_MODE_REGL", "code_mode_regl"), ("ANNULEE", "annulee")]:
+                            ("CODE_MODE_REGL", "code_mode_regl"), ("ANNULEE", "annulee"),
+                            ("REFDOC", "refdoc")]:
             if _candidate(cols, real):
                 sel.append("%s AS %s" % (real, alias))
         sql = "SELECT " + ", ".join(sel) + " FROM PIECE"

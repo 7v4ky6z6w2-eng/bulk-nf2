@@ -35,7 +35,7 @@ COLUMN_MAP = {
     "mode_regl": ["code_mode_regl", "designation"],
     "piece": ["nopiece", "datepiece", "code_type_piece", "code_tiers",
               "code_depot", "montantht", "montantttc", "montantverse",
-              "code_mode_regl", "annulee"],
+              "code_mode_regl", "annulee", "refdoc"],
     "item": ["nopiece", "noitem", "ref_art", "qte", "prixht", "remise",
              "marge", "annulee"],
     "stock_snapshot": ["ref_art", "code_depot", "qte_stock", "pump"],
@@ -144,6 +144,14 @@ def _migrate(con: sqlite3.Connection) -> None:
     fp_cols = [r[1] for r in con.execute("PRAGMA table_info(fournisseur_pending)").fetchall()]
     if fp_cols and "tva" not in fp_cols:
         con.execute("ALTER TABLE fournisseur_pending ADD COLUMN tva REAL")
+
+    # Colonne refdoc sur piece (bases créées avant son ajout) : sert à
+    # retrouver, via le miroir, une réception créée pour un BL fournisseur
+    # sans jamais être repassé par fournisseur_sync_state (créée hors ligne,
+    # appliquée par l'agent ensuite — voir hub.fournisseur pour le repli).
+    piece_cols = [r[1] for r in con.execute("PRAGMA table_info(piece)").fetchall()]
+    if piece_cols and "refdoc" not in piece_cols:
+        con.execute("ALTER TABLE piece ADD COLUMN refdoc TEXT")
 
 
 # --------------------------------------------------------------------------- #
@@ -1197,6 +1205,38 @@ def fournisseur_known_dest_nopiece(con: sqlite3.Connection, store_id: int,
         "WHERE store_id=? AND src_nopiece=? AND dest_nopiece <> '' "
         "LIMIT 1", (store_id, src_nopiece)).fetchone()
     return row["dest_nopiece"] if row else None
+
+
+def fournisseur_dest_nopiece_by_refdoc(con: sqlite3.Connection, store_id: int,
+                                       src_nopiece: str) -> str | None:
+    """Repli quand fournisseur_sync_state ne connaît PAS (encore) le NOPIECE
+    créé pour ce BL : arrive quand la réception a été créée HORS LIGNE (mise
+    en file) puis appliquée par l'agent — rien ne revient alors mettre à jour
+    fournisseur_sync_state, ce champ reste vide pour toujours sans ce repli
+    (édition ultérieure bloquée en 'pending_creation', et un article ajouté
+    plus tard au même BL créerait une SECONDE réception au lieu de rejoindre
+    celle-ci). apply_new_line stocke le NOPIECE du BL d'origine dans
+    PIECE.REFDOC à la création (voir son docstring) ; ce champ arrive dans le
+    miroir via la synchro régulière de l'agent (aucune action supplémentaire
+    nécessaire — se corrige tout seul dès le prochain passage de l'agent)."""
+    row = con.execute(
+        "SELECT nopiece FROM piece WHERE store_id=? AND refdoc=? "
+        "ORDER BY id DESC LIMIT 1", (store_id, src_nopiece)).fetchone()
+    return row["nopiece"] if row else None
+
+
+def fournisseur_dest_noitem_by_ref(con: sqlite3.Connection, store_id: int,
+                                   nopiece: str, ref_art: str) -> str | None:
+    """Le NOITEM d'une ligne déjà créée dans une réception connue via le
+    repli REFDOC ci-dessus (nécessaire pour item_edit, qui a besoin du
+    NOITEM précis à modifier, pas seulement du NOPIECE de la pièce)."""
+    row = con.execute(
+        "SELECT noitem FROM item WHERE store_id=? AND nopiece=? AND ref_art=? "
+        "LIMIT 1", (store_id, nopiece, ref_art)).fetchone()
+    # item.noitem est INTEGER dans le miroir (contrairement à
+    # fournisseur_sync_state.dest_noitem et au reste du code, qui traitent
+    # tous noitem comme une chaîne) — cast pour rester cohérent.
+    return str(row["noitem"]) if row else None
 
 
 def fournisseur_pending_add(con: sqlite3.Connection, store_id: int, src_nopiece: str,

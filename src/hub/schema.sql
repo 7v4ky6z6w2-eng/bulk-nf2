@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS piece (
     montantverse     REAL,
     code_mode_regl   TEXT,
     annulee          INTEGER,
+    refdoc           TEXT,
     synced_at        TEXT    NOT NULL,
     UNIQUE (store_id, nopiece)
 );

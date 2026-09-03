@@ -24,6 +24,12 @@ Règles (décidées avec l'utilisateur, ne pas les redériver) :
   * TVA toujours 0 : le fournisseur est la MÊME entreprise que ses magasins
     (transfert interne), pas un achat externe soumis à TVA. fournisseur_sync.py
     n'envoie donc jamais la TVA lue dans Firebird — toujours 0.
+  * Le NOPIECE du BL d'origine est stocké dans PIECE.REFDOC de la réception
+    créée (côté magasin) : sert de repli pour retrouver une réception créée
+    HORS LIGNE puis appliquée par l'agent sans jamais repasser par ici (voir
+    fournisseur_dest_nopiece_by_refdoc) — sinon fournisseur_sync_state ne
+    l'apprend jamais, bloquant toute édition ultérieure et risquant une
+    réception en double si le fournisseur ajoute un article au même BL.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ if _BDR_DIR not in sys.path:
 from hub.central_db import (
     fournisseur_mapping, fournisseur_sync_state_get, fournisseur_sync_state_set,
     fournisseur_pending_add, fournisseur_known_dest_nopiece,
+    fournisseur_dest_nopiece_by_refdoc, fournisseur_dest_noitem_by_ref,
 )
 from hub.ops import submit_op
 
@@ -100,20 +107,31 @@ def process_line(con: sqlite3.Connection, registry, line: dict) -> dict:
     if state:
         if state["last_qte"] == qte and state["last_prix"] == prix:
             return {"status": "unchanged", "store_id": store_id}
-        if not state["dest_nopiece"] or not state["dest_noitem"]:
-            # La création (nouvelle pièce OU ajout à une pièce existante) est
-            # encore en file (magasin hors ligne au moment du dernier passage) :
-            # pas de ligne à éditer pour l'instant — on ne peut pas encore
-            # répercuter ce changement. Cas rare, se corrigera au prochain
-            # passage une fois la création appliquée.
-            return {"status": "pending_creation", "store_id": store_id}
-        edits = [{"nopiece": state["dest_nopiece"], "noitem": state["dest_noitem"],
+        dest_nopiece = state["dest_nopiece"]
+        dest_noitem = state["dest_noitem"]
+        if not dest_nopiece or not dest_noitem:
+            # La création a pu passer par la file (magasin hors ligne au
+            # moment du dernier passage) puis être appliquée par l'agent SANS
+            # que fournisseur_sync_state en soit jamais informé (rien ne
+            # revient le dire) — on cherche la réception via REFDOC avant
+            # d'abandonner (voir docstring du module) : se corrige tout seul
+            # dès que l'agent a synchronisé le miroir, pas besoin d'attendre
+            # un changement supplémentaire de cette ligne.
+            dest_nopiece = dest_nopiece or fournisseur_dest_nopiece_by_refdoc(
+                con, store_id, src_nopiece)
+            if not dest_nopiece:
+                return {"status": "pending_creation", "store_id": store_id}
+            dest_noitem = dest_noitem or fournisseur_dest_noitem_by_ref(
+                con, store_id, dest_nopiece, state["dest_ref_art"])
+            if not dest_noitem:
+                return {"status": "pending_creation", "store_id": store_id}
+        edits = [{"nopiece": dest_nopiece, "noitem": dest_noitem,
                  "qte": qte, "prix": prix, "maj_prix_achat": True}]
         result = submit_op(con, registry, store_id, "item_edit", {"edits": edits})
         if result.get("status") in ("applied", "queued"):
             fournisseur_sync_state_set(con, store_id, src_nopiece, src_noitem,
-                                       state["dest_ref_art"], state["dest_nopiece"],
-                                       state["dest_noitem"], qte, prix)
+                                       state["dest_ref_art"], dest_nopiece,
+                                       dest_noitem, qte, prix)
         result["store_id"] = store_id
         return result
 
@@ -157,6 +175,14 @@ def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece
     bdr_line = _build_bdr_line(dest_ref, line)
 
     known_nopiece = fournisseur_known_dest_nopiece(con, store_id, src_nopiece)
+    if not known_nopiece:
+        # fournisseur_sync_state ne sait pas (encore) qu'une réception existe
+        # déjà pour ce BL : peut arriver si sa toute première ligne a été
+        # créée HORS LIGNE puis appliquée par l'agent sans jamais mettre à
+        # jour l'état (rien ne revient le dire). Sans ce repli, cette ligne
+        # créerait une SECONDE réception pour le même bon. Voir le docstring
+        # du module (REFDOC) et fournisseur_dest_nopiece_by_refdoc.
+        known_nopiece = fournisseur_dest_nopiece_by_refdoc(con, store_id, src_nopiece)
     if known_nopiece:
         import import_bon_reception as bdr  # type: ignore
         result = submit_op(con, registry, store_id, "item_add",
@@ -194,8 +220,12 @@ def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece
     if online:
         from hub.write_back import write_bdr_result, WriteError
         import import_bon_reception as bdr  # type: ignore
+        cfg = bdr.load_config(None)
+        # REFDOC = NOPIECE du BL d'origine chez le père : voir le docstring
+        # du module et fournisseur_dest_nopiece_by_refdoc pour la raison.
+        cfg["refdoc"] = src_nopiece
         try:
-            imp_result = write_bdr_result(store.connect_kwargs(), bdr.load_config(None), [bdr_line])
+            imp_result = write_bdr_result(store.connect_kwargs(), cfg, [bdr_line])
         except WriteError as exc:
             return {"status": "error", "error": str(exc)}
         item = imp_result["items"][0]
@@ -211,8 +241,10 @@ def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece
     # complète (comme le chemin en ligne) : un dict partiel ferait planter
     # Importer.__init__ (code_type_piece, default_famille... manquants).
     import import_bon_reception as bdr  # type: ignore
+    cfg = bdr.load_config(None)
+    cfg["refdoc"] = src_nopiece
     result = submit_op(con, registry, store_id, "bdr_import",
-                       {"config": bdr.load_config(None), "lines": [bdr_line]})
+                       {"config": cfg, "lines": [bdr_line]})
     if result.get("status") == "queued":
         fournisseur_sync_state_set(con, store_id, src_nopiece, src_noitem,
                                    dest_ref, "", "", qte, prix)
