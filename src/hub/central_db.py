@@ -1153,6 +1153,23 @@ def apply_price_changes_local(con: sqlite3.Connection, store_id: int,
 # --------------------------------------------------------------------------- #
 #  Synchro fournisseur (bon de livraison fournisseur -> bon de réception)
 # --------------------------------------------------------------------------- #
+def fournisseur_settings_get(con: sqlite3.Connection) -> dict:
+    """Réglages de la synchro fournisseur, éditables sur le tableau de bord
+    web. code_type_piece_reception vide = pas encore confirmé sur site,
+    l'appelant retombe alors sur le défaut générique (PC_AC_B)."""
+    row = con.execute(
+        "SELECT code_type_piece_reception FROM fournisseur_settings WHERE id=1").fetchone()
+    return {"code_type_piece_reception": (row["code_type_piece_reception"] if row else "") or ""}
+
+
+def fournisseur_settings_set(con: sqlite3.Connection, code_type_piece_reception: str) -> None:
+    con.execute(
+        "INSERT INTO fournisseur_settings (id, code_type_piece_reception) VALUES (1, ?) "
+        "ON CONFLICT(id) DO UPDATE SET code_type_piece_reception=excluded.code_type_piece_reception",
+        ((code_type_piece_reception or "").strip(),))
+    con.commit()
+
+
 def fournisseur_mapping(con: sqlite3.Connection) -> dict:
     """{code_tiers: {"store_id":, "raison_sociale":}} — la correspondance
     client-fournisseur -> magasin destinataire, éditable sur le tableau de

@@ -35,7 +35,7 @@
   </table>
 </div>
 
-<div class="card" style="max-width:520px">
+<div class="card mb-4" style="max-width:520px">
   <div class="card-header">Ajouter / modifier</div>
   <div class="card-body">
     <form method="post" action="{{ url_for('dashboard.fournisseur_mapping_set') }}">
@@ -55,6 +55,27 @@
           <option value="{{ s.id }}">{{ s.name }}</option>
           {% endfor %}
         </select>
+      </div>
+      <button type="submit" class="btn btn-sm btn-primary">Enregistrer</button>
+    </form>
+  </div>
+</div>
+
+<div class="card" style="max-width:520px">
+  <div class="card-header">Type de pièce des réceptions</div>
+  <div class="card-body">
+    <p class="text-muted small">
+      Code utilisé pour CRÉER les bons de réception côté magasin (celui du bon de livraison
+      du père, PC_VE_B, est déjà confirmé — celui-ci ne l'a pas encore été sur ce
+      déploiement). Laissé vide, l'outil retombe sur un défaut générique
+      (<code>PC_AC_B</code>) — à vérifier/corriger ici une fois confirmé sur site.
+    </p>
+    <form method="post" action="{{ url_for('dashboard.fournisseur_settings_set_route') }}"
+          class="d-flex gap-2 align-items-end">
+      <div class="flex-grow-1">
+        <label class="form-label small mb-0">Code type de pièce (ex. PC_AC_B)</label>
+        <input type="text" name="code_type_piece_reception" class="form-control form-control-sm"
+               value="{{ settings.code_type_piece_reception }}" placeholder="PC_AC_B (défaut)">
       </div>
       <button type="submit" class="btn btn-sm btn-primary">Enregistrer</button>
     </form>

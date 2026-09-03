@@ -29,6 +29,7 @@ from hub.central_db import (
     fournisseur_mapping, fournisseur_set_mapping, fournisseur_delete_mapping,
     fournisseur_pending_list, fournisseur_pending_get, fournisseur_pending_resolve,
     fournisseur_pending_ignore, fournisseur_sync_state_set,
+    fournisseur_settings_get, fournisseur_settings_set,
 )
 from hub.ops import submit_op
 
@@ -375,7 +376,8 @@ def fournisseur_mapping_view():
     con = _db()
     reg = _registry()
     mapping = fournisseur_mapping(con)
-    return render_template("fournisseur_mapping.html", mapping=mapping,
+    settings = fournisseur_settings_get(con)
+    return render_template("fournisseur_mapping.html", mapping=mapping, settings=settings,
                            stores=(reg.stores if reg else []), store_names=_store_names())
 
 
@@ -386,6 +388,13 @@ def fournisseur_mapping_set():
     raison = (request.form.get("raison_sociale") or "").strip() or None
     if code_tiers and store_id:
         fournisseur_set_mapping(_db(), code_tiers, int(store_id), raison)
+    return redirect(url_for("dashboard.fournisseur_mapping_view"))
+
+
+@bp.post("/fournisseur-mapping/settings")
+def fournisseur_settings_set_route():
+    code_type_piece_reception = (request.form.get("code_type_piece_reception") or "").strip()
+    fournisseur_settings_set(_db(), code_type_piece_reception)
     return redirect(url_for("dashboard.fournisseur_mapping_view"))
 
 

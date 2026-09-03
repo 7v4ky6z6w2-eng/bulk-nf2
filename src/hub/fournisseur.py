@@ -47,6 +47,7 @@ from hub.central_db import (
     fournisseur_mapping, fournisseur_sync_state_get, fournisseur_sync_state_set,
     fournisseur_pending_add, fournisseur_known_dest_nopiece,
     fournisseur_dest_nopiece_by_refdoc, fournisseur_dest_noitem_by_ref,
+    fournisseur_settings_get,
 )
 from hub.ops import submit_op
 
@@ -64,6 +65,17 @@ def _match_line(con: sqlite3.Connection, store_id: int, line: dict) -> dict:
                 "designation": line.get("designation")}
     return bdr.best_match_for_line(fake_line, by_number, exact_refs, prix,
                                    0.60, common_words)
+
+
+def _apply_reception_type(con: sqlite3.Connection, cfg: dict) -> dict:
+    """Applique le type de pièce des réceptions confirmé sur le tableau de
+    bord (code_type_piece_reception), s'il a été renseigné — sinon laisse
+    cfg tel quel (défaut générique d'import_bon_reception.py, PC_AC_B, pas
+    vérifié sur ce déploiement)."""
+    configured = fournisseur_settings_get(con).get("code_type_piece_reception")
+    if configured:
+        cfg["code_type_piece"] = configured
+    return cfg
 
 
 def _build_bdr_line(ref_art: str, line: dict) -> dict:
@@ -224,6 +236,7 @@ def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece
         # REFDOC = NOPIECE du BL d'origine chez le père : voir le docstring
         # du module et fournisseur_dest_nopiece_by_refdoc pour la raison.
         cfg["refdoc"] = src_nopiece
+        cfg = _apply_reception_type(con, cfg)
         try:
             imp_result = write_bdr_result(store.connect_kwargs(), cfg, [bdr_line])
         except WriteError as exc:
@@ -243,6 +256,7 @@ def apply_new_line(con: sqlite3.Connection, registry, store_id: int, src_nopiece
     import import_bon_reception as bdr  # type: ignore
     cfg = bdr.load_config(None)
     cfg["refdoc"] = src_nopiece
+    cfg = _apply_reception_type(con, cfg)
     result = submit_op(con, registry, store_id, "bdr_import",
                        {"config": cfg, "lines": [bdr_line]})
     if result.get("status") == "queued":
@@ -295,6 +309,8 @@ def reconcile_article(con: sqlite3.Connection, registry, ref: str | None,
     from hub.central_db import stock_by_ref
     import datetime
 
+    code_type_piece_reception = fournisseur_settings_get(con).get(
+        "code_type_piece_reception") or "PC_AC_B"
     mapping = fournisseur_mapping(con)
     by_store: dict = {}
     unmapped_qte = 0.0
@@ -339,7 +355,7 @@ def reconcile_article(con: sqlite3.Connection, registry, ref: str | None,
                 except Exception as exc:  # noqa: BLE001
                     row["match_error"] = str(exc)
             try:
-                summary = reception_summary(kw, "PC_AC_B", cutoff, ref, designation)
+                summary = reception_summary(kw, code_type_piece_reception, cutoff, ref, designation)
                 row["reception_qte"] = summary["qte_total"]
             except Exception as exc:  # noqa: BLE001
                 row["reception_error"] = str(exc)

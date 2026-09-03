@@ -288,3 +288,16 @@ CREATE TABLE IF NOT EXISTS fournisseur_pending (
     UNIQUE (store_id, src_nopiece, src_noitem)
 );
 CREATE INDEX IF NOT EXISTS idx_fourn_pending_status ON fournisseur_pending (status);
+
+-- Réglages de la synchro fournisseur, éditables sur le tableau de bord web
+-- (une seule ligne, id=1). code_type_piece_reception : type de pièce à
+-- utiliser pour CRÉER les réceptions côté magasin — vide par défaut (jamais
+-- vérifié sur site pour ce déploiement, contrairement à code_type_piece_bl
+-- =PC_VE_B côté père qui l'a été) ; import_bon_reception.py retombe sur son
+-- défaut générique (PC_AC_B) tant que ce champ est vide, donc le laisser
+-- vide ne change rien au comportement actuel avant que l'utilisateur ne le
+-- confirme explicitement ici.
+CREATE TABLE IF NOT EXISTS fournisseur_settings (
+    id                        INTEGER PRIMARY KEY CHECK (id = 1),
+    code_type_piece_reception TEXT DEFAULT ''
+);
