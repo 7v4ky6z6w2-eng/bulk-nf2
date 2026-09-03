@@ -372,13 +372,29 @@ def fournisseur_lines():
     return jsonify(results=results)
 
 
+@bp.get("/api/fournisseur/mapping")
+def fournisseur_mapping_get():
+    """Mapping CODE_TIERS -> magasin actuellement enregistré — lu par l'exe
+    fournisseur à l'ouverture de « Correspondance clients -> magasins » pour
+    PRÉ-SÉLECTIONNER ce qui est déjà mappé (sinon la boîte de dialogue
+    repartait de zéro à chaque ouverture : impossible de voir que quelque
+    chose était déjà enregistré côté hub, ça donnait l'impression que rien
+    n'était jamais sauvegardé). Le tableau de bord web reste la source de
+    vérité / l'endroit où corriger le mapping ensuite ; ceci n'est qu'une
+    lecture."""
+    err = _check_key()
+    if err:
+        return err
+    from hub.central_db import fournisseur_mapping
+    return jsonify(mapping=fournisseur_mapping(_db()))
+
+
 @bp.post("/api/fournisseur/mapping")
 def fournisseur_mapping_bootstrap():
     """Premier lancement de l'exe fournisseur : il propose une liste de
     CODE_TIERS -> magasin (choisis par l'utilisateur dans son Firebird) : on
     les enregistre. Éditable ensuite sur le tableau de bord web
-    (/fournisseur-mapping), qui reste la source de vérité — l'exe n'a jamais
-    besoin de relire ce mapping."""
+    (/fournisseur-mapping), qui reste la source de vérité."""
     err = _check_key()
     if err:
         return err

@@ -240,6 +240,13 @@ class HubClient:
         r.raise_for_status()
         return r.json()
 
+    def get_mapping(self) -> dict:
+        import requests
+        r = requests.get(self.base + "/api/fournisseur/mapping", headers=self._headers(),
+                         timeout=self.timeout)
+        r.raise_for_status()
+        return r.json().get("mapping", {})
+
     def post_lines(self, lines: list, batch_size: int = 50) -> list:
         import requests
         results = []
@@ -651,7 +658,13 @@ def run_gui() -> None:
                 QMessageBox.warning(self, "Aucun magasin",
                                    "Le hub n'a renvoyé aucun magasin.")
                 return
-            dlg = TiersDialog(tiers, stores, client, self)
+            try:
+                current_mapping = client.get_mapping()
+            except Exception:  # noqa: BLE001
+                # Pas bloquant : la boîte s'ouvre quand même, juste sans
+                # pré-sélection (comme avant ce correctif).
+                current_mapping = {}
+            dlg = TiersDialog(tiers, stores, client, current_mapping, self)
             dlg.exec()
 
         def _sync_now(self) -> None:
@@ -786,12 +799,14 @@ def run_gui() -> None:
                                    QSystemTrayIcon.Information, 3000)
 
     class TiersDialog(QDialog):
-        def __init__(self, tiers: list, stores: list, client: HubClient, parent=None):
+        def __init__(self, tiers: list, stores: list, client: HubClient,
+                    current_mapping: dict | None = None, parent=None):
             super().__init__(parent)
             self.setWindowTitle("Correspondance clients → magasins")
             self.resize(560, 480)
             self._tiers = tiers
             self._client = client
+            current_mapping = current_mapping or {}
 
             self._table = QTableWidget(len(tiers), 3)
             self._table.setHorizontalHeaderLabels(["Code client", "Nom", "Magasin"])
@@ -803,6 +818,14 @@ def run_gui() -> None:
                 combo.addItem("— Ignorer —", None)
                 for s in stores:
                     combo.addItem(s["name"], s["id"])
+                # Pré-sélectionne ce qui est DÉJÀ enregistré côté hub — sinon la
+                # boîte repart de « Ignorer » partout à chaque ouverture, ce qui
+                # donne l'impression (à tort) que rien n'a jamais été sauvegardé.
+                existing = current_mapping.get(t["code_tiers"])
+                if existing:
+                    idx = combo.findData(existing.get("store_id"))
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
                 self._table.setCellWidget(i, 2, combo)
 
             save_btn = QPushButton("Enregistrer sur le hub")
