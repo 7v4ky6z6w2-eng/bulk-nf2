@@ -46,8 +46,12 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [1/2] Construction de PrimeNFAgent.exe (agent de synchronisation)...
-%PYCMD% -m PyInstaller --onefile ^
+echo [1/3] Construction de PrimeNFAgent.exe (agent de synchronisation)...
+REM --windowed : sans ce flag, une fenetre console noire flashe a l'ecran a
+REM CHAQUE declenchement de la tache planifiee (toutes les 15 min) -- l'agent
+REM ecrit maintenant ses logs dans agent.log (a cote de l'exe) au lieu de la
+REM console, comme PrimeNFHub/PrimeNFFournisseurSync ci-dessous.
+%PYCMD% -m PyInstaller --onefile --windowed ^
   --name PrimeNFAgent ^
   --add-data "src;src" ^
   --add-data "stores.json.example;." ^

@@ -59,8 +59,10 @@ if errorlevel 1 (
 
 echo.
 echo *** Installation terminee pour le magasin %STORE_ID% ***
-echo L'agent se lancera automatiquement toutes les 15 minutes.
+echo L'agent se lancera automatiquement toutes les 15 minutes, entierement en
+echo arriere-plan (aucune fenetre ne s'affiche/ne flashe a l'ecran).
 echo Verifiez que stores.json est correct dans %DEST%\
+echo Logs : %DEST%\agent.log
 echo.
 pause
 endlocal

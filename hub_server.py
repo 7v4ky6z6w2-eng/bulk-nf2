@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import os
 import sys
 
@@ -22,7 +23,7 @@ _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from stores import StoreRegistry, StoresError          # noqa: E402
+from stores import StoreRegistry, StoresError, app_dir  # noqa: E402
 from hub.central_db import init_db, connect            # noqa: E402
 from hub.api import bp as api_bp                       # noqa: E402
 from hub.dashboard import bp as dash_bp                # noqa: E402
@@ -147,10 +148,25 @@ def main() -> None:
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
+    # Toujours écrire un fichier de log (logs/hub.log) : lancé via pythonw
+    # (tâche planifiée sans fenêtre) ou comme service NSSM, il n'y a AUCUNE
+    # console pour lire quoi que ce soit — sys.stderr est carrément None, pas
+    # juste invisible. Le StreamHandler ne casse rien dans ce cas (logging
+    # avale silencieusement l'erreur d'écriture), mais sans fichier on perd
+    # tout diagnostic. Toujours actif aussi en lancement console (start_hub.bat) :
+    # on y voit ET la console ET le fichier.
+    _log_dir = os.path.join(app_dir(), "logs")
+    os.makedirs(_log_dir, exist_ok=True)
+    _handlers = [logging.handlers.RotatingFileHandler(
+        os.path.join(_log_dir, "hub.log"), maxBytes=5_000_000, backupCount=3,
+        encoding="utf-8")]
+    if sys.stderr is not None:
+        _handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=_handlers,
     )
 
     try:

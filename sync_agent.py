@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import os
 import sys
 import time
@@ -26,7 +27,7 @@ _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from stores import StoreRegistry, StoresError            # noqa: E402
+from stores import StoreRegistry, StoresError, app_dir    # noqa: E402
 from sync.state import StateManager                      # noqa: E402
 from sync.pusher import HubClient, HubError              # noqa: E402
 from sync.reader import FirebirdReader                   # noqa: E402
@@ -165,29 +166,28 @@ def _watermark_col(table: str) -> str | None:
 # ─── entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # PrimeNFAgent.exe est un outil de FOND (sans fenêtre), normalement lancé
-    # automatiquement par la tâche planifiée créée par install_agent.bat /
-    # setup_task.ps1. Si quelqu'un le double-clique par erreur dans
-    # l'Explorateur Windows, aucun argument n'est fourni : sans ce message,
-    # argparse afficherait une erreur et la fenêtre se refermerait aussitôt
-    # (impossible à lire). On l'explique et on attend une touche avant de
-    # fermer, uniquement dans ce cas précis (double-clic = zéro argument).
+    # PrimeNFAgent.exe est construit --windowed (pas de console DU TOUT, plus
+    # de fenêtre noire qui flashe toutes les 15 min à chaque déclenchement de
+    # la tâche planifiée) : print()/input() n'ont donc PLUS aucun endroit où
+    # s'afficher si quelqu'un double-clique l'exe par erreur dans
+    # l'Explorateur (sys.stdout/stdin sont None dans ce cas). On utilise une
+    # boîte de message Windows native à la place, qui marche sans console.
     if len(sys.argv) == 1:
-        print("=" * 70)
-        print("PrimeNF Agent — outil de synchronisation (sans fenêtre)")
-        print("=" * 70)
-        print()
-        print("Ce programme ne doit PAS etre double-clique directement : il a")
-        print("besoin de savoir quel magasin synchroniser (--store-id).")
-        print()
-        print("Normalement, install_agent.bat (ou setup_task.ps1) a deja cree")
-        print("une tache planifiee Windows qui le lance automatiquement toutes")
-        print("les 15 minutes — vous n'avez rien a faire vous-meme.")
-        print()
-        print("Pour tester manuellement :")
-        print("    PrimeNFAgent.exe --store-id 2 --once")
-        print()
-        input("Appuyez sur Entree pour fermer...")
+        msg = (
+            "Ce programme ne doit pas etre double-clique directement : il a "
+            "besoin de savoir quel magasin synchroniser (--store-id).\n\n"
+            "Normalement, install_agent.bat (ou setup_task.ps1) a deja cree "
+            "une tache planifiee Windows qui le lance automatiquement toutes "
+            "les 15 minutes -- vous n'avez rien a faire vous-meme.\n\n"
+            "Pour tester manuellement, ouvrez une invite de commandes ici et "
+            "tapez :\n    PrimeNFAgent.exe --store-id 2 --once"
+        )
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, msg, "PrimeNF Agent", 0x40)  # MB_ICONINFORMATION
+        except Exception:  # noqa: BLE001 — pas Windows (dev/tests) : imprimer si une console existe
+            if sys.stdout is not None:
+                print(msg)
         sys.exit(1)
 
     parser = argparse.ArgumentParser(description="Agent de synchronisation PrimeNF")
@@ -200,10 +200,20 @@ def main() -> None:
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
+    # Toujours écrire agent.log (à côté de l'exe) : construit --windowed (voir
+    # plus haut), il n'y a plus AUCUNE console pour lire les logs — sans
+    # fichier, toute erreur de synchro passerait complètement inaperçue.
+    _log_dir = app_dir()
+    _handlers = [logging.handlers.RotatingFileHandler(
+        os.path.join(_log_dir, "agent.log"), maxBytes=5_000_000, backupCount=3,
+        encoding="utf-8")]
+    if sys.stderr is not None:
+        _handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=_handlers,
     )
 
     # Charger la configuration
