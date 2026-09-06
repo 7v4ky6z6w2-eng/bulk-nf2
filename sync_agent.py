@@ -20,6 +20,7 @@ import logging
 import logging.handlers
 import os
 import sys
+import threading
 import time
 
 # ─── path setup ────────────────────────────────────────────────────────────────
@@ -34,6 +35,43 @@ from sync.reader import FirebirdReader                   # noqa: E402
 from sync.apply_ops import apply_op, ApplyError          # noqa: E402
 
 log = logging.getLogger("agent")
+
+# Vécu en pratique : une écriture Firebird bloquée (verrou jamais libéré, ex.
+# Netfact2/PRIME ouvert avec une transaction en cours sur la même pièce) bloque
+# apply_op() INDÉFINIMENT -- sans limite, ce cycle ne finit jamais, le
+# Planificateur de tâches finit par tuer le processus (ExecutionTimeLimit), et
+# le MÊME op, jamais acquitté, est retenté à l'identique à chaque cycle suivant
+# pour toujours (jusqu'à intervention manuelle en base, déjà vécu). Ce délai
+# transforme un blocage infini en un échec normal, acquitté au hub (visible
+# dans /historique, notifié comme tout autre échec) au lieu de rester coincé.
+APPLY_OP_TIMEOUT = 300  # secondes
+
+
+def _apply_op_with_timeout(op: dict, local_kw: dict, timeout: int = APPLY_OP_TIMEOUT) -> None:
+    """Comme apply_op(op, local_kw), mais abandonne après `timeout` secondes au
+    lieu de bloquer indéfiniment. Le thread bloqué (s'il y en a un) est laissé
+    en daemon : il ne sera jamais rejoint, mais ne retient pas non plus le
+    processus en vie -- tué net (et sa connexion Firebird avec) dès que ce
+    cycle se termine, au lieu d'attendre la limite de 10 min du Planificateur."""
+    result: dict = {}
+
+    def _run() -> None:
+        try:
+            apply_op(op, local_kw)
+            result["ok"] = True
+        except Exception as exc:  # noqa: BLE001 — relayé tel quel au thread appelant
+            result["ok"] = False
+            result["exc"] = exc
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(
+            "Écriture bloquée depuis plus de %ds (verrou Firebird ? "
+            "Netfact2/PRIME ouvert sur la même pièce ?)" % timeout)
+    if not result.get("ok"):
+        raise result["exc"]
 
 
 # ─── cycle ─────────────────────────────────────────────────────────────────────
@@ -74,13 +112,16 @@ def run_cycle(store_id: int, registry: StoreRegistry, state: StateManager) -> No
 
         log.info("Application op #%d (%s)…", op_id, op_type)
         try:
-            apply_op(op, local_kw)
+            _apply_op_with_timeout(op, local_kw)
             state.mark_op_applied(op_id)  # avant l'acquittement : source de vérité locale
             hub_client.report_op(op_id, ok=True)
             log.info("Op #%d appliquée avec succès.", op_id)
-        except ApplyError as exc:
+        except (ApplyError, TimeoutError) as exc:
             log.error("Op #%d échouée : %s", op_id, exc)
-            hub_client.report_op(op_id, ok=False, error_msg=str(exc))
+            try:
+                hub_client.report_op(op_id, ok=False, error_msg=str(exc))
+            except HubError as hub_exc:
+                log.warning("Impossible d'acquitter l'échec de op #%d : %s", op_id, hub_exc)
         except HubError as exc:
             log.warning("Impossible d'acquitter op #%d : %s", op_id, exc)
 
@@ -231,7 +272,14 @@ def main() -> None:
     state = StateManager(state_path)
 
     if args.once:
-        run_cycle(args.store_id, registry, state)
+        try:
+            run_cycle(args.store_id, registry, state)
+        except Exception as exc:  # noqa: BLE001
+            # Construit --windowed (voir plus haut) : sans ce filet, une erreur
+            # inattendue ici crasherait sans laisser AUCUNE trace nulle part
+            # (pas de console pour afficher le traceback) -- le Planificateur
+            # verrait juste "tâche terminée", sans savoir qu'elle a échoué.
+            log.error("Erreur inattendue dans run_cycle : %s", exc, exc_info=True)
         return
 
     while True:
