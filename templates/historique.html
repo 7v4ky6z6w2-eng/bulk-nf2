@@ -2,12 +2,13 @@
 {% block title %}Historique — PrimeNF Hub{% endblock %}
 {% block content %}
 <h4 class="mb-4">Historique des opérations (100 dernières)</h4>
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
 <div class="table-responsive">
   <table class="table table-sm table-hover align-middle">
     <thead class="table-dark">
       <tr>
         <th>#</th><th>Magasin</th><th>Type</th><th>Détail</th>
-        <th>Créée</th><th>Appliquée</th><th>Statut</th><th>Erreur</th>
+        <th>Créée</th><th>Appliquée</th><th>Statut</th><th>Erreur</th><th></th>
       </tr>
     </thead>
     <tbody>
@@ -30,9 +31,23 @@
           {% else %}<span class="badge bg-warning text-dark">en file (magasin hors ligne)</span>{% endif %}
         </td>
         <td class="small text-danger">{{ r.error_msg or '' }}</td>
+        <td>
+          {% if r.status == 'pending' %}
+          <form method="post" action="{{ url_for('dashboard.historique_cancel') }}"
+                onsubmit="return confirm('Annuler cette opération en file (op #{{ r.id }}) ? Elle ne sera plus jamais retentée par le magasin.');">
+            <input type="hidden" name="op_id" value="{{ r.id }}">
+            <button type="submit" class="btn btn-sm btn-outline-danger">Annuler</button>
+          </form>
+          {% elif r.status == 'failed' %}
+          <form method="post" action="{{ url_for('dashboard.historique_retry') }}">
+            <input type="hidden" name="op_id" value="{{ r.id }}">
+            <button type="submit" class="btn btn-sm btn-outline-primary">Réessayer</button>
+          </form>
+          {% endif %}
+        </td>
       </tr>
       {% else %}
-      <tr><td colspan="8" class="text-muted text-center">Aucune opération enregistrée</td></tr>
+      <tr><td colspan="9" class="text-muted text-center">Aucune opération enregistrée</td></tr>
       {% endfor %}
     </tbody>
   </table>

@@ -33,6 +33,7 @@ from hub.central_db import (
     fournisseur_store_settings_get, fournisseur_store_settings_set,
     fournisseur_receptions_history, fournisseur_reception_lines,
     fournisseur_sync_state_clear_by_dest, fournisseur_pending_creation_clear,
+    pending_op_cancel, pending_op_retry,
 )
 from hub.ops import submit_op
 
@@ -541,6 +542,32 @@ def historique():
     rows = ops_history(_db())
     names = _store_names()
     return render_template("historique.html", rows=rows, store_names=names)
+
+
+@bp.post("/historique/annuler")
+def historique_cancel():
+    try:
+        op_id = int(request.form.get("op_id") or 0)
+    except ValueError:
+        op_id = 0
+    error = None
+    if not op_id or not pending_op_cancel(_db(), op_id):
+        error = "Opération introuvable ou déjà traitée (ni en file)."
+    rows = ops_history(_db())
+    return render_template("historique.html", rows=rows, store_names=_store_names(), error=error)
+
+
+@bp.post("/historique/reessayer")
+def historique_retry():
+    try:
+        op_id = int(request.form.get("op_id") or 0)
+    except ValueError:
+        op_id = 0
+    error = None
+    if not op_id or not pending_op_retry(_db(), op_id):
+        error = "Opération introuvable ou pas en échec."
+    rows = ops_history(_db())
+    return render_template("historique.html", rows=rows, store_names=_store_names(), error=error)
 
 
 # API JSON (pour la page bureau qui rafraîchit sans rechargement)

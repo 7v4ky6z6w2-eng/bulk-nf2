@@ -338,6 +338,43 @@ def ops_history(con: sqlite3.Connection, limit: int = 100) -> list:
     return out
 
 
+def pending_op_cancel(con: sqlite3.Connection, op_id: int) -> bool:
+    """Annule une op encore EN FILE ('pending') pour un magasin resté hors
+    ligne ou dont l'agent est bloqué dessus : passe son statut à 'failed'
+    avec un message explicite, pour qu'elle ne soit plus jamais reproposée
+    (sans ça, un op sur lequel l'agent boucle indéfiniment — ex. écriture
+    Firebird bloquée par un verrou jamais relâché, vécu en pratique — reste
+    EN FILE pour toujours). notified=0 pour qu'elle ressorte dans le digest
+    de notifications comme n'importe quel autre échec. Ne touche PAS une op
+    déjà 'applied' ou déjà 'failed' — renvoie False dans ce cas (rien à
+    annuler)."""
+    row = con.execute("SELECT status FROM pending_ops WHERE id=?", (op_id,)).fetchone()
+    if not row or row["status"] != "pending":
+        return False
+    con.execute(
+        "UPDATE pending_ops SET status='failed', error_msg=?, notified=0, applied_at=? "
+        "WHERE id=?",
+        ("Annulée manuellement depuis le tableau de bord.", now_iso(), op_id))
+    con.commit()
+    return True
+
+
+def pending_op_retry(con: sqlite3.Connection, op_id: int) -> bool:
+    """Remet une op 'failed' en file ('pending') pour qu'elle soit retentée
+    au prochain passage de l'agent concerné -- utile après avoir corrigé la
+    cause du blocage (ex. fermé le logiciel qui retenait un verrou) sans
+    avoir à recréer l'opération depuis zéro. Ne touche PAS une op qui n'est
+    pas 'failed' (déjà en file ou déjà appliquée) — renvoie False dans ce cas."""
+    row = con.execute("SELECT status FROM pending_ops WHERE id=?", (op_id,)).fetchone()
+    if not row or row["status"] != "failed":
+        return False
+    con.execute(
+        "UPDATE pending_ops SET status='pending', error_msg=NULL, applied_at=NULL "
+        "WHERE id=?", (op_id,))
+    con.commit()
+    return True
+
+
 def completed_op_result(con: sqlite3.Connection, op_uid: str) -> dict | None:
     """Résultat enregistré d'une op déjà appliquée directement (par op_uid)."""
     row = con.execute("SELECT result FROM completed_ops WHERE op_uid=?",
