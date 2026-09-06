@@ -1551,6 +1551,7 @@ def fournisseur_receptions_history(con: sqlite3.Connection, limit: int = 200) ->
             (d["store_id"], d["dest_nopiece"])).fetchone()
         d["datepiece"] = piece["datepiece"] if piece else None
         d["code_tiers"] = piece["code_tiers"] if piece else None
+        d["error_msg"] = None
         cancelled = bool(piece and piece["annulee"] == 0)
         d["status"] = "cancelled" if cancelled else "created"
         out.append(d)
@@ -1568,8 +1569,14 @@ def fournisseur_receptions_history(con: sqlite3.Connection, limit: int = 200) ->
         d["dest_nopiece"] = None
         d["datepiece"] = None
         d["code_tiers"] = None
-        op_status = pending_op_status(con, d["op_id"]) if d["op_id"] else None
-        d["status"] = "failed" if op_status == "failed" else "queued"
+        d["error_msg"] = None
+        op_row = con.execute("SELECT status, error_msg FROM pending_ops WHERE id=?",
+                             (d["op_id"],)).fetchone() if d["op_id"] else None
+        if op_row and op_row["status"] == "failed":
+            d["status"] = "failed"
+            d["error_msg"] = op_row["error_msg"]
+        else:
+            d["status"] = "queued"
         out.append(d)
 
     out.sort(key=lambda d: d["updated_at"] or "", reverse=True)
@@ -1585,6 +1592,22 @@ def fournisseur_reception_lines(con: sqlite3.Connection, store_id: int,
         "       last_qte, last_prix, updated_at FROM fournisseur_sync_state "
         "WHERE store_id=? AND dest_nopiece=? ORDER BY CAST(src_noitem AS INTEGER)",
         (store_id, dest_nopiece)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fournisseur_pending_lines(con: sqlite3.Connection, store_id: int,
+                              src_nopiece: str) -> list:
+    """Comme fournisseur_reception_lines, mais pour un BL encore EN FILE ou en
+    ÉCHEC (dest_nopiece pas encore connu) -- les lignes existent déjà dans
+    fournisseur_sync_state (dest_ref_art/qté/prix y sont enregistrés dès la
+    mise en file, avant même que la pièce ne soit créée côté magasin), on les
+    retrouve juste par src_nopiece au lieu de dest_nopiece."""
+    rows = con.execute(
+        "SELECT src_nopiece, src_noitem, dest_ref_art, dest_noitem, "
+        "       last_qte, last_prix, updated_at FROM fournisseur_sync_state "
+        "WHERE store_id=? AND src_nopiece=? AND dest_nopiece='' "
+        "ORDER BY CAST(src_noitem AS INTEGER)",
+        (store_id, src_nopiece)).fetchall()
     return [dict(r) for r in rows]
 
 

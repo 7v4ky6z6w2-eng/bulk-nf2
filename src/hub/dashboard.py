@@ -32,6 +32,7 @@ from hub.central_db import (
     fournisseur_settings_get, fournisseur_settings_set,
     fournisseur_store_settings_get, fournisseur_store_settings_set,
     fournisseur_receptions_history, fournisseur_reception_lines,
+    fournisseur_pending_lines,
     fournisseur_sync_state_clear_by_dest, fournisseur_pending_creation_clear,
     pending_op_cancel, pending_op_retry,
 )
@@ -486,8 +487,28 @@ def fournisseur_history_detail():
     except ValueError:
         store_id = 0
     dest_nopiece = request.args.get("dest_nopiece") or ""
-    lines = fournisseur_reception_lines(con, store_id, dest_nopiece) if store_id and dest_nopiece else []
+    src_nopiece = request.args.get("src_nopiece") or ""
+    if store_id and dest_nopiece:
+        lines = fournisseur_reception_lines(con, store_id, dest_nopiece)
+    elif store_id and src_nopiece:
+        lines = fournisseur_pending_lines(con, store_id, src_nopiece)
+    else:
+        lines = []
     return jsonify(lines)
+
+
+@bp.post("/fournisseur-historique/reessayer")
+def fournisseur_history_retry():
+    try:
+        op_id = int(request.form.get("op_id") or 0)
+    except ValueError:
+        op_id = 0
+    error = None
+    if not op_id or not pending_op_retry(_db(), op_id):
+        error = "Opération introuvable ou pas en échec."
+    history = fournisseur_receptions_history(_db())
+    return render_template("fournisseur_history.html", history=history,
+                           store_names=_store_names(), error=error)
 
 
 @bp.post("/fournisseur-historique/annuler")

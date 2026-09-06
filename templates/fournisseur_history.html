@@ -5,11 +5,12 @@
 <p class="text-muted small">
   Une ligne par bon de réception créé par la synchro (regroupe les articles du même bon).
   « En file » = magasin hors ligne au moment de la création, pas encore appliqué par
-  l'agent. « Annulée » utilise l'annulation native du logiciel : le stock est repris
-  automatiquement, comme une annulation faite sur place. Après annulation, si le bon de
-  livraison est toujours dans la fenêtre de rattrapage côté fournisseur, il sera de
-  nouveau proposé au prochain passage — normal si la marchandise reste due, à surveiller
-  sinon.
+  l'agent. « Échec » = l'agent n'a pas pu appliquer la création (voir la colonne Erreur) —
+  utilisez Réessayer après avoir corrigé la cause. « Annulée » utilise l'annulation native
+  du logiciel : le stock est repris automatiquement, comme une annulation faite sur place.
+  Après annulation, si le bon de livraison est toujours dans la fenêtre de rattrapage côté
+  fournisseur, il sera de nouveau proposé au prochain passage — normal si la marchandise
+  reste due, à surveiller sinon.
 </p>
 {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
 {% if not history %}
@@ -28,12 +29,14 @@
         <th>Qté</th>
         <th>Montant HT</th>
         <th>Statut</th>
+        <th>Erreur</th>
         <th>Maj</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {% for h in history %}
+      {% set row_key = h.dest_nopiece or h.src_nopieces %}
       <tr>
         <td>{{ store_names.get(h.store_id, h.store_id) }}</td>
         <td class="font-monospace">{{ h.dest_nopiece or "—" }}</td>
@@ -53,14 +56,13 @@
             <span class="badge text-bg-warning text-dark">En file</span>
           {% endif %}
         </td>
+        <td class="small text-danger">{{ h.error_msg or "" }}</td>
         <td class="text-muted small">{{ (h.updated_at or "")[:16] }}</td>
         <td class="d-flex gap-1">
-          {% if h.dest_nopiece %}
           <button type="button" class="btn btn-sm btn-outline-secondary"
-                  onclick="fournHistDetail({{ h.store_id }}, '{{ h.dest_nopiece }}', this)">
+                  onclick="fournHistDetail({{ h.store_id }}, '{{ row_key }}', {{ 'true' if h.dest_nopiece else 'false' }}, this)">
             Détail
           </button>
-          {% endif %}
           {% if h.status == "created" %}
           <form method="post" action="{{ url_for('dashboard.fournisseur_history_cancel') }}"
                 onsubmit="return confirm('Annuler la réception {{ h.dest_nopiece }} ({{ store_names.get(h.store_id, h.store_id) }}) ? Le stock sera repris automatiquement.');">
@@ -68,11 +70,16 @@
             <input type="hidden" name="dest_nopiece" value="{{ h.dest_nopiece }}">
             <button type="submit" class="btn btn-sm btn-outline-danger">Annuler</button>
           </form>
+          {% elif h.status == "failed" %}
+          <form method="post" action="{{ url_for('dashboard.fournisseur_history_retry') }}">
+            <input type="hidden" name="op_id" value="{{ h.op_id }}">
+            <button type="submit" class="btn btn-sm btn-outline-primary">Réessayer</button>
+          </form>
           {% endif %}
         </td>
       </tr>
-      <tr id="detail-{{ h.store_id }}-{{ h.dest_nopiece }}" class="d-none">
-        <td colspan="10" class="bg-light"></td>
+      <tr id="detail-{{ h.store_id }}-{{ row_key }}" class="d-none">
+        <td colspan="11" class="bg-light"></td>
       </tr>
       {% endfor %}
     </tbody>
@@ -80,15 +87,16 @@
 </div>
 
 <script>
-function fournHistDetail(storeId, destNopiece, btn) {
-  var row = document.getElementById("detail-" + storeId + "-" + destNopiece);
+function fournHistDetail(storeId, key, isDest, btn) {
+  var row = document.getElementById("detail-" + storeId + "-" + key);
   if (!row) return;
   if (!row.classList.contains("d-none")) { row.classList.add("d-none"); return; }
   var cell = row.querySelector("td");
   cell.textContent = "Chargement…";
   row.classList.remove("d-none");
+  var param = isDest ? "&dest_nopiece=" : "&src_nopiece=";
   fetch("{{ url_for('dashboard.fournisseur_history_detail') }}?store_id=" + storeId +
-        "&dest_nopiece=" + encodeURIComponent(destNopiece))
+        param + encodeURIComponent(key))
     .then(function(r) { return r.json(); })
     .then(function(lines) {
       if (!lines.length) { cell.textContent = "Aucun détail."; return; }
@@ -97,7 +105,7 @@ function fournHistDetail(storeId, destNopiece, btn) {
         '</tr></thead><tbody>';
       lines.forEach(function(l) {
         html += "<tr><td class='font-monospace'>" + l.dest_ref_art + "</td>" +
-          "<td>" + l.dest_noitem + "</td>" +
+          "<td>" + (l.dest_noitem || "—") + "</td>" +
           "<td>" + l.src_nopiece + " / " + l.src_noitem + "</td>" +
           "<td>" + l.last_qte + "</td>" +
           "<td>" + l.last_prix + "</td>" +
