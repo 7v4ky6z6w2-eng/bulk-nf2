@@ -2,6 +2,24 @@
 {% block title %}Vue d'ensemble — PrimeNF Hub{% endblock %}
 {% block content %}
 <h4 class="mb-4">Vue d'ensemble des magasins</h4>
+<div class="row g-3 mb-1">
+  <div class="col-md-4">
+    <div class="card h-100">
+      <div class="card-body">
+        <h5 class="card-title">Fournisseur (père)</h5>
+        <p class="mb-1 text-muted small">Dernier contact</p>
+        <p class="fs-6 mb-0">{{ fourn_last_seen_ago }}</p>
+      </div>
+      <div class="card-footer text-end">
+        {% if fourn_online %}
+          <span class="badge bg-success store-badge">En ligne récemment</span>
+        {% else %}
+          <span class="badge bg-danger store-badge">Injoignable</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
 <div class="row g-3">
   {% for s in stores %}
   <div class="col-md-4">

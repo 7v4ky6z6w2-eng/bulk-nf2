@@ -317,9 +317,19 @@ CREATE INDEX IF NOT EXISTS idx_fourn_pending_status ON fournisseur_pending (stat
 -- défaut générique (PC_AC_B) tant que ce champ est vide, donc le laisser
 -- vide ne change rien au comportement actuel avant que l'utilisateur ne le
 -- confirme explicitement ici.
+-- last_seen : horodatage du dernier appel reçu de l'outil qui tourne CHEZ LE
+-- FOURNISSEUR (voir fournisseur_mark_seen, appelé à CHAQUE passage via
+-- /api/fournisseur/mapping, avec ou sans nouvelle ligne à traiter) — permet
+-- de savoir s'il est encore en vie sans avoir à se connecter sur son poste.
+-- last_alert_sent : horodatage de la dernière alerte "injoignable" envoyée,
+-- pour n'en envoyer qu'UNE seule par coupure au lieu de spammer à chaque
+-- vérification tant qu'il reste hors ligne (remis à NULL dès qu'il redonne
+-- signe de vie).
 CREATE TABLE IF NOT EXISTS fournisseur_settings (
     id                        INTEGER PRIMARY KEY CHECK (id = 1),
-    code_type_piece_reception TEXT DEFAULT ''
+    code_type_piece_reception TEXT DEFAULT '',
+    last_seen                 TEXT,
+    last_alert_sent           TEXT
 );
 
 -- Le fournisseur (le père) EN TANT QUE TIERS dans chacun des 3 magasins :

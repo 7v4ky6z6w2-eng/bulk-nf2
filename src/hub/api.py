@@ -381,11 +381,18 @@ def fournisseur_mapping_get():
     chose était déjà enregistré côté hub, ça donnait l'impression que rien
     n'était jamais sauvegardé). Le tableau de bord web reste la source de
     vérité / l'endroit où corriger le mapping ensuite ; ceci n'est qu'une
-    lecture."""
+    lecture.
+
+    Aussi le SEUL appel que run_cycle() (fournisseur_sync.py) fait à CHAQUE
+    passage, sans condition, avant même de lire son Firebird local — donc le
+    signal de battement de coeur le plus fiable pour savoir si l'outil est
+    encore en vie (fournisseur_mark_seen), contrairement à /api/fournisseur/
+    lines qui n'est appelé que s'il y a effectivement une ligne à envoyer."""
     err = _check_key()
     if err:
         return err
-    from hub.central_db import fournisseur_mapping
+    from hub.central_db import fournisseur_mapping, fournisseur_mark_seen
+    fournisseur_mark_seen(_db())
     return jsonify(mapping=fournisseur_mapping(_db()))
 
 

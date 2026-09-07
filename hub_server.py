@@ -113,6 +113,39 @@ def create_app(db_path: str, api_key: str = "",
         threading.Thread(target=_low_stock_digest_loop, daemon=True,
                          name="low-stock-digest").start()
 
+    # Thread de fond : alerte si l'outil qui tourne CHEZ LE FOURNISSEUR ne
+    # donne plus signe de vie (voir fournisseur_mark_seen, appelé à chaque
+    # passage via /api/fournisseur/mapping) -- sans ça, une coupure de ce
+    # côté (poste éteint, tâche plantée, réseau coupé) est invisible tant que
+    # personne ne va vérifier sur place. UNE seule alerte par coupure
+    # (last_alert_sent), jamais avant le premier contact (rien à comparer).
+    if notifier and notifier.enabled:
+        def _fournisseur_deadman_loop():
+            import time
+            from hub.central_db import fournisseur_alert_status, fournisseur_mark_alert_sent
+            STALE_AFTER = 1800  # 30 min -- grande marge au-dessus de l'intervalle par défaut (5 min)
+            while True:
+                try:
+                    con = connect(db_path)
+                    status = fournisseur_alert_status(con)
+                    last_seen = status["last_seen"]
+                    if last_seen and not status["last_alert_sent"]:
+                        from datetime import datetime as _dt
+                        dt = _dt.fromisoformat(last_seen)
+                        age = (_dt.now(dt.tzinfo) - dt).total_seconds()
+                        if age > STALE_AFTER:
+                            notifier.send(
+                                "⚠️ Synchro fournisseur injoignable depuis %d min "
+                                "(dernier contact : %s). Vérifier le poste du fournisseur."
+                                % (int(age // 60), last_seen))
+                            fournisseur_mark_alert_sent(con)
+                    con.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(600)
+        threading.Thread(target=_fournisseur_deadman_loop, daemon=True,
+                         name="fournisseur-deadman").start()
+
     # Thread de fond : purge les aperçus BDR mobiles abandonnés (jamais
     # confirmés ni annulés) — sinon ils s'accumulent indéfiniment dans le
     # dossier temporaire du système.

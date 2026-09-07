@@ -161,6 +161,17 @@ def _migrate(con: sqlite3.Connection) -> None:
     if fss_cols and "op_id" not in fss_cols:
         con.execute("ALTER TABLE fournisseur_sync_state ADD COLUMN op_id INTEGER")
 
+    # Colonnes de battement de coeur sur fournisseur_settings (bases créées
+    # avant leur ajout) : sans elles, impossible de savoir si l'outil qui
+    # tourne CHEZ LE FOURNISSEUR est encore en vie sans s'y connecter en
+    # personne -- voir fournisseur_mark_seen / l'appel systématique à
+    # /api/fournisseur/mapping à CHAQUE passage (avec ou sans nouvelle ligne).
+    fs_cols = [r[1] for r in con.execute("PRAGMA table_info(fournisseur_settings)").fetchall()]
+    if fs_cols:
+        for col, decl in (("last_seen", "TEXT"), ("last_alert_sent", "TEXT")):
+            if col not in fs_cols:
+                con.execute("ALTER TABLE fournisseur_settings ADD COLUMN %s %s" % (col, decl))
+
 
 # --------------------------------------------------------------------------- #
 #  Upsert générique
@@ -1223,6 +1234,44 @@ def fournisseur_settings_set(con: sqlite3.Connection, code_type_piece_reception:
         "INSERT INTO fournisseur_settings (id, code_type_piece_reception) VALUES (1, ?) "
         "ON CONFLICT(id) DO UPDATE SET code_type_piece_reception=excluded.code_type_piece_reception",
         ((code_type_piece_reception or "").strip(),))
+    con.commit()
+
+
+def fournisseur_mark_seen(con: sqlite3.Connection) -> None:
+    """Signale que l'outil qui tourne CHEZ LE FOURNISSEUR vient de donner
+    signe de vie -- appelé à CHAQUE passage de son cycle de synchro (voir
+    /api/fournisseur/mapping, interrogé sans condition à chaque cycle, avec
+    ou sans nouvelle ligne de BL à traiter), pas seulement quand il y a des
+    données à transmettre. Sert de "dernier contact" affiché sur le tableau
+    de bord, et de base au battement de coeur (voir fournisseur_check_alive
+    dans hub_server.py) -- sans repère de contact, une coupure de ce côté est
+    invisible tant que personne ne va vérifier sur place. Efface aussi
+    last_alert_sent : redonner signe de vie annule une alerte en cours."""
+    con.execute(
+        "INSERT INTO fournisseur_settings (id, last_seen, last_alert_sent) "
+        "VALUES (1, ?, NULL) "
+        "ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen, last_alert_sent=NULL",
+        (now_iso(),))
+    con.commit()
+
+
+def fournisseur_last_seen(con: sqlite3.Connection) -> str | None:
+    row = con.execute("SELECT last_seen FROM fournisseur_settings WHERE id=1").fetchone()
+    return row["last_seen"] if row else None
+
+
+def fournisseur_alert_status(con: sqlite3.Connection) -> dict:
+    row = con.execute(
+        "SELECT last_seen, last_alert_sent FROM fournisseur_settings WHERE id=1").fetchone()
+    return {"last_seen": row["last_seen"] if row else None,
+           "last_alert_sent": row["last_alert_sent"] if row else None}
+
+
+def fournisseur_mark_alert_sent(con: sqlite3.Connection) -> None:
+    con.execute(
+        "INSERT INTO fournisseur_settings (id, last_alert_sent) VALUES (1, ?) "
+        "ON CONFLICT(id) DO UPDATE SET last_alert_sent=excluded.last_alert_sent",
+        (now_iso(),))
     con.commit()
 
 

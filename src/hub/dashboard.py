@@ -34,7 +34,7 @@ from hub.central_db import (
     fournisseur_receptions_history, fournisseur_reception_lines,
     fournisseur_pending_lines,
     fournisseur_sync_state_clear_by_dest, fournisseur_pending_creation_clear,
-    pending_op_cancel, pending_op_retry,
+    pending_op_cancel, pending_op_retry, fournisseur_last_seen,
 )
 from hub.ops import submit_op
 
@@ -100,7 +100,17 @@ def overview():
         m = money.get(s["store_id"], {"entree": 0.0, "sortie": 0.0})
         s["entree"] = m["entree"]
         s["solde"] = m["entree"] - m["sortie"]
-    return render_template("overview.html", stores=statuses)
+    fourn_last_seen = fournisseur_last_seen(_db())
+    fourn_online = False
+    if fourn_last_seen:
+        try:
+            dt = datetime.fromisoformat(fourn_last_seen)
+            fourn_online = (datetime.now(dt.tzinfo) - dt).total_seconds() < 1800
+        except Exception:  # noqa: BLE001
+            fourn_online = False
+    return render_template("overview.html", stores=statuses,
+                           fourn_last_seen_ago=_ago(fourn_last_seen),
+                           fourn_online=fourn_online)
 
 
 @bp.get("/tresorerie")
