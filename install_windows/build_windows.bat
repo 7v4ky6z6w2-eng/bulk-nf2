@@ -60,6 +60,8 @@ REM console, comme PrimeNFHub/PrimeNFFournisseurSync ci-dessous.
   --hidden-import pikepdf ^
   --hidden-import pdfplumber ^
   --hidden-import fontTools ^
+  --hidden-import openpyxl ^
+  --collect-submodules openpyxl ^
   sync_agent.py
 
 if errorlevel 1 (
@@ -81,6 +83,8 @@ REM de la fenetre Qt a chaque lancement.
   --hidden-import requests ^
   --hidden-import PySide6 ^
   --hidden-import flask ^
+  --hidden-import openpyxl ^
+  --collect-submodules openpyxl ^
   prime_hub.py
 
 if errorlevel 1 (
