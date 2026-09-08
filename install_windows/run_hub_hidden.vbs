@@ -19,5 +19,16 @@ Set shell = CreateObject("WScript.Shell")
 ' PRIMENF_HIDDEN=1 : dit a start_hub.bat de ne pas attendre une touche a la
 ' fin (le "pause" de secours en cas de plantage) -- personne n'est devant
 ' cette fenetre cachee pour l'appuyer.
+'
+' IMPORTANT : le dernier argument de Run DOIT etre True (attendre la fin)
+' -- avec False (fire-and-forget), wscript.exe lance cmd.exe puis se ferme
+' IMMEDIATEMENT tout seul. Le Planificateur de taches ne suit QUE le
+' processus qu'il a lui-meme demarre (wscript.exe) : des qu'il se ferme, la
+' tache est consideree "terminee" cote Planificateur, alors que hub_server.py
+' continue de tourner en arriere-plan, ORPHELIN et injoignable par
+' "schtasks /end" (deja vecu en pratique : /end "reussit" sans rien arreter
+' du tout). Avec True, wscript.exe reste vivant tout le temps que le hub
+' tourne, donc toujours suivi par le Planificateur -- /end coupe alors
+' vraiment tout le sous-arbre (wscript -> cmd -> python).
 cmd = "cmd /c set PRIMENF_HIDDEN=1&& """ & scriptDir & "\start_hub.bat"""
-shell.Run cmd, 0, False
+shell.Run cmd, 0, True
