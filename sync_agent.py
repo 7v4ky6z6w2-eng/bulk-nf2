@@ -59,9 +59,20 @@ def _apply_op_with_timeout(op: dict, local_kw: dict, timeout: int = APPLY_OP_TIM
         try:
             apply_op(op, local_kw)
             result["ok"] = True
-        except Exception as exc:  # noqa: BLE001 — relayé tel quel au thread appelant
+        except BaseException as exc:  # noqa: BLE001 — voir note ci-dessous
+            # BaseException, pas Exception : vécu en pratique, un pilote Firebird
+            # tiers (fdb) a fini par lever quelque chose qui n'hérite PAS
+            # d'Exception (ex. un SystemExit/KeyboardInterrupt improbable mais
+            # réel dans ce thread de travail) — un simple "except Exception"
+            # laissait ÇA s'échapper du thread SANS jamais remplir `result`,
+            # plantant l'appelant avec un KeyError opaque ('exc') au lieu de
+            # reporter l'échec normalement. On ne RELAIE jamais un
+            # SystemExit/KeyboardInterrupt tel quel au thread principal (ça
+            # arrêterait tout le cycle, voire le processus) : converti en
+            # Exception normale pour rester un échec d'op ordinaire.
             result["ok"] = False
-            result["exc"] = exc
+            result["exc"] = exc if isinstance(exc, Exception) else RuntimeError(
+                "Erreur interne inattendue (%s : %s)" % (type(exc).__name__, exc))
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -71,7 +82,11 @@ def _apply_op_with_timeout(op: dict, local_kw: dict, timeout: int = APPLY_OP_TIM
             "Écriture bloquée depuis plus de %ds (verrou Firebird ? "
             "Netfact2/PRIME ouvert sur la même pièce ?)" % timeout)
     if not result.get("ok"):
-        raise result["exc"]
+        # Filet de sécurité : si `result` ne contient toujours pas 'exc' pour
+        # une raison qui reste à comprendre, ne JAMAIS planter avec un
+        # KeyError opaque -- signaler un échec normal et exploitable à la place.
+        raise result.get("exc") or RuntimeError(
+            "Échec de l'application sans exception capturée (thread interrompu ?)")
 
 
 # ─── cycle ─────────────────────────────────────────────────────────────────────
