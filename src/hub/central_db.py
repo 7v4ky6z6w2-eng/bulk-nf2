@@ -1583,6 +1583,38 @@ def fournisseur_receptions_history(con: sqlite3.Connection, limit: int = 200) ->
     tout seul au prochain passage une fois appliquée). Sert à la page de
     confirmation/historique du tableau de bord (vérifier ce qui a été
     importé, et pouvoir l'annuler)."""
+    # Auto-guérison AVANT de lire : une création mise en file puis appliquée
+    # par l'agent ne met JAMAIS dest_nopiece à jour toute seule côté hub —
+    # rien ne le pousse proactivement, seul un futur passage de process_line
+    # pour la MÊME ligne s'en chargerait via le repli REFDOC (voir
+    # fournisseur_dest_nopiece_by_refdoc). Une ligne résolue manuellement
+    # depuis le tableau de bord (dashboard) ou dont le fournisseur ne
+    # renvoie plus jamais le BL ne repasse donc JAMAIS par là, et resterait
+    # affichée "en file" pour toujours alors qu'elle a bel et bien été
+    # créée — on tente donc la même résolution ICI, à chaque affichage.
+    code_type_piece = fournisseur_settings_get(con).get("code_type_piece_reception") or "PC_AC_B"
+    applied_pending = con.execute(
+        "SELECT DISTINCT s.store_id, s.src_nopiece FROM fournisseur_sync_state s "
+        "JOIN pending_ops o ON o.id = s.op_id "
+        "WHERE s.dest_nopiece = '' AND o.status = 'applied'").fetchall()
+    for row in applied_pending:
+        store_id, src_nopiece = row["store_id"], row["src_nopiece"]
+        dest_nopiece = fournisseur_dest_nopiece_by_refdoc(con, store_id, src_nopiece, code_type_piece)
+        if not dest_nopiece:
+            continue
+        lines = con.execute(
+            "SELECT src_noitem, dest_ref_art FROM fournisseur_sync_state "
+            "WHERE store_id=? AND src_nopiece=? AND dest_nopiece=''",
+            (store_id, src_nopiece)).fetchall()
+        for line in lines:
+            dest_noitem = fournisseur_dest_noitem_by_ref(con, store_id, dest_nopiece,
+                                                          line["dest_ref_art"])
+            con.execute(
+                "UPDATE fournisseur_sync_state SET dest_nopiece=?, dest_noitem=?, op_id=NULL "
+                "WHERE store_id=? AND src_nopiece=? AND src_noitem=?",
+                (dest_nopiece, dest_noitem or "", store_id, src_nopiece, line["src_noitem"]))
+        con.commit()
+
     created = con.execute(
         "SELECT store_id, dest_nopiece, "
         "       GROUP_CONCAT(DISTINCT src_nopiece) AS src_nopieces, "
@@ -1624,6 +1656,13 @@ def fournisseur_receptions_history(con: sqlite3.Connection, limit: int = 200) ->
         if op_row and op_row["status"] == "failed":
             d["status"] = "failed"
             d["error_msg"] = op_row["error_msg"]
+        elif op_row and op_row["status"] == "applied":
+            # Appliquée côté magasin (l'agent l'a confirmé), mais toujours pas
+            # rattachée à un NOPIECE ici même après la tentative de guérison
+            # ci-dessus (REFDOC pas encore synchronisé côté miroir, ou type de
+            # pièce different) — PAS "en file" (ça n'attend plus rien), un
+            # statut dédié pour ne pas induire en erreur.
+            d["status"] = "applied_unlinked"
         else:
             d["status"] = "queued"
         out.append(d)

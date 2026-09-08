@@ -52,6 +52,8 @@
             <span class="badge text-bg-secondary">Annulée</span>
           {% elif h.status == "failed" %}
             <span class="badge text-bg-danger">Échec</span>
+          {% elif h.status == "applied_unlinked" %}
+            <span class="badge text-bg-info text-dark" title="Appliquée côté magasin, pas encore rattachée à un numéro de pièce ici">Créée (lien en attente)</span>
           {% else %}
             <span class="badge text-bg-warning text-dark">En file</span>
           {% endif %}
