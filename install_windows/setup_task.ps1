@@ -39,12 +39,19 @@ $Trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes $
     -Once -At (Get-Date).AddMinutes(1)
 
 # Parametres
+# MultipleInstances IgnoreNew : refuse de demarrer une deuxieme instance tant
+# qu'un cycle est deja en cours (declencheur planifie OU "schtasks /run"
+# manuel pendant qu'un cycle tourne encore) -- sans ca, deux instances
+# peuvent tenter d'appliquer le MEME op en meme temps (deja vu en pratique :
+# deux "Agent demarre" a une seconde d'intervalle, meme op applique deux
+# fois cote logs) -- risque de DOUBLE ecriture Firebird pour la meme ligne.
 $Settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -RunOnlyIfNetworkAvailable:$false `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
     -RestartCount 2 `
-    -RestartInterval (New-TimeSpan -Minutes 1)
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -MultipleInstances IgnoreNew
 
 # Enregistrement
 Register-ScheduledTask `
