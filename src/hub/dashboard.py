@@ -35,6 +35,7 @@ from hub.central_db import (
     fournisseur_pending_lines,
     fournisseur_sync_state_clear_by_dest, fournisseur_pending_creation_clear,
     pending_op_cancel, pending_op_retry, fournisseur_last_seen,
+    fournisseur_tiers_soldes_by_store,
 )
 from hub.ops import submit_op
 
@@ -93,6 +94,8 @@ def overview():
         m = money.setdefault(r["store_id"], {"entree": 0.0, "sortie": 0.0})
         val = float(r.get("total_encaisse") or 0)
         m["sortie" if r.get("sens") == "sortie" else "entree"] += val
+    # Solde dû au père (base fournisseur, via CODE_TIERS mappé) par magasin.
+    fourn_soldes = fournisseur_tiers_soldes_by_store(_db())
     for s in statuses:
         s["name"] = names.get(s["store_id"], s.get("store_name") or "Magasin %d" % s["store_id"])
         s["last_ok_ago"] = _ago(s.get("last_ok"))
@@ -100,6 +103,9 @@ def overview():
         m = money.get(s["store_id"], {"entree": 0.0, "sortie": 0.0})
         s["entree"] = m["entree"]
         s["solde"] = m["entree"] - m["sortie"]
+        fs = fourn_soldes.get(s["store_id"])
+        s["solde_fournisseur"] = fs["solde"] if fs else None
+        s["solde_fournisseur_ago"] = _ago(fs["updated_at"]) if fs else None
     fourn_last_seen = fournisseur_last_seen(_db())
     fourn_online = False
     if fourn_last_seen:

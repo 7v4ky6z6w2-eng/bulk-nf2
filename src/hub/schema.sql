@@ -241,6 +241,15 @@ CREATE TABLE IF NOT EXISTS digest_log (
 -- magasin destinataire. Éditable depuis le tableau de bord web ; alimentée au
 -- premier lancement de l'outil de synchro (qui liste les clients de son
 -- propre Firebird pour que l'utilisateur choisisse).
+-- Solde de chaque client (magasin) DANS LA BASE DU PÈRE -- ce qu'il lui doit
+-- encore. Calculé côté exe fournisseur (PRIME n'a pas de colonne SOLDE
+-- dédiée), envoyé à chaque passage via /api/fournisseur/tiers-soldes.
+CREATE TABLE IF NOT EXISTS fournisseur_tiers_soldes (
+    code_tiers   TEXT PRIMARY KEY,
+    solde        REAL,
+    updated_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS fournisseur_tiers_map (
     code_tiers      TEXT PRIMARY KEY,
     store_id        INTEGER NOT NULL,

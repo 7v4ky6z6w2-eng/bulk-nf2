@@ -33,7 +33,14 @@
         <p class="mb-1 text-muted small">Dernière synchro réussie</p>
         <p class="fs-6 mb-2">{{ s.last_ok_ago }}</p>
         <p class="mb-1 text-muted small">Dernier contact</p>
-        <p class="fs-6 mb-0">{{ s.last_seen_ago }}</p>
+        <p class="fs-6 mb-2">{{ s.last_seen_ago }}</p>
+        {% if s.solde_fournisseur is not none %}
+        <p class="mb-1 text-muted small">Solde dû au fournisseur (père)</p>
+        <p class="fs-6 mb-0">
+          {{ s.solde_fournisseur|fmt_da }}
+          <span class="text-muted small">(maj {{ s.solde_fournisseur_ago }})</span>
+        </p>
+        {% endif %}
       </div>
       <div class="card-footer text-end">
         {% if s.last_ok %}

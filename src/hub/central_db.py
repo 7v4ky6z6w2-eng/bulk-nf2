@@ -1275,6 +1275,43 @@ def fournisseur_mark_alert_sent(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+def fournisseur_tiers_soldes_set(con: sqlite3.Connection, soldes: list) -> None:
+    """Enregistre les soldes clients envoyés par l'exe fournisseur (voir
+    fournisseur_sync.read_tiers_soldes) — un solde par CODE_TIERS, écrasé à
+    chaque passage (pas d'historique, juste l'état courant)."""
+    now = now_iso()
+    rows = [(s.get("code_tiers"), s.get("solde"), now) for s in soldes if s.get("code_tiers")]
+    if not rows:
+        return
+    con.executemany(
+        "INSERT INTO fournisseur_tiers_soldes (code_tiers, solde, updated_at) "
+        "VALUES (?, ?, ?) ON CONFLICT(code_tiers) DO UPDATE SET "
+        "  solde=excluded.solde, updated_at=excluded.updated_at",
+        rows)
+    con.commit()
+
+
+def fournisseur_tiers_soldes_by_store(con: sqlite3.Connection) -> dict:
+    """{store_id: {"solde": total, "updated_at": ..., "codes": [...]}} — le
+    solde (ce que CE magasin doit encore au père) via son/ses CODE_TIERS
+    mappé(s) (fournisseur_tiers_map). Cumulé si un magasin a plusieurs codes
+    (rare mais possible). "updated_at" = le plus récent des soldes cumulés,
+    pour signaler si la donnée est fraîche ou périmée sur le tableau de bord."""
+    rows = con.execute(
+        "SELECT m.store_id, s.code_tiers, s.solde, s.updated_at "
+        "FROM fournisseur_tiers_map m "
+        "LEFT JOIN fournisseur_tiers_soldes s ON s.code_tiers = m.code_tiers").fetchall()
+    out: dict = {}
+    for r in rows:
+        d = out.setdefault(r["store_id"], {"solde": 0.0, "updated_at": None, "codes": []})
+        d["codes"].append(r["code_tiers"])
+        if r["solde"] is not None:
+            d["solde"] += r["solde"]
+        if r["updated_at"] and (d["updated_at"] is None or r["updated_at"] > d["updated_at"]):
+            d["updated_at"] = r["updated_at"]
+    return out
+
+
 def fournisseur_mapping(con: sqlite3.Connection) -> dict:
     """{code_tiers: {"store_id":, "raison_sociale":}} — la correspondance
     client-fournisseur -> magasin destinataire, éditable sur le tableau de

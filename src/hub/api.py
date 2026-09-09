@@ -372,6 +372,22 @@ def fournisseur_lines():
     return jsonify(results=results)
 
 
+@bp.post("/api/fournisseur/tiers-soldes")
+def fournisseur_tiers_soldes_post():
+    """Soldes clients (montant que chaque magasin doit encore au père),
+    envoyés par l'exe fournisseur à CHAQUE passage -- calculés depuis SON
+    Firebird (voir fournisseur_sync.read_tiers_soldes), PRIME n'exposant pas
+    de colonne SOLDE dédiée sur TIERS."""
+    err = _check_key()
+    if err:
+        return err
+    from hub.central_db import fournisseur_tiers_soldes_set
+    data = request.get_json(force=True) or {}
+    soldes = data.get("soldes") or []
+    fournisseur_tiers_soldes_set(_db(), soldes)
+    return jsonify(status="ok", count=len(soldes))
+
+
 @bp.get("/api/fournisseur/mapping")
 def fournisseur_mapping_get():
     """Mapping CODE_TIERS -> magasin actuellement enregistré — lu par l'exe

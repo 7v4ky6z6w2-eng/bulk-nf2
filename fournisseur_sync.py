@@ -211,6 +211,40 @@ def read_bl_for_article(con, code_type_piece: str, days: int, ref: str | None,
     return lines
 
 
+def read_tiers_soldes(con, code_tiers_filter: list | None = None) -> list:
+    """Solde de chaque client (magasin) DANS LA BASE DU PÈRE : ce qu'il lui
+    doit encore. PRIME n'a pas de colonne SOLDE dédiée sur TIERS -- calculé
+    comme PRIME l'affiche à l'écran : somme facturée (MONTANTTTC) moins
+    somme versée (MONTANTVERSE), sur les pièces non annulées, toutes types
+    de pièce confondus (une facture de BL ET un règlement séparé impactent
+    tous les deux le compte du client).
+
+    `code_tiers_filter` : comme read_recent_bl, restreint aux SEULS clients
+    déjà mappés à un magasin -- le père a des dizaines d'autres clients sans
+    rapport, jamais la peine de calculer/renvoyer leur solde à chaque
+    passage. None = pas de filtre (repli si le mapping n'a pas pu être
+    récupéré)."""
+    cur = con.cursor()
+    sql = ("SELECT CODE_TIERS, SUM(MONTANTTTC) AS total_ttc, "
+          "SUM(MONTANTVERSE) AS total_verse FROM PIECE "
+          "WHERE (ANNULEE IS NULL OR ANNULEE = 0)")
+    params = []
+    if code_tiers_filter:
+        sql += " AND CODE_TIERS IN (%s)" % ", ".join("?" * len(code_tiers_filter))
+        params.extend(code_tiers_filter)
+    sql += " GROUP BY CODE_TIERS"
+    cur.execute(sql, params)
+    out = []
+    for code_tiers, total_ttc, total_verse in cur.fetchall():
+        if not code_tiers:
+            continue
+        out.append({
+            "code_tiers": str(code_tiers).strip(),
+            "solde": round(float(total_ttc or 0) - float(total_verse or 0), 2),
+        })
+    return out
+
+
 # --------------------------------------------------------------------------- #
 #  Hub (HTTP)
 # --------------------------------------------------------------------------- #
@@ -272,6 +306,14 @@ class HubClient:
             r.raise_for_status()
             results.extend(r.json().get("results", []))
         return results
+
+    def post_tiers_soldes(self, soldes: list) -> dict:
+        import requests
+        r = requests.post(self.base + "/api/fournisseur/tiers-soldes",
+                          json={"soldes": soldes}, headers=self._headers(),
+                          timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
 
     def reconcile(self, ref: str | None, designation: str | None, days: int,
                   father_lines: list) -> list:
@@ -335,11 +377,21 @@ def run_cycle(cfg: dict, log_fn=log.info) -> dict:
         lines = read_recent_bl(con, cfg["code_type_piece_bl"], cfg["lookback_days"],
                                cfg.get("filtrer_annulee", False),
                                code_tiers_filter=mapped_codes)
+        soldes = read_tiers_soldes(con, code_tiers_filter=mapped_codes)
     finally:
         con.close()
     log_fn("%d ligne(s) de BL trouvée(s) sur les %d derniers jours%s."
           % (len(lines), cfg["lookback_days"],
              " (%d client(s) mappé(s))" % len(mapped_codes) if mapped_codes else ""))
+
+    # Envoyé à CHAQUE passage, même sans nouvelle ligne de BL -- le solde
+    # client bouge aussi via des règlements seuls, sans BL associé.
+    if soldes:
+        try:
+            client.post_tiers_soldes(soldes)
+        except Exception as exc:  # noqa: BLE001
+            log_fn("Envoi des soldes clients échoué (non bloquant) : %s" % exc)
+
     if not lines:
         return {"lines": 0, "applied": 0, "queued": 0, "pending": 0,
                "unchanged": 0, "skipped": 0, "errors": 0}
