@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Rupture / stock bas — PrimeNF Hub{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Rupture / stock bas</h4>
+  <form method="get" class="d-flex align-items-center gap-2">
+    <label class="text-muted small mb-0">Seuil (≤) :</label>
+    <input type="number" name="seuil" value="{{ seuil }}" min="0" class="form-control form-control-sm" style="width:80px">
+    <button type="submit" class="btn btn-sm btn-primary">Appliquer</button>
+  </form>
+</div>
+<p class="text-muted small">
+  {{ rows|length }} ligne(s) entre 0 et {{ seuil }} unité(s), par magasin (dépôts cumulés dans ce magasin).
+  {% if seuil == 0 %}Inclut tout article jamais reçu dans ce magasin (jamais de mouvement de stock).{% endif %}
+  Le stock <strong>négatif</strong> (toujours une anomalie de données) est sur une page séparée :
+  <a href="{{ url_for('dashboard.stock_negatif') }}">Stock négatif (anomalie)</a>.
+</p>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr><th>Magasin</th><th>Référence</th><th>Désignation</th><th class="text-end">Qté</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ store_names.get(r.store_id, r.store_id) }}</td>
+        <td class="font-monospace small">{{ r.ref_art }}</td>
+        <td>{{ r.designation }}</td>
+        <td class="text-end {% if r.qte_stock|float <= 0 %}text-danger fw-bold{% else %}text-warning{% endif %}">
+          {{ r.qte_stock|fmt_qty }}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-muted text-center">Aucune ligne sous ce seuil</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

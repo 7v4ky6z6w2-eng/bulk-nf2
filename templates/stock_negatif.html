@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Stock négatif — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Stock négatif (anomalie)</h4>
+<p class="text-muted small">
+  Un stock négatif n'est jamais un vrai niveau de stock : c'est un écart de données
+  (retour non rapproché, inventaire mal saisi, mouvement de stock au mauvais sens…).
+  Ces lignes ne sont pas « à réapprovisionner » — elles méritent une vérification dans
+  Netfact2. Pour le vrai stock bas (0 à quelques unités), voir
+  <a href="{{ url_for('dashboard.stock_bas') }}">Rupture / stock bas</a>.
+</p>
+<p class="text-muted small">{{ rows|length }} ligne(s) en écart négatif, la plus importante d'abord.</p>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr><th>Magasin</th><th>Référence</th><th>Désignation</th><th class="text-end">Qté</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ store_names.get(r.store_id, r.store_id) }}</td>
+        <td class="font-monospace small">{{ r.ref_art }}</td>
+        <td>{{ r.designation }}</td>
+        <td class="text-end text-danger fw-bold">{{ r.qte_stock|fmt_qty }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-muted text-center">Aucun écart négatif — bonne nouvelle.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

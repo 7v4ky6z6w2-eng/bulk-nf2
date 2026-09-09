@@ -1,0 +1,57 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Synchro prix — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-3">Synchroniser les prix</h5>
+
+{% if results %}
+  {% for r in results %}
+    {% if r.status == 'applied' %}
+      <div class="alert alert-success py-2 mb-1">✅ {{ r.store_name }} — {{ r.ref_art }} : appliqué.</div>
+    {% elif r.status == 'queued' %}
+      <div class="alert alert-warning py-2 mb-1">⏳ {{ r.store_name }} — {{ r.ref_art }} : mis en file.</div>
+    {% else %}
+      <div class="alert alert-danger py-2 mb-1">❌ {{ r.store_name }} — {{ r.ref_art }} : {{ r.error }}</div>
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+<form method="get" class="mb-3">
+  <label class="form-label">Magasin source</label>
+  <select name="source" class="form-select form-select-lg" onchange="this.form.submit()">
+    {% for s in stores %}
+    <option value="{{ s.id }}" {% if source == s.id %}selected{% endif %}>{{ s.name }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+{% if source %}
+  {% if not rows %}
+  <p class="text-muted">Aucun écart : les prix sont déjà alignés.</p>
+  {% else %}
+  <form method="post" action="{{ url_for('mobile.prix_sync_apply') }}"
+        onsubmit="return confirm('Appliquer les changements de prix cochés ?');">
+    <input type="hidden" name="source" value="{{ source }}">
+    {% for r in rows %}
+    <div class="card bg-dark m-card">
+      <div class="card-body">
+        <div class="form-check form-check-lg mb-1">
+          <input class="form-check-input" type="checkbox" name="rows" value="{{ loop.index0 }}"
+                 id="row{{ loop.index0 }}" checked>
+          <label class="form-check-label fw-bold" for="row{{ loop.index0 }}">{{ r.designation }}</label>
+        </div>
+        <div class="small text-muted">
+          {{ store_names.get(r.store_id, r.store_id) }} :
+          {{ r.current_price|fmt_da if r.current_price is not none else "—" }}
+          → {{ r.source_price|fmt_da }}
+        </div>
+        <input type="hidden" name="store_id_{{ loop.index0 }}" value="{{ r.store_id }}">
+        <input type="hidden" name="ref_art_{{ loop.index0 }}" value="{{ r.ref_art }}">
+        <input type="hidden" name="price_{{ loop.index0 }}" value="{{ r.source_price }}">
+      </div>
+    </div>
+    {% endfor %}
+    <button type="submit" class="btn btn-primary btn-lg-block mt-2">Appliquer les changements cochés</button>
+  </form>
+  {% endif %}
+{% endif %}
+{% endblock %}

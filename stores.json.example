@@ -1,0 +1,47 @@
+{
+  "_comment": "Copiez ce fichier en stores.json et remplissez les valeurs. Les IP 100.x.y.z sont les adresses Tailscale de CHAQUE poste, y compris le magasin 1 (hub) : ce host sert aussi aux autres magasins pour joindre le hub par le reseau, 'localhost' ne marcherait que depuis le poste du hub lui-meme.",
+
+  "telegram": {
+    "bot_token": "",
+    "chat_id": ""
+  },
+  "ntfy_topic": "",
+
+  "hub_port": 5000,
+  "hub_api_key": "remplacez-par-une-cle-aleatoire-longue",
+  "access_code": "DIFA-2026",
+
+  "stores": [
+    {
+      "id": 1,
+      "name": "Difa El Biar",
+      "is_hub": true,
+      "host": "100.100.1.1",
+      "port": 3050,
+      "database": "C:\\Netfact\\Data\\DIFA2.FDB",
+      "user": "SYSDBA",
+      "password": "masterkey",
+      "charset": "WIN1256"
+    },
+    {
+      "id": 2,
+      "name": "Difa Blida",
+      "host": "100.100.2.2",
+      "port": 3050,
+      "database": "C:\\Netfact\\Data\\DIFA2.FDB",
+      "user": "SYSDBA",
+      "password": "masterkey",
+      "charset": "WIN1256"
+    },
+    {
+      "id": 3,
+      "name": "Difa Bab Ezzouar",
+      "host": "100.100.3.3",
+      "port": 3050,
+      "database": "C:\\Netfact\\Data\\DIFA2.FDB",
+      "user": "SYSDBA",
+      "password": "masterkey",
+      "charset": "WIN1256"
+    }
+  ]
+}

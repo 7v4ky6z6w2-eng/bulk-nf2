@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}PrimeNF Hub{% endblock %}</title>
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+        crossorigin="anonymous">
+  <style>
+    .sidebar { width: 200px; min-height: 100vh; background: #1a1d20; }
+    .sidebar .nav-link { color: #adb5bd; border-radius: 6px; }
+    .sidebar .nav-link:hover, .sidebar .nav-link.active { color: #fff; background: #0d6efd22; }
+    .store-badge { font-size: .72em; }
+    .treso-card { min-width: 220px; }
+  </style>
+</head>
+<body>
+<div class="d-flex">
+  <nav class="sidebar p-3 flex-shrink-0">
+    <div class="fw-bold text-white mb-4 fs-5">PrimeNF<span class="text-primary">Hub</span></div>
+    <ul class="nav flex-column gap-1">
+      <li class="nav-item"><a class="nav-link {% if request.path=='/' %}active{% endif %}" href="/">Vue d'ensemble</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock' %}active{% endif %}" href="/stock">Stock</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock-valeur' %}active{% endif %}" href="/stock-valeur">Valeur du stock</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock-bas' %}active{% endif %}" href="/stock-bas">Rupture / stock bas</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock-negatif' %}active{% endif %}" href="/stock-negatif">Stock négatif (anomalie)</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/stock-mort' %}active{% endif %}" href="/stock-mort">Stock dormant</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/transferts' %}active{% endif %}" href="/transferts">Transferts suggérés</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/correspondances' %}active{% endif %}" href="/correspondances">Correspondances</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/synchroniser-prix' %}active{% endif %}" href="/synchroniser-prix">Synchro prix</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/ventes' %}active{% endif %}" href="/ventes">Ventes</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/ventes-produits' %}active{% endif %}" href="/ventes-produits">Top / flop produits</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/ventes-comparaison' %}active{% endif %}" href="/ventes-comparaison">Comparaison magasins</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/diagnostic-types' %}active{% endif %}" href="/diagnostic-types">Diagnostic types de pièce</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/fournisseur-mapping' %}active{% endif %}" href="/fournisseur-mapping">Synchro fournisseur</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/fournisseur-pending' %}active{% endif %}" href="/fournisseur-pending">Fournisseur : à valider</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/fournisseur-historique' %}active{% endif %}" href="/fournisseur-historique">Fournisseur : historique</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/tresorerie' %}active{% endif %}" href="/tresorerie">Trésorerie</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/sync' %}active{% endif %}" href="/sync">Synchronisation</a></li>
+      <li class="nav-item"><a class="nav-link {% if request.path=='/historique' %}active{% endif %}" href="/historique">Historique</a></li>
+    </ul>
+  </nav>
+  <main class="flex-grow-1 p-4">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc4s9bIOgUxi8T/jzmf+pEIPm6zS/1a5see6xLM3VEp"
+        crossorigin="anonymous"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

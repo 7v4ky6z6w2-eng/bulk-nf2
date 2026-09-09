@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Stock — PrimeNF Hub{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Stock par magasin</h4>
+  <form method="get" class="d-flex gap-2">
+    <input type="search" name="q" value="{{ q }}" class="form-control form-control-sm"
+           placeholder="Référence, désignation ou code-barres…" style="width:280px">
+    <button type="submit" class="btn btn-sm btn-primary">Chercher</button>
+  </form>
+</div>
+<p class="text-muted small">
+  Une ligne par produit (regroupé par code-barres commun ou correspondance confirmée),
+  une colonne par magasin — jamais un total combiné entre magasins.
+  Sans recherche, les 300 premières lignes sont affichées.
+</p>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Référence</th><th>Désignation</th>
+        {% for sid in store_ids %}<th class="text-end">{{ store_names.get(sid, sid) }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for g in groups %}
+      <tr>
+        <td class="font-monospace small">{{ g.ref_txt }}</td>
+        <td>{{ g.desig }}</td>
+        {% for sid in store_ids %}
+        {% set qty = g.qty.get(sid) %}
+        <td class="text-end {% if qty is not none and qty|float <= 0 %}text-danger fw-bold{% endif %}">
+          {{ qty|fmt_qty if qty is not none else "—" }}
+        </td>
+        {% endfor %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ 2 + store_ids|length }}" class="text-muted text-center">Aucune donnée</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

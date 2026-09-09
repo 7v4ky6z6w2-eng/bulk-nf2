@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Synchro fournisseur — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Synchro fournisseur — correspondance client → magasin</h4>
+<p class="text-muted small">
+  Quand l'outil installé chez le fournisseur détecte un bon de livraison, il regarde le
+  code client (CODE_TIERS) de la pièce pour savoir à quel magasin l'envoyer. Cette liste
+  fait cette correspondance — modifiable ici à tout moment, sans toucher au poste du
+  fournisseur.
+</p>
+
+<div class="table-responsive mb-4">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr><th>Code client (CODE_TIERS)</th><th>Nom</th><th>Magasin</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for code, m in mapping.items() %}
+      <tr>
+        <td class="font-monospace">{{ code }}</td>
+        <td>{{ m.raison_sociale or "—" }}</td>
+        <td>{{ store_names.get(m.store_id, m.store_id) }}</td>
+        <td>
+          <form method="post" action="{{ url_for('dashboard.fournisseur_mapping_delete') }}"
+                onsubmit="return confirm('Supprimer cette correspondance ?');">
+            <input type="hidden" name="code_tiers" value="{{ code }}">
+            <button type="submit" class="btn btn-sm btn-outline-danger">Supprimer</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="text-muted text-center">Aucune correspondance pour le moment.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card mb-4" style="max-width:520px">
+  <div class="card-header">Ajouter / modifier</div>
+  <div class="card-body">
+    <form method="post" action="{{ url_for('dashboard.fournisseur_mapping_set') }}">
+      <div class="mb-2">
+        <label class="form-label small mb-0">Code client (CODE_TIERS)</label>
+        <input type="text" name="code_tiers" class="form-control form-control-sm" required
+               placeholder="ex. CLI-STH">
+      </div>
+      <div class="mb-2">
+        <label class="form-label small mb-0">Nom (facultatif, pour s'y retrouver)</label>
+        <input type="text" name="raison_sociale" class="form-control form-control-sm">
+      </div>
+      <div class="mb-3">
+        <label class="form-label small mb-0">Magasin</label>
+        <select name="store_id" class="form-select form-select-sm" required>
+          {% for s in stores %}
+          <option value="{{ s.id }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit" class="btn btn-sm btn-primary">Enregistrer</button>
+    </form>
+  </div>
+</div>
+
+<div class="card" style="max-width:520px">
+  <div class="card-header">Type de pièce des réceptions</div>
+  <div class="card-body">
+    <p class="text-muted small">
+      Code utilisé pour CRÉER les bons de réception côté magasin (celui du bon de livraison
+      du père, PC_VE_B, est déjà confirmé — celui-ci ne l'a pas encore été sur ce
+      déploiement). Laissé vide, l'outil retombe sur un défaut générique
+      (<code>PC_AC_B</code>) — à vérifier/corriger ici une fois confirmé sur site.
+    </p>
+    <form method="post" action="{{ url_for('dashboard.fournisseur_settings_set_route') }}"
+          class="d-flex gap-2 align-items-end">
+      <div class="flex-grow-1">
+        <label class="form-label small mb-0">Code type de pièce (ex. PC_AC_B)</label>
+        <input type="text" name="code_type_piece_reception" class="form-control form-control-sm"
+               value="{{ settings.code_type_piece_reception }}" placeholder="PC_AC_B (défaut)">
+      </div>
+      <button type="submit" class="btn btn-sm btn-primary">Enregistrer</button>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-4" style="max-width:640px">
+  <div class="card-header">Fournisseur (le père) comme tiers, par magasin</div>
+  <div class="card-body">
+    <p class="text-muted small">
+      Le CODE_TIERS et le CODE_DEPOT à utiliser pour rattacher les réceptions créées par
+      la synchro à un vrai fournisseur/dépôt côté magasin — sinon elles sont créées sans
+      fournisseur ni dépôt attaché. Peut être différent d'un magasin à l'autre.
+    </p>
+    {% for s in stores %}
+    <form method="post" action="{{ url_for('dashboard.fournisseur_store_settings_set_route') }}"
+          class="row g-2 align-items-end mb-2">
+      <input type="hidden" name="store_id" value="{{ s.id }}">
+      <div class="col-3"><span class="fw-semibold small">{{ s.name }}</span></div>
+      <div class="col-3">
+        <label class="form-label small mb-0">Code tiers</label>
+        <input type="text" name="code_tiers" class="form-control form-control-sm"
+               value="{{ store_settings.get(s.id, {}).get('code_tiers', '') }}">
+      </div>
+      <div class="col-3">
+        <label class="form-label small mb-0">Code dépôt</label>
+        <input type="text" name="code_depot" class="form-control form-control-sm"
+               value="{{ store_settings.get(s.id, {}).get('code_depot', '') }}">
+      </div>
+      <div class="col-3">
+        <button type="submit" class="btn btn-sm btn-primary">Enregistrer</button>
+      </div>
+    </form>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

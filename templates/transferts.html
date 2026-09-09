@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Transferts suggérés — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Transferts de stock suggérés</h4>
+<p class="text-muted small">
+  Un magasin en rupture d'un produit alors qu'un AUTRE magasin en a un surplus (même produit,
+  regroupé comme dans l'onglet Stock). Basé uniquement sur le déséquilibre de stock ACTUEL, pas
+  sur l'historique de ventes — une piste à vérifier avant d'organiser le transfert, pas une décision automatique.
+</p>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Désignation</th>
+        <th>Depuis</th><th class="text-end">Stock source</th>
+        <th>Vers</th>
+        <th class="text-end">Qté suggérée</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.designation }}</td>
+        <td>{{ store_names.get(r.from_store_id, r.from_store_id) }}
+            <span class="text-muted small font-monospace">({{ r.from_ref }})</span></td>
+        <td class="text-end">{{ r.from_qty|fmt_qty }}</td>
+        <td>{{ store_names.get(r.to_store_id, r.to_store_id) }}
+            <span class="text-muted small font-monospace">({{ r.to_ref }})</span>
+            <span class="badge bg-danger">rupture</span></td>
+        <td class="text-end fw-bold">{{ r.suggested_qty|fmt_qty }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="text-muted text-center">Aucune suggestion pour le moment.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

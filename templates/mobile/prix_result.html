@@ -1,0 +1,15 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Résultat prix — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-3">{{ ref }} — {{ "%.2f"|format(price) }} DA</h5>
+{% for r in results %}
+  {% if r.status == 'applied' %}
+    <div class="alert alert-success py-2">✅ {{ r.store_name }} : appliqué.</div>
+  {% elif r.status == 'queued' %}
+    <div class="alert alert-warning py-2">⏳ {{ r.store_name }} : hors ligne, mis en file (op #{{ r.op_id }}).</div>
+  {% else %}
+    <div class="alert alert-danger py-2">❌ {{ r.store_name }} : {{ r.error }}</div>
+  {% endif %}
+{% endfor %}
+<a href="{{ url_for('mobile.home') }}" class="btn btn-outline-light btn-lg-block mt-2">Retour à l'accueil</a>
+{% endblock %}

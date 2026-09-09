@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Diagnostic types de pièce — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Diagnostic — types de pièce par magasin</h4>
+<p class="text-muted small">
+  Chaque (magasin, code_type_piece) présent dans les données synchronisées (tout
+  l'historique), avec son nombre de pièces et combien ont un montant TTC réellement
+  renseigné. « Compté comme vente » indique si ce type entre dans le chiffre d'affaires
+  des rapports de ventes (Comparaison magasins, Top/flop produits, Stock dormant,
+  /ventes). Groupé PAR MAGASIN : un magasin peut avoir le même type de pièce qu'un autre
+  mais sans montant synchronisé (variante de schéma Firebird selon l'installation),
+  ce qui donne un magasin à 0,00 DA malgré des pièces bien présentes — regardez la colonne
+  « Avec montant » pour repérer ce cas.
+</p>
+<div class="alert alert-secondary py-2 small">
+  Seuls ces types comptent comme une vente : {{ vente_types|join(", ") }}
+  (bon de livraison + ticket point de vente). Tout le reste est exclu du chiffre d'affaires.
+</div>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr>
+        <th>Magasin</th><th>Code</th><th>Désignation</th><th>Compté comme vente ?</th>
+        <th class="text-end">Nb pièces</th>
+        <th class="text-end">Avec montant</th>
+        <th class="text-end">Montant TTC cumulé</th>
+        <th>Période</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ store_names.get(r.store_id, r.store_id) }}</td>
+        <td class="font-monospace">{{ r.code_type_piece }}</td>
+        <td>{{ r.designation or "—" }}</td>
+        <td>
+          {% if r.is_vente %}
+            <span class="badge bg-success">Oui</span>
+          {% else %}
+            <span class="badge bg-secondary">Non (exclu)</span>
+          {% endif %}
+        </td>
+        <td class="text-end">{{ r.nb_pieces }}</td>
+        <td class="text-end {% if r.is_vente and r.nb_avec_montant == 0 and r.nb_pieces > 0 %}text-danger fw-bold{% endif %}">
+          {{ r.nb_avec_montant }} / {{ r.nb_pieces }}
+        </td>
+        <td class="text-end">{{ r.total_montantttc|fmt_da if r.total_montantttc is not none else "—" }}</td>
+        <td class="small text-muted">{{ (r.premiere_date or "—")[:10] }} → {{ (r.derniere_date or "—")[:10] }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="text-muted text-center">Aucune donnée</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

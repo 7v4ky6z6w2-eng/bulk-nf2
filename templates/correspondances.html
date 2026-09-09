@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Correspondances — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Suggestions de correspondance</h4>
+<p class="text-muted small">
+  Articles portant le même nom dans plusieurs magasins, pas encore reliés
+  (référence et code-barres différents). Rien n'est fusionné automatiquement :
+  vérifiez puis confirmez chaque groupe.
+</p>
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+{% if not groups %}
+<p class="text-muted">Aucune suggestion pour le moment.</p>
+{% endif %}
+<div class="row g-3">
+  {% for g in groups %}
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header"><strong>{{ g.designation }}</strong></div>
+      <div class="card-body">
+        <table class="table table-sm mb-3">
+          <thead><tr><th>Magasin</th><th>Référence</th><th class="text-end">Prix</th></tr></thead>
+          <tbody>
+            {% for it in g['items'] %}
+            <tr>
+              <td>{{ store_names.get(it.store_id, it.store_id) }}</td>
+              <td class="font-monospace">{{ it.ref_art }}</td>
+              <td class="text-end">
+                {{ it.prixventeht|fmt_da if it.prixventeht is not none else "—" }}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <form method="post" action="{{ url_for('dashboard.correspondances_confirm') }}"
+              onsubmit="return confirm('Confirmer que ces {{ g['items']|length }} articles sont le MÊME produit ?');">
+          {% for it in g['items'] %}
+          <input type="hidden" name="store_id" value="{{ it.store_id }}">
+          <input type="hidden" name="ref_art" value="{{ it.ref_art }}">
+          {% endfor %}
+          <button type="submit" class="btn btn-sm btn-success">Confirmer : même article</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

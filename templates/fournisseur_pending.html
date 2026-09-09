@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Synchro fournisseur — à valider — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Synchro fournisseur — lignes à valider</h4>
+<p class="text-muted small">
+  Ces lignes de bon de livraison n'ont pu être rapprochées que par le NOM (pas de
+  référence ni code-barres identique) — rien n'est fusionné automatiquement. Choisissez,
+  pour chacune, s'il s'agit du même article qu'un candidat proposé, d'un nouvel article,
+  ou à ignorer.
+</p>
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+{% if not pending %}
+<p class="text-muted">Aucune ligne en attente.</p>
+{% endif %}
+
+<div class="row g-3">
+  {% for p in pending %}
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header d-flex justify-content-between">
+        <strong>{{ store_names.get(p.store_id, p.store_id) }}</strong>
+        <span class="text-muted small">{{ p.created_at[:16] }}</span>
+      </div>
+      <div class="card-body">
+        <div class="mb-2">
+          <div class="fw-bold">{{ p.designation or p.ref_art }}</div>
+          <div class="text-muted small">
+            Fournisseur : réf. {{ p.ref_art }} — {{ p.qte }} × {{ p.prix|fmt_da }}
+            {% if p.code_barres %} — code-barres {{ p.code_barres }}{% endif %}
+          </div>
+        </div>
+
+        {% if p.candidates %}
+        <div class="alert alert-warning py-2 small mb-2">
+          Ressemble peut-être à un article existant :
+          <ul class="mb-0 ps-3">
+            {% for c in p.candidates %}
+            <li>
+              <strong>{{ c.match_ref }}</strong> — « {{ c.match_designation }} »
+              (score {{ "%.0f"|format(c.match_score * 100) }}%{% if c.match_prix_achat is not none %},
+              prix achat actuel {{ c.match_prix_achat|fmt_da }}{% endif %})
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+
+        <div class="d-flex flex-wrap gap-2">
+          {% for c in p.candidates %}
+          <form method="post" action="{{ url_for('dashboard.fournisseur_pending_resolve_route') }}"
+                onsubmit="return confirm('Confirmer : même article que {{ c.match_ref }} ?');">
+            <input type="hidden" name="pending_id" value="{{ p.id }}">
+            <input type="hidden" name="action" value="link">
+            <input type="hidden" name="link_ref" value="{{ c.match_ref }}">
+            <button type="submit" class="btn btn-sm btn-success">
+              Même article que {{ c.match_ref }}
+            </button>
+          </form>
+          {% endfor %}
+          <form method="post" action="{{ url_for('dashboard.fournisseur_pending_resolve_route') }}"
+                onsubmit="return confirm('Créer « {{ p.designation or p.ref_art }} » comme un nouvel article ?');">
+            <input type="hidden" name="pending_id" value="{{ p.id }}">
+            <input type="hidden" name="action" value="new">
+            <button type="submit" class="btn btn-sm btn-primary">Nouvel article</button>
+          </form>
+          <form method="post" action="{{ url_for('dashboard.fournisseur_pending_resolve_route') }}">
+            <input type="hidden" name="pending_id" value="{{ p.id }}">
+            <input type="hidden" name="action" value="ignore">
+            <button type="submit" class="btn btn-sm btn-outline-secondary">Ignorer</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

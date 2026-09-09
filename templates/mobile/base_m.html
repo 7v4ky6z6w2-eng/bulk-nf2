@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="fr" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>{% block title %}PrimeNF Mobile{% endblock %}</title>
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+        crossorigin="anonymous">
+  <style>
+    body { padding-bottom: 40px; }
+    .m-wrap { max-width: 480px; margin: 0 auto; padding: 16px; }
+    .btn-lg-block { width: 100%; padding: 14px; font-size: 1.05rem; }
+    .m-card { margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+<div class="m-wrap">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <a href="{{ url_for('mobile.home') }}" class="text-decoration-none text-white fw-bold fs-5">
+      PrimeNF<span class="text-primary">Mobile</span>
+    </a>
+    {% if session.get('mobile_auth') %}
+    <a href="{{ url_for('mobile.logout') }}" class="text-muted small">Déconnexion</a>
+    {% endif %}
+  </div>
+  {% block content %}{% endblock %}
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc4s9bIOgUxi8T/jzmf+pEIPm6zS/1a5see6xLM3VEp"
+        crossorigin="anonymous"></script>
+</body>
+</html>

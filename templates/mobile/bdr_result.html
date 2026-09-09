@@ -1,0 +1,19 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Résultat BDR — PrimeNF Mobile{% endblock %}
+{% block content %}
+{% if not ok %}
+  <div class="alert alert-danger">{{ message or (result and result.error) }}</div>
+{% elif result.status == 'applied' %}
+  <div class="alert alert-success">
+    ✅ Import appliqué directement au {{ store_name }} ({{ result.count }} ligne(s)).
+  </div>
+{% elif result.status == 'queued' %}
+  <div class="alert alert-warning">
+    ⏳ {{ store_name }} est hors ligne — l'import est mis en file (op #{{ result.op_id }}).
+    Il sera appliqué automatiquement au prochain démarrage du magasin, avec notification.
+  </div>
+{% else %}
+  <div class="alert alert-danger">❌ {{ result.error }}</div>
+{% endif %}
+<a href="{{ url_for('mobile.home') }}" class="btn btn-outline-light btn-lg-block">Retour à l'accueil</a>
+{% endblock %}

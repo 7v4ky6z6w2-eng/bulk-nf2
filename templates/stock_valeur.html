@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Valeur du stock — PrimeNF Hub{% endblock %}
+{% block content %}
+<h4 class="mb-3">Valeur du stock</h4>
+<p class="text-muted small">Quantité × prix d'achat HT, par magasin (jamais un total combiné entre magasins).</p>
+
+<div class="row g-3 mb-4">
+  {% for s in summary %}
+  <div class="col-md-4">
+    <div class="card h-100">
+      <div class="card-header"><strong>{{ s.name }}</strong></div>
+      <div class="card-body">
+        <p class="fs-4 fw-bold mb-1">{{ s.valeur|fmt_da }}</p>
+        <p class="text-muted small mb-0">{{ s.qte_totale|fmt_qty }} unités — {{ s.nb_refs }} référence(s)</p>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="col-12"><p class="text-muted">Aucune donnée de stock.</p></div>
+  {% endfor %}
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h5 class="mb-0">Produits les plus lourds en valeur</h5>
+  <form method="get" class="d-flex align-items-center gap-2">
+    <label class="text-muted small mb-0">Magasin :</label>
+    <select name="store_id" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+      <option value="">Tous</option>
+      {% for s in stores %}
+      <option value="{{ s.id }}" {% if store_id == s.id %}selected{% endif %}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle">
+    <thead class="table-dark">
+      <tr><th>Magasin</th><th>Référence</th><th>Désignation</th>
+          <th class="text-end">Qté</th><th class="text-end">Prix achat</th><th class="text-end">Valeur</th></tr>
+    </thead>
+    <tbody>
+      {% for r in top %}
+      <tr>
+        <td>{{ store_names.get(r.store_id, r.store_id) }}</td>
+        <td class="font-monospace small">{{ r.ref_art }}</td>
+        <td>{{ r.designation }}</td>
+        <td class="text-end">{{ r.qte_stock|fmt_qty }}</td>
+        <td class="text-end">{{ r.prixachatht|fmt_da if r.prixachatht is not none else "—" }}</td>
+        <td class="text-end fw-bold">{{ r.valeur|fmt_da }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="text-muted text-center">Aucune donnée</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

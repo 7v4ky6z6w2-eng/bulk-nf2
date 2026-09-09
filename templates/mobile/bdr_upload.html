@@ -1,0 +1,22 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Import BDR — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-3">Importer un Bon de Réception</h5>
+{% if error %}<div class="alert alert-danger py-2">{{ error }}</div>{% endif %}
+<form method="post" action="{{ url_for('mobile.bdr_upload') }}" enctype="multipart/form-data">
+  <div class="mb-3">
+    <label class="form-label">Magasin</label>
+    <select name="store_id" class="form-select form-select-lg" required>
+      {% for s in stores %}
+      <option value="{{ s.id }}">{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Fichier (Excel ou PDF)</label>
+    <input type="file" name="file" accept=".xlsx,.xlsm,.pdf" class="form-control form-control-lg" required>
+    <div class="form-text">Photo/scan du bon en PDF, ou fichier Excel du fournisseur.</div>
+  </div>
+  <button type="submit" class="btn btn-success btn-lg-block">Analyser le fichier</button>
+</form>
+{% endblock %}

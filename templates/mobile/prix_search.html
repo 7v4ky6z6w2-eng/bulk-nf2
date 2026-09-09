@@ -1,0 +1,31 @@
+{% extends "mobile/base_m.html" %}
+{% block title %}Prix — PrimeNF Mobile{% endblock %}
+{% block content %}
+<h5 class="mb-3">Modifier un prix</h5>
+<form method="get" class="d-flex gap-2 mb-3">
+  <input type="text" name="q" value="{{ q }}" class="form-control form-control-lg"
+         placeholder="Référence ou désignation…" autofocus>
+  <button type="submit" class="btn btn-primary">🔍</button>
+</form>
+
+{% if q and not results %}
+<p class="text-muted">Aucun article trouvé.</p>
+{% endif %}
+
+<div class="list-group">
+  {% for item in results %}
+  <a href="{{ url_for('mobile.prix_edit_form', ref=item.ref, match_key=item.match_key) }}"
+     class="list-group-item list-group-item-action bg-dark m-card">
+    <div class="d-flex justify-content-between">
+      <strong>{{ item.ref }}</strong>
+      <span class="text-muted small">
+        {% for sid, p in item.prices.items() %}
+          {{ store_names.get(sid, sid) }}: {{ "%.2f"|format(p) if p is not none else "—" }}&nbsp;
+        {% endfor %}
+      </span>
+    </div>
+    <div class="text-muted">{{ item.designation }}</div>
+  </a>
+  {% endfor %}
+</div>
+{% endblock %}
