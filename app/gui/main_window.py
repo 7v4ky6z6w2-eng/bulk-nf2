@@ -4,12 +4,14 @@ Kept intentionally simple -- this is a config/preview/log tool for one
 person, not a product.
 """
 
+import os
 import platform
 import sys
 
-from PySide6.QtCore import QDate, Qt, QThread, Signal
+from PySide6.QtCore import QDate, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFrame, QGridLayout,
+    QProgressBar, QStackedWidget, QComboBox, QDateEdit,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
@@ -17,6 +19,10 @@ from PySide6.QtWidgets import (
 
 from app import diagnostics
 from app.config import load_config, save_config
+from app.gui.theme import (
+    STYLESHEET, CollapsibleSection, action_card, banner, hint, page_header,
+    scroll_page, style_buttons, tidy_labels,
+)
 from app.sync.engine import render_report_lines, run_sync, write_dry_run_payloads
 from app.sync.name_resync import run_name_resync
 from app.sync.order_importer import fix_duplicate_orders, run_order_import
@@ -399,23 +405,212 @@ class MainWindow(QMainWindow):
         self.apply_sku_worker = None
         self.yalidine_worker = None
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_config_tab(), "Configuration")
-        tabs.addTab(self._build_sync_tab(), "Sync")
-        tabs.addTab(self._build_stock_sync_tab(), "Stock Sync")
-        tabs.addTab(self._build_orders_tab(), "Orders")
-        tabs.addTab(self._build_profit_tab(), "Profit")
-        tabs.addTab(self._build_yalidine_tab(), "Yalidine")
-        tabs.addTab(self._build_schedule_tab(), "Schedule")
-        self.setCentralWidget(tabs)
+        self._conns_ok = False
+        self._build_shell()
         self.statusBar().showMessage("Ready.")
+
+    # -- Shell: sidebar navigation + stacked pages ----------------------------
+    # (key, sidebar label, page title, page subtitle, builder method name)
+    _PAGES = [
+        ("home", "Home", "Welcome", "Everything you need, in the order you'll need it.", None),
+        ("setup", "Connections", "Connections",
+         "Tell the tool where your NetFact2 database and your online store are.",
+         "_build_config_tab"),
+        ("products", "Products", "Products",
+         "Send your NetFact2 articles (names, prices, photos) to your online store.",
+         "_build_sync_tab"),
+        ("stock", "Stock", "Stock",
+         "Keep the quantities on your store matching NetFact2.", "_build_stock_sync_tab"),
+        ("orders", "Orders", "Orders",
+         "Bring store orders into NetFact2 as delivery notes, and fix problems.",
+         "_build_orders_tab"),
+        ("profit", "Profit", "Profit check",
+         "Add up what your web deliveries cost you, to see your real profit.",
+         "_build_profit_tab"),
+        ("courier", "Courier (Yalidine)", "Courier check",
+         "Find where a gap between Yalidine and NetFact2 comes from.",
+         "_build_yalidine_tab"),
+        ("schedule", "Automation", "Automation",
+         "Let the tool run by itself on a schedule, without opening it.",
+         "_build_schedule_tab"),
+    ]
+
+    def _build_shell(self):
+        self.setStyleSheet(STYLESHEET)
+        self.setWindowTitle("NetFact2 \u2194 Online Store")
+        self.resize(1180, 780)
+
+        root = QWidget()
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(210)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(0, 0, 0, 12)
+        side.setSpacing(0)
+        brand = QLabel("NetFact2 \u2194 Store")
+        brand.setObjectName("brand")
+        side.addWidget(brand)
+        sub = QLabel("Keep your shop and ERP in sync")
+        sub.setObjectName("brandSub")
+        side.addWidget(sub)
+
+        self.stack = QStackedWidget()
+        self._nav_buttons = {}
+        self._page_index = {}
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        sections = {"home": None, "setup": "GET STARTED", "products": "DAY TO DAY",
+                    "profit": "ANALYSE", "schedule": "AUTOMATE"}
+        for key, label, title, subtitle, builder in self._PAGES:
+            if sections.get(key):
+                sec = QLabel(sections[key])
+                sec.setObjectName("navSection")
+                side.addWidget(sec)
+            btn = QPushButton(label)
+            btn.setObjectName("nav")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            group.addButton(btn)
+            side.addWidget(btn)
+            self._nav_buttons[key] = btn
+            if key == "home":
+                inner = self._build_home_page()
+            else:
+                inner = QWidget()
+                lay = QVBoxLayout(inner)
+                lay.addWidget(page_header(title, subtitle))
+                lay.addWidget(getattr(self, builder)(), 1)
+            tidy_labels(inner)
+            style_buttons(inner)
+            self._page_index[key] = self.stack.addWidget(scroll_page(inner))
+            btn.clicked.connect(lambda _=False, k=key: self.go_to(k))
+        side.addStretch()
+        outer.addWidget(sidebar)
+        outer.addWidget(self.stack, 1)
+        self.setCentralWidget(root)
+
+        self.busy_bar = QProgressBar()
+        self.busy_bar.setRange(0, 0)
+        self.busy_bar.setFixedWidth(140)
+        self.busy_bar.hide()
+        self.statusBar().addPermanentWidget(self.busy_bar)
+        self._busy_timer = QTimer(self)
+        self._busy_timer.timeout.connect(self._update_busy)
+        self._busy_timer.start(400)
+
+        self.go_to("home")
+
+    def go_to(self, key):
+        self._nav_buttons[key].setChecked(True)
+        self.stack.setCurrentIndex(self._page_index[key])
+        if key == "home":
+            self._refresh_home()
+
+    def _update_busy(self):
+        running = any(
+            isinstance(w, QThread) and w.isRunning()
+            for name, w in vars(self).items() if name.endswith("worker")
+        )
+        self.busy_bar.setVisible(running)
+        if running:
+            self.statusBar().showMessage("Working\u2026 you can keep using other pages.")
+        elif self.statusBar().currentMessage().startswith("Working"):
+            self.statusBar().showMessage("Ready.")
+
+    # -- Home page --------------------------------------------------------------
+    def _build_home_page(self):
+        widget = QWidget()
+        lay = QVBoxLayout(widget)
+        lay.addWidget(page_header(
+            "Welcome \U0001F44B",
+            "This tool connects NetFact2 (your ERP) with your online shop. "
+            "Follow the steps below the first time \u2014 after that, everything "
+            "can run by itself.",
+        ))
+
+        self.home_checklist = QGroupBox("Getting started")
+        self.home_check_layout = QVBoxLayout(self.home_checklist)
+        self.home_check_labels = []
+        for _ in range(4):
+            lbl = QLabel()
+            lbl.setTextFormat(Qt.RichText)
+            self.home_check_layout.addWidget(lbl)
+            self.home_check_labels.append(lbl)
+        row = QHBoxLayout()
+        self.home_setup_btn = QPushButton("Open Connections")
+        self.home_setup_btn.clicked.connect(lambda: self.go_to("setup"))
+        self.home_test_btn = QPushButton("Test connections now")
+        self.home_test_btn.clicked.connect(self._start_test_connection)
+        row.addWidget(self.home_setup_btn)
+        row.addWidget(self.home_test_btn)
+        row.addStretch()
+        self.home_check_layout.addLayout(row)
+        lay.addWidget(self.home_checklist)
+
+        lay.addWidget(hint("What do you want to do?"))
+        grid = QGridLayout()
+        grid.setSpacing(14)
+        cards = [
+            ("Send products to the store",
+             "Push names, prices and photos from NetFact2 to your shop.",
+             "Go to Products", "products"),
+            ("Update stock",
+             "Make shop quantities match NetFact2. Quick and safe to repeat.",
+             "Go to Stock", "stock"),
+            ("Import store orders",
+             "Turn new web orders into delivery notes in NetFact2.",
+             "Go to Orders", "orders"),
+            ("Check my profit",
+             "Total the cost of web deliveries to see what you really earned.",
+             "Go to Profit", "profit"),
+            ("Chase a Yalidine gap",
+             "Compare courier deliveries with NetFact2, order by order.",
+             "Go to Courier check", "courier"),
+            ("Run automatically",
+             "Schedule syncs so you never have to remember.",
+             "Go to Automation", "schedule"),
+        ]
+        for i, (title, text, btn_text, key) in enumerate(cards):
+            grid.addWidget(action_card(title, text, btn_text, lambda _=False, k=key: self.go_to(k)),
+                           i // 3, i % 3)
+        lay.addLayout(grid)
+        lay.addWidget(hint(
+            "Tip: every action that changes something has a Preview button "
+            "next to it. Preview first \u2014 it shows what would happen "
+            "without touching anything."
+        ))
+        lay.addStretch()
+        return widget
+
+    def _refresh_home(self):
+        db_ok = os.path.isfile(self.db_path.text().strip())
+        wc_ok = bool(self.wc_url.text().strip() and self.wc_key.text().strip()
+                     and self.wc_secret.text().strip())
+        steps = [
+            (db_ok, "Choose your NetFact2 database file",
+             "Connections \u2192 Database path"),
+            (wc_ok, "Enter your online store address and API keys",
+             "Connections \u2192 WooCommerce"),
+            (self._conns_ok, "Test that both connections work",
+             "Press \u201cTest connections now\u201d"),
+            (self._conns_ok and bool(self.cfg["state_db_path"]),
+             "You're ready \u2014 pick a task below", ""),
+        ]
+        for lbl, (done, text, where) in zip(self.home_check_labels, steps):
+            icon = "<span style='color:#16a34a'>\u2714</span>" if done else "<span style='color:#9ca3af'>\u25CB</span>"
+            extra = f" <span style='color:#6b7280'>\u2014 {where}</span>" if where and not done else ""
+            lbl.setText(f"{icon}&nbsp; {text}{extra}")
 
     # -- Configuration tab ----------------------------------------------------
     def _build_config_tab(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        fb_group = QGroupBox("Firebird database (.FDB)")
+        fb_group = QGroupBox("1. Your NetFact2 database")
         fb_form = QFormLayout(fb_group)
         self.db_path = QLineEdit(self.cfg["firebird"]["database"])
         browse_btn = QPushButton("Browse...")
@@ -443,7 +638,7 @@ class MainWindow(QMainWindow):
         fb_form.addRow("Charset:", self.fb_charset)
         layout.addWidget(fb_group)
 
-        sync_group = QGroupBox("Sync scope")
+        sync_group = QGroupBox("Product options (optional)")
         sync_form = QFormLayout(sync_group)
         self.filter_boutique = QCheckBox("Only sync articles whose family is BOUTIQ_VISIBLE")
         self.filter_boutique.setChecked(self.cfg["sync"]["filter_boutique_visible"])
@@ -470,7 +665,7 @@ class MainWindow(QMainWindow):
         sync_form.addRow(self.auto_sale_on_price_drop)
         layout.addWidget(sync_group)
 
-        wc_group = QGroupBox("WooCommerce REST API")
+        wc_group = QGroupBox("2. Your online store (WooCommerce)")
         wc_form = QFormLayout(wc_group)
         self.wc_url = QLineEdit(self.cfg["woocommerce"]["site_url"])
         self.wc_url.setToolTip("e.g. https://your-store.com")
@@ -506,7 +701,7 @@ class MainWindow(QMainWindow):
         yal_form.addRow(QLabel("Yalidine dashboard -> Settings -> API -> Generate."))
         layout.addWidget(yal_group)
 
-        test_group = QGroupBox("Test connections")
+        test_group = QGroupBox("3. Check everything works")
         test_layout = QVBoxLayout(test_group)
         self.test_conn_btn = QPushButton("Test connections now")
         self.test_conn_btn.clicked.connect(self._start_test_connection)
@@ -542,6 +737,10 @@ class MainWindow(QMainWindow):
         self.fb_status_label.setStyleSheet(f"color: {'green' if fb['ok'] else 'red'};")
         self.wc_status_label.setText(f"WooCommerce: {'OK' if wc['ok'] else 'FAILED'} -- {wc['message']}")
         self.wc_status_label.setStyleSheet(f"color: {'green' if wc['ok'] else 'red'};")
+        self._conns_ok = bool(fb["ok"] and wc["ok"])
+        self._refresh_home()
+        self.statusBar().showMessage(
+            "Both connections work \u2714" if self._conns_ok else "A connection failed \u2014 see Connections.", 6000)
 
     def _test_connection_failed(self, message):
         self.test_conn_btn.setEnabled(True)
@@ -801,20 +1000,14 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(widget)
         oi_cfg = self.cfg["order_import"]
 
-        note = QLabel(
-            "Every run scans the FULL WooCommerce order history for the statuses\n"
-            "mapped below (or only orders on/after the date below, if set) --\n"
-            "there's no separate \"import past orders\" step. Each order is\n"
-            "written to Firebird as PIECE.REFDOC = 'WC-<order id>', and that\n"
-            "field is checked before creating anything, so re-running (or\n"
-            "scheduling this to run repeatedly) never creates a duplicate\n"
-            "document for an order that was already imported."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #555;")
-        layout.addWidget(note)
+        layout.addWidget(banner(
+            "How it works: each store order becomes one delivery note in NetFact2. "
+            "Running it again never creates duplicates \u2014 orders already imported are "
+            "skipped. Fill in the client and warehouse below, then press "
+            "\u201cDry run\u201d to preview before importing for real."
+        ))
 
-        cfg_group = QGroupBox("WooCommerce order -> Firebird document mapping")
+        cfg_group = QGroupBox("Where imported orders go")
         form = QFormLayout(cfg_group)
         self.order_client_code = QLineEdit(oi_cfg["client_code"])
         self.order_client_code.setToolTip("TIERS.CODE_TIERS the generated PIECE is billed to.")
@@ -899,7 +1092,7 @@ class MainWindow(QMainWindow):
         status_btn_row.addWidget(remove_status_btn)
         status_btn_row.addStretch()
         mapping_layout.addLayout(status_btn_row)
-        layout.addWidget(mapping_group)
+        layout.addWidget(CollapsibleSection("Advanced: which store status creates which NetFact2 document", mapping_group, expanded=False))
         for wc_status, code in oi_cfg["status_mapping"].items():
             self._add_status_mapping_row(wc_status, code)
 
@@ -925,7 +1118,7 @@ class MainWindow(QMainWindow):
         transform_btn_row.addWidget(remove_transform_btn)
         transform_btn_row.addStretch()
         transform_layout.addLayout(transform_btn_row)
-        layout.addWidget(transform_group)
+        layout.addWidget(CollapsibleSection("Advanced: link delivery notes back to their order", transform_group, expanded=False))
         for target, source in oi_cfg["transformation"].items():
             self._add_transform_row(target, source)
 
@@ -1018,7 +1211,7 @@ class MainWindow(QMainWindow):
         fix_btn_row.addWidget(self.fix_duplicates_btn)
         fix_btn_row.addStretch()
         diag_layout.addLayout(fix_btn_row)
-        layout.addWidget(diag_group)
+        layout.addWidget(CollapsibleSection("Troubleshooting and clean-up tools", diag_group, expanded=False))
 
         sku_group = QGroupBox("Products missing a SKU (why some deliveries never made it into NetFact2)")
         sku_layout = QVBoxLayout(sku_group)
@@ -1059,7 +1252,7 @@ class MainWindow(QMainWindow):
         sku_apply_row.addWidget(self.apply_sku_fix_btn)
         sku_apply_row.addStretch()
         sku_layout.addLayout(sku_apply_row)
-        layout.addWidget(sku_group)
+        layout.addWidget(CollapsibleSection("Fix products that have no reference (SKU)", sku_group, expanded=True))
 
         btn_row = QHBoxLayout()
         self.order_dry_run_btn = QPushButton("Dry run (preview only)")
@@ -1491,7 +1684,7 @@ class MainWindow(QMainWindow):
         note.setStyleSheet("color: #555;")
         layout.addWidget(note)
 
-        cfg_group = QGroupBox("What to consolidate")
+        cfg_group = QGroupBox("Steps: 1. list types  2. choose  3. preview  4. create")
         form = QFormLayout(cfg_group)
         self.profit_source_client = QLineEdit(self.cfg["order_import"]["client_code"])
         self.profit_source_client.setToolTip(
